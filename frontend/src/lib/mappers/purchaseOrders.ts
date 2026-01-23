@@ -10,16 +10,20 @@ export type PurchaseOrderSummaryDTO = {
 
 export type PurchaseOrderItemDTO = {
   id: number;
+  artikl: number;
   artikl_name?: string | null;
   base_group?: string | null;
   quantity: string;
   unit_name?: string | null;
+  unit_of_measure: number;
   price?: string | null;
 };
 
 export type PurchaseOrderDTO = {
   id: number;
+  supplier: number;
   supplier_name?: string | null;
+  status: string;
   status_display?: string | null;
   ordered_at: string;
   total_net?: string;
@@ -43,16 +47,20 @@ export type PurchaseOrderSummary = {
 
 export type PurchaseOrderItem = {
   id: number;
+  artiklId: number;
   name: string;
   baseGroup: string | null;
   quantity: number;
   unitName: string;
+  unitId: number;
   price: number | null;
 };
 
 export type PurchaseOrder = {
   id: number;
+  supplierId: number;
   supplierName: string;
+  statusCode: string;
   statusLabel: string;
   orderedAt: Date;
   totalNet: number;
@@ -73,16 +81,20 @@ export const mapPurchaseOrderItem = (
   item: PurchaseOrderItemDTO
 ): PurchaseOrderItem => ({
   id: item.id,
+  artiklId: item.artikl,
   name: item.artikl_name || "Artikl",
   baseGroup: item.base_group || null,
   quantity: toNumber(item.quantity, 0),
   unitName: item.unit_name || "",
+  unitId: item.unit_of_measure,
   price: item.price === null || item.price === undefined ? null : toNumber(item.price, 0),
 });
 
 export const mapPurchaseOrder = (order: PurchaseOrderDTO): PurchaseOrder => ({
   id: order.id,
+  supplierId: order.supplier,
   supplierName: order.supplier_name || "Dobavljac",
+  statusCode: order.status,
   statusLabel: order.status_display || "Status",
   orderedAt: new Date(order.ordered_at),
   totalNet: toNumber(order.total_net, 0),

@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DM_Serif_Display } from "next/font/google";
 import Link from "next/link";
-import { useParams } from "next/navigation";
-import { apiGetJson } from "@/lib/api";
+import { useParams, useRouter } from "next/navigation";
+import { apiGetJson, apiPostJson } from "@/lib/api";
 import { formatDate, formatEuro } from "@/lib/format";
 import EmptyState from "@/components/EmptyState";
 import LoadingCard from "@/components/LoadingCard";
@@ -18,32 +18,38 @@ const dmSerif = DM_Serif_Display({ subsets: ["latin"], weight: "400" });
 
 export default function PurchaseOrderDetailPage() {
   const params = useParams();
+  const router = useRouter();
   const id = params?.id as string;
   const [order, setOrder] = useState<PurchaseOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const groupRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [activeGroupIndex, setActiveGroupIndex] = useState(0);
+  const [showStatusPrompt, setShowStatusPrompt] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState("");
 
-  useEffect(() => {
-    const run = async () => {
-      setLoading(true);
-      setError("");
-      try {
-        const data = await apiGetJson<PurchaseOrderDTO>(
-          `/api/purchase-orders/${id}/`
-        );
-        setOrder(mapPurchaseOrder(data));
-      } catch (err) {
-        setError("Ne mogu ucitati purchase order.");
-      } finally {
-        setLoading(false);
-      }
-    };
-    if (id) {
-      run();
+  const loadOrder = useCallback(async () => {
+    if (!id) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      const data = await apiGetJson<PurchaseOrderDTO>(
+        `/api/purchase-orders/${id}/`
+      );
+      setOrder(mapPurchaseOrder(data));
+    } catch (err) {
+      setError("Ne mogu ucitati purchase order.");
+    } finally {
+      setLoading(false);
     }
   }, [id]);
+
+  useEffect(() => {
+    loadOrder();
+  }, [loadOrder]);
 
   const groupedItems = useMemo(() => {
     const items = order?.items || [];
@@ -135,6 +141,7 @@ export default function PurchaseOrderDetailPage() {
                 {
                   label: "Status",
                   value: order.statusLabel,
+                  clickable: order.statusCode === "created",
                 },
                 {
                   label: "Datum",
@@ -143,17 +150,32 @@ export default function PurchaseOrderDetailPage() {
                     timeStyle: "short",
                   }),
                 },
-              ].map((card) => (
-                <div
-                  key={card.label}
-                  className="rounded-2xl border border-black/15 bg-white/80 p-5 shadow-[0_18px_40px_rgba(10,10,10,0.18)] backdrop-blur"
-                >
-                  <p className="text-xs uppercase tracking-[0.2em] text-black/50">
-                    {card.label}
-                  </p>
-                  <p className="mt-3 text-lg font-semibold">{card.value}</p>
-                </div>
-              ))}
+              ].map((card) => {
+                const isClickable = Boolean(card.clickable);
+                return (
+                  <button
+                    key={card.label}
+                    type="button"
+                    onClick={() => {
+                      if (isClickable) {
+                        setShowStatusPrompt(true);
+                        setSendError("");
+                      }
+                    }}
+                    className={`rounded-2xl border border-black/15 bg-white/80 p-5 text-left shadow-[0_18px_40px_rgba(10,10,10,0.18)] backdrop-blur transition ${
+                      isClickable
+                        ? "hover:border-black/40"
+                        : "cursor-default"
+                    }`}
+                    disabled={!isClickable}
+                  >
+                    <p className="text-xs uppercase tracking-[0.2em] text-black/50">
+                      {card.label}
+                    </p>
+                    <p className="mt-3 text-lg font-semibold">{card.value}</p>
+                  </button>
+                );
+              })}
             </section>
 
             <section className="rounded-3xl border border-black/15 bg-white/85 p-6 shadow-[0_26px_60px_rgba(10,10,10,0.2)] backdrop-blur">
@@ -224,6 +246,12 @@ export default function PurchaseOrderDetailPage() {
                             {item.quantity} {item.unitName || ""} ·{" "}
                             {formatEuro(item.price)}
                           </p>
+                          <p className="mt-1 text-xs text-black/60">
+                            Ukupno:{" "}
+                            {item.price !== null
+                              ? formatEuro(item.quantity * item.price)
+                              : "-"}
+                          </p>
                         </div>
                       ))}
                     </div>
@@ -265,6 +293,62 @@ export default function PurchaseOrderDetailPage() {
           </>
         ) : null}
       </div>
+      {showStatusPrompt && order ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-6">
+          <div className="w-full max-w-md rounded-3xl border border-black/15 bg-white p-6 shadow-[0_30px_60px_rgba(10,10,10,0.3)]">
+            <h3 className={`${dmSerif.className} text-2xl`}>
+              Status narudžbe
+            </h3>
+            <p className="mt-2 text-sm text-black/60">
+              Želiš li urediti narudžbu ili je poslati dobavljaču?
+            </p>
+            {sendError ? (
+              <p className="mt-3 text-sm text-red-600">{sendError}</p>
+            ) : null}
+            <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+              <button
+                onClick={() => setShowStatusPrompt(false)}
+                className="flex-1 rounded-full border border-black/20 px-4 py-2 text-xs uppercase tracking-[0.2em] text-black/70"
+              >
+                Zatvori
+              </button>
+              <Link
+                href={`/purchase-orders/${order.id}/edit`}
+                className="flex-1 rounded-full border border-black/20 px-4 py-2 text-center text-xs uppercase tracking-[0.2em] text-black/70"
+              >
+                Uredi
+              </Link>
+              <button
+                onClick={async () => {
+                  setSending(true);
+                  setSendError("");
+                  try {
+                    await apiPostJson(
+                      `/api/purchase-orders/${order.id}/send/`,
+                      undefined,
+                      { csrf: true }
+                    );
+                    setShowStatusPrompt(false);
+                    await loadOrder();
+                  } catch (err) {
+                    setSendError(
+                      err instanceof Error
+                        ? err.message
+                        : "Slanje narudzbe nije uspjelo."
+                    );
+                  } finally {
+                    setSending(false);
+                  }
+                }}
+                disabled={sending}
+                className="flex-1 rounded-full bg-[#f27323] px-4 py-2 text-xs uppercase tracking-[0.2em] text-black shadow-[0_12px_24px_rgba(242,115,35,0.35)] disabled:opacity-60"
+              >
+                {sending ? "Slanje..." : "Pošalji"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }

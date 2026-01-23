@@ -3,8 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { DM_Serif_Display } from "next/font/google";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { apiGetJson, apiPostJson } from "@/lib/api";
+import { useParams, useRouter } from "next/navigation";
+import { apiGetJson, apiPutJson } from "@/lib/api";
 import { formatEuro } from "@/lib/format";
 import {
   mapSupplierArtikli,
@@ -13,13 +13,26 @@ import {
   SupplierArtikl,
   SupplierArtiklDTO,
   SupplierDTO,
+  PurchaseOrderDTO,
+  mapPurchaseOrder,
 } from "@/lib/mappers";
 
 const dmSerif = DM_Serif_Display({ subsets: ["latin"], weight: "400" });
 
-type CartItem = SupplierArtikl & { key: string; quantity: string };
+type CartItem = {
+  key: string;
+  artiklId: number;
+  unitId: number;
+  name: string;
+  unitName: string;
+  price: number | null;
+  quantity: string;
+};
 
-export default function NewPurchaseOrderPage() {
+export default function EditPurchaseOrderPage() {
+  const params = useParams();
+  const router = useRouter();
+  const id = params?.id as string;
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [supplierId, setSupplierId] = useState("");
   const [artikli, setArtikli] = useState<SupplierArtikl[]>([]);
@@ -29,21 +42,16 @@ export default function NewPurchaseOrderPage() {
   const [error, setError] = useState("");
   const [saveError, setSaveError] = useState("");
   const [saving, setSaving] = useState(false);
-  const [savedId, setSavedId] = useState<number | null>(null);
-  const [showSendPrompt, setShowSendPrompt] = useState(false);
-  const [sendingEmail, setSendingEmail] = useState(false);
-  const [sendError, setSendError] = useState("");
-  const [sendSuccess, setSendSuccess] = useState("");
+  const [toast, setToast] = useState<{
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
   const groupRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const itemRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const quantityRefs = useRef<Record<string, HTMLInputElement | null>>({});
   const [activeGroupIndex, setActiveGroupIndex] = useState(0);
   const pageEndRef = useRef<HTMLDivElement | null>(null);
-  const [toast, setToast] = useState<{
-    type: "success" | "error";
-    message: string;
-  } | null>(null);
-  const router = useRouter();
+  const [initialLoadDone, setInitialLoadDone] = useState(false);
 
   useEffect(() => {
     const run = async () => {
@@ -56,6 +64,39 @@ export default function NewPurchaseOrderPage() {
     };
     run();
   }, []);
+
+  useEffect(() => {
+    const run = async () => {
+      if (!id) return;
+      try {
+        const data = await apiGetJson<PurchaseOrderDTO>(
+          `/api/purchase-orders/${id}/`
+        );
+        const order = mapPurchaseOrder(data);
+        setSupplierId(String(order.supplierId));
+        const nextCart: CartItem[] = order.items.map((item) => ({
+          key: `${item.artiklId}-${item.unitId}`,
+          artiklId: item.artiklId,
+          unitId: item.unitId,
+          name: item.name,
+          unitName: item.unitName,
+          price: item.price,
+          quantity: String(item.quantity),
+        }));
+        setCart(nextCart);
+        setQuantities(
+          nextCart.reduce<Record<string, string>>((acc, item) => {
+            acc[item.key] = item.quantity;
+            return acc;
+          }, {})
+        );
+        setInitialLoadDone(true);
+      } catch (err) {
+        setError("Ne mogu ucitati narudzbu.");
+      }
+    };
+    run();
+  }, [id]);
 
   useEffect(() => {
     const run = async () => {
@@ -96,7 +137,18 @@ export default function NewPurchaseOrderPage() {
           entry.key === key ? { ...entry, quantity: qty } : entry
         );
       }
-      return [...prev, { ...item, key, quantity: qty }];
+      return [
+        ...prev,
+        {
+          key,
+          artiklId: item.id,
+          unitId: item.unitId,
+          name: item.name,
+          unitName: item.unitName || "",
+          price: item.price ?? null,
+          quantity: qty,
+        },
+      ];
     });
     setToast({ type: "success", message: "Artikl dodan." });
     setTimeout(() => setToast(null), 2000);
@@ -112,58 +164,6 @@ export default function NewPurchaseOrderPage() {
       delete next[key];
       return next;
     });
-  };
-
-  const handleCreate = async () => {
-    if (!supplierId) {
-      setSaveError("Odaberi dobavljaca prije spremanja.");
-      return;
-    }
-    if (cart.length === 0) {
-      setSaveError("Dodaj barem jednu stavku.");
-      return;
-    }
-    setSaveError("");
-    setSaving(true);
-    try {
-      const payload = await apiPostJson<{ id?: number }>(
-        "/api/purchase-orders/",
-        {
-          supplier: Number(supplierId),
-          items: cart.map((item) => ({
-            artikl: item.id,
-            unit_of_measure: item.unitId,
-            quantity: item.quantity,
-            price: item.price ?? null,
-          })),
-        },
-        { csrf: true }
-      );
-      setSavedId(payload?.id || null);
-      setCart([]);
-      setShowSendPrompt(true);
-    } catch (err) {
-      const data =
-        err && typeof err === "object" && "data" in err
-          ? (err as { data?: unknown }).data
-          : null;
-      if (data && typeof data === "object") {
-        const detail =
-          "detail" in data &&
-          typeof (data as { detail?: unknown }).detail === "string"
-            ? (data as { detail?: string }).detail
-            : Object.entries(data)
-                .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
-                .join("; ");
-        setSaveError(detail || "Neuspjesno spremanje purchase ordera.");
-      } else if (err instanceof Error) {
-        setSaveError(err.message || "Neuspjesno spremanje purchase ordera.");
-      } else {
-        setSaveError("Neuspjesno spremanje purchase ordera.");
-      }
-    } finally {
-      setSaving(false);
-    }
   };
 
   const cartTotal = useMemo(() => {
@@ -191,7 +191,7 @@ export default function NewPurchaseOrderPage() {
           .slice()
           .sort((a, b) => a.name.localeCompare(b.name, "hr", { sensitivity: "base" })),
       ])
-      .sort(([a], [b]) => (a as string).localeCompare(b as string, "hr", { sensitivity: "base" }));
+      .sort(([a], [b]) => a.localeCompare(b, "hr", { sensitivity: "base" }));
   }, [artikli]);
 
   useEffect(() => {
@@ -213,8 +213,7 @@ export default function NewPurchaseOrderPage() {
     );
 
     groupedArtikli.forEach(([group], index) => {
-      const groupKey = group as string;
-      const node = groupRefs.current[groupKey];
+      const node = groupRefs.current[group];
       if (node) {
         node.setAttribute("data-index", String(index));
         observer.observe(node);
@@ -225,37 +224,42 @@ export default function NewPurchaseOrderPage() {
   }, [groupedArtikli]);
 
   const activeGroupLabel =
-    (groupedArtikli[activeGroupIndex]?.[0] as string) || "Ostalo";
+    groupedArtikli[activeGroupIndex]?.[0] || "Ostalo";
 
-  const handleSend = async () => {
-    if (!savedId) {
+  const handleSave = async () => {
+    if (!supplierId) {
+      setSaveError("Odaberi dobavljaca prije spremanja.");
       return;
     }
-    setSendingEmail(true);
-    setSendError("");
-    setSendSuccess("");
+    if (cart.length === 0) {
+      setSaveError("Dodaj barem jednu stavku.");
+      return;
+    }
+    setSaveError("");
+    setSaving(true);
     try {
-      await apiPostJson(
-        `/api/purchase-orders/${savedId}/send/`,
-        undefined,
+      await apiPutJson(
+        `/api/purchase-orders/${id}/`,
+        {
+          supplier: Number(supplierId),
+          items: cart.map((item) => ({
+            artikl: item.artiklId,
+            unit_of_measure: item.unitId,
+            quantity: item.quantity,
+            price: item.price ?? null,
+          })),
+        },
         { csrf: true }
       );
-      const successMessage = "Narudzba je poslana dobavljacu.";
-      setSendSuccess(successMessage);
-      setToast({ type: "success", message: successMessage });
-      setShowSendPrompt(false);
-      setTimeout(() => {
-        router.push(`/purchase-orders/${savedId}`);
-      }, 1200);
+      router.push(`/purchase-orders/${id}`);
     } catch (err) {
-      const detail =
+      setSaveError(
         err instanceof Error
           ? err.message
-          : "Slanje narudzbe nije uspjelo.";
-      setSendError(detail);
-      setToast({ type: "error", message: detail });
+          : "Neuspjesno spremanje narudzbe."
+      );
     } finally {
-      setSendingEmail(false);
+      setSaving(false);
     }
   };
 
@@ -278,16 +282,18 @@ export default function NewPurchaseOrderPage() {
         <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div className="space-y-2">
             <p className="text-sm uppercase tracking-[0.3em] text-black/60">
-              Nova Narudžba
+              Uredi purchase order
             </p>
-            
+            <h1 className={`${dmSerif.className} text-4xl`}>PO-{id}</h1>
           </div>
-          <Link
-            href="/purchase-orders"
-            className="rounded-full border border-black/20 px-5 py-2 text-xs uppercase tracking-[0.2em] text-black/70"
-          >
-            Povratak
-          </Link>
+          <div className="flex items-center gap-3">
+            <Link
+              href={`/purchase-orders/${id}`}
+              className="rounded-full border border-black/20 px-5 py-2 text-xs uppercase tracking-[0.2em] text-black/70"
+            >
+              Povratak
+            </Link>
+          </div>
         </header>
 
         <section className="rounded-3xl border border-black/15 bg-white/85 p-6 shadow-[0_26px_60px_rgba(10,10,10,0.2)] backdrop-blur">
@@ -296,7 +302,13 @@ export default function NewPurchaseOrderPage() {
           </label>
           <select
             value={supplierId}
-            onChange={(event) => setSupplierId(event.target.value)}
+            onChange={(event) => {
+              setSupplierId(event.target.value);
+              if (initialLoadDone) {
+                setCart([]);
+                setQuantities({});
+              }
+            }}
             className="mt-2 w-full rounded-xl border border-black/20 bg-white px-4 py-3 text-sm"
           >
             <option value="">Odaberi dobavljaca...</option>
@@ -324,7 +336,7 @@ export default function NewPurchaseOrderPage() {
                 <button
                   onClick={() => {
                     const next = Math.max(activeGroupIndex - 1, 0);
-                    const label = groupedArtikli[next]?.[0] as string;
+                    const label = groupedArtikli[next]?.[0];
                     if (label && groupRefs.current[label]) {
                       groupRefs.current[label]?.scrollIntoView({
                         behavior: "smooth",
@@ -345,7 +357,7 @@ export default function NewPurchaseOrderPage() {
                       activeGroupIndex + 1,
                       groupedArtikli.length - 1
                     );
-                    const label = groupedArtikli[next]?.[0] as string;
+                    const label = groupedArtikli[next]?.[0];
                     if (label && groupRefs.current[label]) {
                       groupRefs.current[label]?.scrollIntoView({
                         behavior: "smooth",
@@ -362,21 +374,21 @@ export default function NewPurchaseOrderPage() {
             <div className="space-y-4">
               {groupedArtikli.map(([group, items]) => (
                 <div
-                  key={group as string}
+                  key={group}
                   ref={(node) => {
-                    groupRefs.current[group as string] = node;
+                    groupRefs.current[group] = node;
                   }}
                   className="space-y-3"
                 >
                   <div className="flex items-center justify-between">
                     <p className="text-xs uppercase tracking-[0.25em] text-black/50">
-                      {group as string}
+                      {group}
                     </p>
                     <span className="text-xs text-black/50">
                       {items.length} artikala
                     </span>
                   </div>
-                  {(items as SupplierArtikl[]).map((item) => {
+                  {items.map((item) => {
                     const key = `${item.id}-${item.unitId ?? "none"}`;
                     return (
                       <div
@@ -468,7 +480,7 @@ export default function NewPurchaseOrderPage() {
           <div className="rounded-3xl border border-black/15 bg-white/85 p-6 shadow-[0_26px_60px_rgba(10,10,10,0.2)]">
             <h2 className={`${dmSerif.className} text-2xl`}>Stavke</h2>
             <p className="mt-2 text-sm text-black/60">
-              Dodane stavke na novi purchase order.
+              Stavke u narudzbi.
             </p>
             <div className="mt-4 space-y-3">
               {cart.map((item) => (
@@ -526,23 +538,12 @@ export default function NewPurchaseOrderPage() {
             {saveError ? (
               <p className="mt-3 text-sm text-red-600">{saveError}</p>
             ) : null}
-            {savedId ? (
-              <p className="mt-3 text-sm text-green-700">
-                Purchase order kreiran: PO-{savedId}
-              </p>
-            ) : null}
-            {sendError ? (
-              <p className="mt-3 text-sm text-red-600">{sendError}</p>
-            ) : null}
-            {sendSuccess ? (
-              <p className="mt-3 text-sm text-green-700">{sendSuccess}</p>
-            ) : null}
             <button
-              onClick={handleCreate}
+              onClick={handleSave}
               disabled={saving}
               className="mt-4 w-full rounded-full bg-[#f27323] px-4 py-3 text-xs uppercase tracking-[0.3em] text-black shadow-[0_12px_24px_rgba(242,115,35,0.35)] disabled:opacity-60"
             >
-              {saving ? "Spremanje..." : "Spremi Narudžbu"}
+              {saving ? "Spremanje..." : "Spremi izmjene"}
             </button>
           </div>
         </section>
@@ -559,33 +560,6 @@ export default function NewPurchaseOrderPage() {
         </button>
       ) : null}
       <div ref={pageEndRef} />
-      {showSendPrompt ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-6">
-          <div className="w-full max-w-md rounded-3xl border border-black/15 bg-white p-6 shadow-[0_30px_60px_rgba(10,10,10,0.3)]">
-            <h3 className={`${dmSerif.className} text-2xl`}>
-              Poslati narudzbu?
-            </h3>
-            <p className="mt-2 text-sm text-black/60">
-              Zelis li odmah poslati narudzbu dobavljacu emailom?
-            </p>
-            <div className="mt-6 flex gap-3">
-              <button
-                onClick={() => setShowSendPrompt(false)}
-                className="flex-1 rounded-full border border-black/20 px-4 py-2 text-xs uppercase tracking-[0.2em] text-black/70"
-              >
-                Ne
-              </button>
-              <button
-                onClick={handleSend}
-                disabled={sendingEmail}
-                className="flex-1 rounded-full bg-[#f27323] px-4 py-2 text-xs uppercase tracking-[0.2em] text-black shadow-[0_12px_24px_rgba(242,115,35,0.35)] disabled:opacity-60"
-              >
-                {sendingEmail ? "Slanje..." : "Da, posalji"}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
     </main>
   );
 }
