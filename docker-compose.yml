@@ -71,7 +71,7 @@ services:
     image: node:20-alpine
     container_name: mozzart-frontend
     working_dir: /app
-    command: sh -lc "npm install && npm run dev"
+    command: sh -lc "npm install && npm run build && npm run start -- -p 3000"
     volumes:
       - ./frontend:/app
     ports:
