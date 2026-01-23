@@ -1,8 +1,10 @@
+from datetime import date as date_cls
 from decimal import Decimal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models.base import DEFERRED
 from django.db.models import Q, Sum
 from django.utils import timezone
 
@@ -156,6 +158,13 @@ class JournalEntry(models.Model):
     date = models.DateField()
     description = models.CharField(max_length=500, blank=True, default="")
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.DRAFT)
+    reversed_entry = models.OneToOneField(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="reversal",
+    )
 
     posted_at = models.DateTimeField(null=True, blank=True)
     posted_by = models.ForeignKey(
@@ -170,8 +179,10 @@ class JournalEntry(models.Model):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._orig_status = self.status
-        self._orig_date = self.date
+        status = self.__dict__.get("status", DEFERRED)
+        date = self.__dict__.get("date", DEFERRED)
+        self._orig_status = None if status is DEFERRED else status
+        self._orig_date = None if date is DEFERRED else date
 
     class Meta:
         verbose_name = "Journal entry"
@@ -210,6 +221,17 @@ class JournalEntry(models.Model):
         is_update = self.pk is not None
 
         if is_update:
+            if self._orig_status is None or self._orig_date is None:
+                original = (
+                    JournalEntry.objects.filter(pk=self.pk)
+                    .values("status", "date")
+                    .first()
+                )
+                if original:
+                    if self._orig_status is None:
+                        self._orig_status = original.get("status")
+                    if self._orig_date is None:
+                        self._orig_date = original.get("date")
             if self._orig_status == self.Status.POSTED:
                 if self.status != self._orig_status:
                     raise ValidationError("Ne mozes mijenjati status proknjizene temeljnice.")
@@ -224,6 +246,11 @@ class JournalEntry(models.Model):
 
         self._orig_status = self.status
         self._orig_date = self.date
+
+    def delete(self, *args, **kwargs):
+        if self.status == self.Status.POSTED:
+            raise ValidationError("Ne mozes obrisati proknjizenu temeljnicu.")
+        return super().delete(*args, **kwargs)
 
     def is_balanced(self) -> bool:
         totals = self.items.aggregate(
@@ -264,6 +291,42 @@ class JournalEntry(models.Model):
     def __str__(self) -> str:
         return f"{self.ledger} #{self.number} ({self.date})"
 
+    def reverse(self, *, reverse_date: date_cls | None = None, user=None) -> "JournalEntry":
+        if self.status != self.Status.POSTED:
+            raise ValidationError("Mozes stornirati samo proknjizenu temeljnicu.")
+
+        if hasattr(self, "reversal"):
+            raise ValidationError("Ova temeljnica je vec stornirana.")
+
+        reverse_date = reverse_date or date_cls.today()
+
+        reversal = JournalEntry.objects.create(
+            ledger=self.ledger,
+            number=self._next_reversal_number(),
+            date=reverse_date,
+            description=f"Storno temeljnice #{self.number}",
+            status=self.Status.DRAFT,
+            reversed_entry=self,
+        )
+
+        for item in self.items.all():
+            JournalItem.objects.create(
+                entry=reversal,
+                account=item.account,
+                debit=item.credit,
+                credit=item.debit,
+                description=f"Storno: {item.description}",
+            )
+
+        reversal.post(user=user)
+        return reversal
+
+    def _next_reversal_number(self) -> int:
+        last = JournalEntry.objects.filter(ledger=self.ledger).aggregate(
+            max_number=models.Max("number")
+        )["max_number"]
+        return (last or 0) + 1
+
 
 class JournalItem(models.Model):
     entry = models.ForeignKey(JournalEntry, on_delete=models.CASCADE, related_name="items")
@@ -275,6 +338,10 @@ class JournalItem(models.Model):
     credit = models.DecimalField(max_digits=18, decimal_places=2, default=Decimal("0.00"))
 
     created_at = models.DateTimeField(auto_now_add=True)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._orig_entry_id = self.entry_id
 
     class Meta:
         verbose_name = "Journal item"
@@ -307,6 +374,30 @@ class JournalItem(models.Model):
 
         if self.entry_id and self.entry.status == JournalEntry.Status.POSTED:
             raise ValidationError("Ne mozes mijenjati stavke na proknjizenoj temeljnici.")
+
+    def save(self, *args, **kwargs):
+        if self.entry_id:
+            status = (
+                JournalEntry.objects.filter(pk=self.entry_id)
+                .values_list("status", flat=True)
+                .first()
+            )
+            if status == JournalEntry.Status.POSTED:
+                raise ValidationError("Ne mozes spremati stavke na proknjizenoj temeljnici.")
+
+        super().save(*args, **kwargs)
+        self._orig_entry_id = self.entry_id
+
+    def delete(self, *args, **kwargs):
+        if self.entry_id:
+            status = (
+                JournalEntry.objects.filter(pk=self.entry_id)
+                .values_list("status", flat=True)
+                .first()
+            )
+            if status == JournalEntry.Status.POSTED:
+                raise ValidationError("Ne mozes obrisati stavku proknjizene temeljnice.")
+        return super().delete(*args, **kwargs)
 
     def __str__(self) -> str:
         side = "D" if self.debit > 0 else "P"
