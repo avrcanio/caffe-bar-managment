@@ -1,0 +1,13 @@
+services:
+  web:
+    env_file:
+      - .env
+  celery_worker:
+    env_file:
+      - .env
+  celery_beat:
+    env_file:
+      - .env
+  frontend:
+    env_file:
+      - .env

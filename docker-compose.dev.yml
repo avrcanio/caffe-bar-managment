@@ -1,0 +1,32 @@
+services:
+  web:
+    container_name: mozzart-dev
+    env_file:
+      - .env.dev
+    environment:
+      DATABASE_URL: postgresql://postgis:postgis@postgis:5432/dev_mozzart_db
+    ports:
+      - "8004:8000"
+  celery_worker:
+    container_name: mozzart-dev-celery-worker
+    env_file:
+      - .env.dev
+    environment:
+      DATABASE_URL: postgresql://postgis:postgis@postgis:5432/dev_mozzart_db
+  celery_beat:
+    container_name: mozzart-dev-celery-beat
+    env_file:
+      - .env.dev
+    environment:
+      DATABASE_URL: postgresql://postgis:postgis@postgis:5432/dev_mozzart_db
+  frontend:
+    container_name: mozzart-frontend-dev
+    env_file:
+      - .env.dev
+    command: sh -lc "npm install && npm run dev -- -p 3000"
+    ports:
+      - "3002:3000"
+  redis:
+    container_name: mozzart-redis-dev
+    ports:
+      - "6380:6379"
