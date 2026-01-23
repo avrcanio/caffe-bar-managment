@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { DM_Serif_Display } from "next/font/google";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { apiGetJson } from "@/lib/api";
 import { formatDate, formatEuro } from "@/lib/format";
 import EmptyState from "@/components/EmptyState";
@@ -38,6 +39,7 @@ export default function PurchaseOrdersPage() {
   const [orderedFrom, setOrderedFrom] = useState("");
   const [orderedTo, setOrderedTo] = useState("");
   const [loadingDetailId, setLoadingDetailId] = useState<number | null>(null);
+  const router = useRouter();
 
   useEffect(() => {
     const run = async () => {
@@ -164,7 +166,11 @@ export default function PurchaseOrdersPage() {
             {orders.map((po) => (
               <div
                 key={po.id}
-                className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-black/10 bg-white/70 px-4 py-3"
+                onClick={() => {
+                  setLoadingDetailId(po.id);
+                  router.push(`/purchase-orders/${po.id}`);
+                }}
+                className="grid cursor-pointer grid-cols-1 gap-3 rounded-2xl border border-black/10 bg-white/70 px-4 py-3 transition hover:border-black/30 md:grid-cols-[1.4fr_0.8fr_0.7fr_0.7fr] md:items-center"
               >
                 <div>
                   <p className="text-sm font-semibold">PO-{po.id}</p>
@@ -172,25 +178,18 @@ export default function PurchaseOrdersPage() {
                   {po.supplierName}
                 </p>
               </div>
-              <p className="text-sm text-black/70">
+              <p className="text-sm text-black/70 md:text-center">
                   {po.statusLabel}
               </p>
-              <p className="text-xs uppercase tracking-[0.2em] text-black/50">
+              <p className="text-xs uppercase tracking-[0.2em] text-black/50 md:text-center">
                   {formatDate(po.orderedAt)}
               </p>
-              <p className="text-sm font-semibold">
+              <p className="text-sm font-semibold md:text-right">
                   {formatEuro(po.totalGross)}
               </p>
-                <Link
-                  href={`/purchase-orders/${po.id}`}
-                  onClick={() => setLoadingDetailId(po.id)}
-                  className="flex items-center gap-2 rounded-full border border-black/20 px-4 py-1 text-xs uppercase tracking-[0.2em] text-black/70"
-                >
-                  {loadingDetailId === po.id ? (
-                    <span className="inline-flex h-3 w-3 animate-spin rounded-full border border-black/50 border-t-transparent" />
-                  ) : null}
-                  Detalji
-                </Link>
+                {loadingDetailId === po.id ? (
+                  <span className="inline-flex h-3 w-3 animate-spin rounded-full border border-black/50 border-t-transparent md:justify-self-end" />
+                ) : null}
               </div>
             ))}
           </div>

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { DM_Serif_Display } from "next/font/google";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { apiGetJson, apiPutJson } from "@/lib/api";
+import { apiGetJson, apiPostJson, apiPutJson } from "@/lib/api";
 import { formatEuro } from "@/lib/format";
 import {
   mapSupplierArtikli,
@@ -46,6 +46,10 @@ export default function EditPurchaseOrderPage() {
     type: "success" | "error";
     message: string;
   } | null>(null);
+  const [showSendPrompt, setShowSendPrompt] = useState(false);
+  const [sendingEmail, setSendingEmail] = useState(false);
+  const [sendError, setSendError] = useState("");
+  const [sendSuccess, setSendSuccess] = useState("");
   const groupRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const itemRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const quantityRefs = useRef<Record<string, HTMLInputElement | null>>({});
@@ -142,7 +146,7 @@ export default function EditPurchaseOrderPage() {
         {
           key,
           artiklId: item.id,
-          unitId: item.unitId,
+          unitId: item.unitId!,
           name: item.name,
           unitName: item.unitName || "",
           price: item.price ?? null,
@@ -190,8 +194,8 @@ export default function EditPurchaseOrderPage() {
         items
           .slice()
           .sort((a, b) => a.name.localeCompare(b.name, "hr", { sensitivity: "base" })),
-      ])
-      .sort(([a], [b]) => a.localeCompare(b, "hr", { sensitivity: "base" }));
+      ] as [string, SupplierArtikl[]])
+      .sort(([a], [b]) => (a as string).localeCompare(b as string, "hr", { sensitivity: "base" }));
   }, [artikli]);
 
   useEffect(() => {
@@ -213,7 +217,8 @@ export default function EditPurchaseOrderPage() {
     );
 
     groupedArtikli.forEach(([group], index) => {
-      const node = groupRefs.current[group];
+      const groupName = group as string;
+      const node = groupRefs.current[groupName];
       if (node) {
         node.setAttribute("data-index", String(index));
         observer.observe(node);
@@ -224,16 +229,16 @@ export default function EditPurchaseOrderPage() {
   }, [groupedArtikli]);
 
   const activeGroupLabel =
-    groupedArtikli[activeGroupIndex]?.[0] || "Ostalo";
+    (groupedArtikli[activeGroupIndex]?.[0] as string) || "Ostalo";
 
-  const handleSave = async () => {
+  const handleSave = async (): Promise<boolean> => {
     if (!supplierId) {
       setSaveError("Odaberi dobavljaca prije spremanja.");
-      return;
+      return false;
     }
     if (cart.length === 0) {
       setSaveError("Dodaj barem jednu stavku.");
-      return;
+      return false;
     }
     setSaveError("");
     setSaving(true);
@@ -251,15 +256,44 @@ export default function EditPurchaseOrderPage() {
         },
         { csrf: true }
       );
-      router.push(`/purchase-orders/${id}`);
+      return true;
     } catch (err) {
       setSaveError(
         err instanceof Error
           ? err.message
           : "Neuspjesno spremanje narudzbe."
       );
+      return false;
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleSend = async () => {
+    if (!id) return;
+    setSendingEmail(true);
+    setSendError("");
+    setSendSuccess("");
+    try {
+      await apiPostJson(`/api/purchase-orders/${id}/send/`, undefined, {
+        csrf: true,
+      });
+      const successMessage = "Narudzba je poslana dobavljacu.";
+      setSendSuccess(successMessage);
+      setToast({ type: "success", message: successMessage });
+      setShowSendPrompt(false);
+      setTimeout(() => {
+        router.push(`/purchase-orders/${id}`);
+      }, 1200);
+    } catch (err) {
+      const detail =
+        err instanceof Error
+          ? err.message
+          : "Slanje narudzbe nije uspjelo.";
+      setSendError(detail);
+      setToast({ type: "error", message: detail });
+    } finally {
+      setSendingEmail(false);
     }
   };
 
@@ -282,9 +316,8 @@ export default function EditPurchaseOrderPage() {
         <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div className="space-y-2">
             <p className="text-sm uppercase tracking-[0.3em] text-black/60">
-              Uredi purchase order
-            </p>
-            <h1 className={`${dmSerif.className} text-4xl`}>PO-{id}</h1>
+              Uredi Narudžbu {id}
+            </p>            
           </div>
           <div className="flex items-center gap-3">
             <Link
@@ -336,7 +369,7 @@ export default function EditPurchaseOrderPage() {
                 <button
                   onClick={() => {
                     const next = Math.max(activeGroupIndex - 1, 0);
-                    const label = groupedArtikli[next]?.[0];
+                    const label = groupedArtikli[next]?.[0] as string;
                     if (label && groupRefs.current[label]) {
                       groupRefs.current[label]?.scrollIntoView({
                         behavior: "smooth",
@@ -357,7 +390,7 @@ export default function EditPurchaseOrderPage() {
                       activeGroupIndex + 1,
                       groupedArtikli.length - 1
                     );
-                    const label = groupedArtikli[next]?.[0];
+                    const label = groupedArtikli[next]?.[0] as string;
                     if (label && groupRefs.current[label]) {
                       groupRefs.current[label]?.scrollIntoView({
                         behavior: "smooth",
@@ -372,17 +405,17 @@ export default function EditPurchaseOrderPage() {
               </div>
             ) : null}
             <div className="space-y-4">
-              {groupedArtikli.map(([group, items]) => (
+              {groupedArtikli.map(([group, items]: [string, SupplierArtikl[]]) => (
                 <div
-                  key={group}
+                  key={group as string}
                   ref={(node) => {
-                    groupRefs.current[group] = node;
+                    groupRefs.current[group as string] = node;
                   }}
                   className="space-y-3"
                 >
                   <div className="flex items-center justify-between">
                     <p className="text-xs uppercase tracking-[0.25em] text-black/50">
-                      {group}
+                      {group as string}
                     </p>
                     <span className="text-xs text-black/50">
                       {items.length} artikala
@@ -539,7 +572,12 @@ export default function EditPurchaseOrderPage() {
               <p className="mt-3 text-sm text-red-600">{saveError}</p>
             ) : null}
             <button
-              onClick={handleSave}
+              onClick={async () => {
+                const ok = await handleSave();
+                if (ok) {
+                  setShowSendPrompt(true);
+                }
+              }}
               disabled={saving}
               className="mt-4 w-full rounded-full bg-[#f27323] px-4 py-3 text-xs uppercase tracking-[0.3em] text-black shadow-[0_12px_24px_rgba(242,115,35,0.35)] disabled:opacity-60"
             >
@@ -560,6 +598,42 @@ export default function EditPurchaseOrderPage() {
         </button>
       ) : null}
       <div ref={pageEndRef} />
+      {showSendPrompt ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-6">
+          <div className="w-full max-w-md rounded-3xl border border-black/15 bg-white p-6 shadow-[0_30px_60px_rgba(10,10,10,0.3)]">
+            <h3 className={`${dmSerif.className} text-2xl`}>
+              Poslati narudzbu?
+            </h3>
+            <p className="mt-2 text-sm text-black/60">
+              Zelis li odmah poslati narudzbu dobavljacu emailom?
+            </p>
+            {sendError ? (
+              <p className="mt-3 text-sm text-red-600">{sendError}</p>
+            ) : null}
+            {sendSuccess ? (
+              <p className="mt-3 text-sm text-green-700">{sendSuccess}</p>
+            ) : null}
+            <div className="mt-6 flex gap-3">
+              <button
+                onClick={() => {
+                  setShowSendPrompt(false);
+                  router.push(`/purchase-orders/${id}`);
+                }}
+                className="flex-1 rounded-full border border-black/20 px-4 py-2 text-xs uppercase tracking-[0.2em] text-black/70"
+              >
+                Ne
+              </button>
+              <button
+                onClick={handleSend}
+                disabled={sendingEmail}
+                className="flex-1 rounded-full bg-[#f27323] px-4 py-2 text-xs uppercase tracking-[0.2em] text-black shadow-[0_12px_24px_rgba(242,115,35,0.35)] disabled:opacity-60"
+              >
+                {sendingEmail ? "Slanje..." : "Da, posalji"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
