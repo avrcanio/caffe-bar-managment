@@ -20,6 +20,7 @@ from stock.models import WarehouseStock
 
 class PurchaseOrderItemSerializer(serializers.ModelSerializer):
     artikl_name = serializers.CharField(source="artikl.name", read_only=True)
+    base_group = serializers.SerializerMethodField()
     unit_name = serializers.CharField(
         source="unit_of_measure.name", read_only=True
     )
@@ -32,11 +33,17 @@ class PurchaseOrderItemSerializer(serializers.ModelSerializer):
             "order",
             "artikl",
             "artikl_name",
+            "base_group",
             "quantity",
             "unit_of_measure",
             "unit_name",
             "price",
         ]
+
+    def get_base_group(self, obj):
+        detail = getattr(obj.artikl, "detail", None)
+        base_group = getattr(detail, "base_group", None)
+        return getattr(base_group, "name", None)
 
 
 class PurchaseOrderSerializer(serializers.ModelSerializer):
@@ -102,9 +109,11 @@ class PurchaseOrderPagination(PageNumberPagination):
 
 
 class PurchaseOrderListCreateView(generics.ListCreateAPIView):
-    queryset = PurchaseOrder.objects.select_related(
-        "supplier", "payment_type"
-    ).order_by("-ordered_at")
+    queryset = (
+        PurchaseOrder.objects.select_related("supplier", "payment_type")
+        .prefetch_related("items__artikl__detail__base_group")
+        .order_by("-ordered_at")
+    )
     serializer_class = PurchaseOrderSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = PurchaseOrderPagination
@@ -176,8 +185,9 @@ class PurchaseOrderListCreateView(generics.ListCreateAPIView):
 
 
 class PurchaseOrderDetailView(generics.RetrieveUpdateAPIView):
-    queryset = PurchaseOrder.objects.select_related(
-        "supplier", "payment_type"
+    queryset = (
+        PurchaseOrder.objects.select_related("supplier", "payment_type")
+        .prefetch_related("items__artikl__detail__base_group")
     )
     serializer_class = PurchaseOrderSerializer
     permission_classes = [IsAuthenticated]

@@ -11,6 +11,7 @@ export type PurchaseOrderSummaryDTO = {
 export type PurchaseOrderItemDTO = {
   id: number;
   artikl_name?: string | null;
+  base_group?: string | null;
   quantity: string;
   unit_name?: string | null;
   price?: string | null;
@@ -43,6 +44,7 @@ export type PurchaseOrderSummary = {
 export type PurchaseOrderItem = {
   id: number;
   name: string;
+  baseGroup: string | null;
   quantity: number;
   unitName: string;
   price: number | null;
@@ -72,6 +74,7 @@ export const mapPurchaseOrderItem = (
 ): PurchaseOrderItem => ({
   id: item.id,
   name: item.artikl_name || "Artikl",
+  baseGroup: item.base_group || null,
   quantity: toNumber(item.quantity, 0),
   unitName: item.unit_name || "",
   price: item.price === null || item.price === undefined ? null : toNumber(item.price, 0),
