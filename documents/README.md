@@ -2,6 +2,28 @@
 
 Ovaj dokument opisuje dodane funkcionalnosti vezane uz narudzbe, primke, cjenike, PDF mailer i konfiguracije.
 
+## Quick Start
+
+1) Pokreni servise:
+```
+docker compose up -d --build
+```
+2) Migracije:
+```
+docker compose exec web python manage.py migrate
+```
+3) Admin:
+- Otvori `https://mozart.sibenik1983.hr/admin/`
+- Prijavi se admin korisnikom
+4) Provjera API-ja:
+```
+curl -X GET 'https://mozart.sibenik1983.hr/api/me/' -H 'accept: application/json'
+```
+5) Frontend:
+- Otvori `https://mozart.sibenik1983.hr/` (frontend)
+
+Napomena: backend je na `/api`, a admin na `/admin`.
+
 ## Narudzbe (purchase orders)
 
 ### Modeli
@@ -113,6 +135,36 @@ Ovaj dokument opisuje dodane funkcionalnosti vezane uz narudzbe, primke, cjenike
   - `EMAIL_USE_TLS=True` (587) ili `EMAIL_USE_SSL=True` (465)
 - U `settings.py` se citaju iz environmenta.
 
+## IMAP mailbox sync
+
+### Opis
+- IMAP sync radi preko Celery taska `mailbox_app.tasks.sync_imap_mailbox`.
+- Sinkronizacija se pokreće svake minute (Celery Beat).
+- Mailovi i privitci se spremaju u bazu + `media/`.
+
+### Konfiguracija
+- IMAP parametri u `.env`:
+  - `IMAP_HOST`, `IMAP_PORT`, `IMAP_USER`, `IMAP_PASSWORD`
+  - `IMAP_USE_SSL=True`
+  - `IMAP_MAILBOX=INBOX` (opcionalno)
+- Celery/Redis:
+  - `CELERY_BROKER_URL=redis://redis:6379/0`
+  - `CELERY_RESULT_BACKEND=redis://redis:6379/0`
+
+### Rucni sync
+- Admin gumb: **Mailbox states → Sync mailbox now**
+- API:
+```
+curl -X POST 'https://mozart.sibenik1983.hr/api/mailbox/sync/' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  --cookie "csrftoken=..." \
+  -H "X-CSRFToken: ..."
+```
+
+### Troubleshooting
+- Ako log kaže “IMAP settings not configured”, provjeri `IMAP_USER` i `IMAP_PASSWORD` u `.env` i restartaj `celery_worker`.
+
 ## Napomene
 - Language je postavljen na `hr` (decimalni zarez u adminu).
 - Ako se lista `Tipovi placanja` rusi, provjeri da template postoji u `app/templates/admin/configuration/paymenttype/change_list.html`.
@@ -126,3 +178,23 @@ Ovaj dokument opisuje dodane funkcionalnosti vezane uz narudzbe, primke, cjenike
 5) Pokreni admin action `Send order email` i provjeri PDF.
 6) Pokreni admin action `Create warehouse input from purchase order` i provjeri primku.
 7) Pokreni admin action `Send to Remaris` i provjeri `remaris_id`.
+
+## PWA (Frontend)
+
+### Build & start (production)
+```
+cd /srv/mozzart/frontend
+npm run build
+npm run start
+```
+
+### Cache strategija
+- `/api/**` GET: NetworkFirst (kratki TTL).
+- `/_next/*` i `/icons/*`: long cache (immutable).
+- `/manifest.json`: short cache.
+- `/sw.js`: no-cache.
+- `/`: no-store (HTML).
+
+### Napomene
+- PWA je onemogućen u developmentu (`next-pwa`).
+- Service worker aktivan tek nakon `next build` i `next start`.
