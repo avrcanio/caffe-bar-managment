@@ -81,6 +81,11 @@ class JournalEntryReversalTests(TestCase):
         with self.assertRaises(ValidationError):
             self.entry.reverse(reverse_date=date(2026, 5, 12))
 
+    def test_cannot_reverse_reversal_entry(self):
+        reversal = self.entry.reverse(reverse_date=date(2026, 5, 11))
+        with self.assertRaises(ValidationError):
+            reversal.reverse(reverse_date=date(2026, 5, 12))
+
     def test_reverse_respects_closed_period(self):
         Period.objects.create(
             ledger=self.ledger,

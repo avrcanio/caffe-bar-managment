@@ -1,4 +1,8 @@
-from django.contrib import admin
+from django.contrib import admin, messages
+from django.core.exceptions import ValidationError
+from django.urls import reverse
+from django.utils.html import format_html
+from django.utils import timezone
 
 from accounting.services import get_single_ledger
 from .models import Ledger, Account, Period, JournalEntry, JournalItem
@@ -48,19 +52,84 @@ class JournalItemInline(admin.TabularInline):
     autocomplete_fields = ("account",)
 
 
+@admin.action(description="Storniraj oznacene temeljnice")
+def reverse_entries(modeladmin, request, queryset):
+    reversed_count = 0
+    errors = 0
+
+    for entry in queryset:
+        try:
+            entry.reverse(reverse_date=timezone.localdate(), user=request.user)
+            reversed_count += 1
+        except ValidationError as e:
+            errors += 1
+            messages.error(request, f"#{entry.number}: {e}")
+        except Exception as e:
+            errors += 1
+            messages.error(request, f"#{entry.number}: Neocekivana greska: {e}")
+
+    if reversed_count:
+        messages.success(request, f"Stornirano: {reversed_count}")
+    if errors and not reversed_count:
+        messages.warning(request, f"Nije stornirano nista. Gresaka: {errors}")
+
+
 @admin.register(JournalEntry)
 class JournalEntryAdmin(admin.ModelAdmin):
-    list_display = ("number", "date", "status", "description", "posted_at", "posted_by")
+    list_display = (
+        "number",
+        "date",
+        "status",
+        "description",
+        "is_reversed",
+        "reverses_link",
+        "reversal_link",
+        "posted_at",
+        "posted_by",
+    )
     list_filter = ("status", "date")
     search_fields = ("description",)
     ordering = ("ledger", "-date", "-number")
     inlines = [JournalItemInline]
     exclude = ("ledger",)
+    actions = [reverse_entries]
 
     def save_model(self, request, obj, form, change):
         if not obj.ledger_id:
             obj.ledger = get_single_ledger()
         super().save_model(request, obj, form, change)
+
+    def get_actions(self, request):
+        actions = super().get_actions(request)
+        actions.pop("delete_selected", None)
+        return actions
+
+    def reversal_link(self, obj):
+        if hasattr(obj, "reversal"):
+            url = reverse("admin:accounting_journalentry_change", args=[obj.reversal.id])
+            return format_html("<a href=\"{}\">#{} ({})</a>", url, obj.reversal.number, obj.reversal.date)
+        return ""
+
+    reversal_link.short_description = "Storno"
+
+    def reverses_link(self, obj):
+        if obj.reversed_entry_id:
+            url = reverse("admin:accounting_journalentry_change", args=[obj.reversed_entry_id])
+            return format_html(
+                "<a href=\"{}\">#{} ({})</a>",
+                url,
+                obj.reversed_entry.number,
+                obj.reversed_entry.date,
+            )
+        return ""
+
+    reverses_link.short_description = "Stornira"
+
+    def is_reversed(self, obj):
+        return hasattr(obj, "reversal")
+
+    is_reversed.boolean = True
+    is_reversed.short_description = "Stornirano"
 
 
 @admin.register(JournalItem)

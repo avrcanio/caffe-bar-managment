@@ -232,11 +232,11 @@ class JournalEntry(models.Model):
                         self._orig_status = original.get("status")
                     if self._orig_date is None:
                         self._orig_date = original.get("date")
-            if self._orig_status == self.Status.POSTED:
+            if self._orig_status in (self.Status.POSTED, self.Status.VOID):
                 if self.status != self._orig_status:
-                    raise ValidationError("Ne mozes mijenjati status proknjizene temeljnice.")
+                    raise ValidationError("Ne mozes mijenjati status proknjizene ili ponistene (VOID) temeljnice.")
                 if self.date != self._orig_date:
-                    raise ValidationError("Ne mozes mijenjati datum proknjizene temeljnice.")
+                    raise ValidationError("Ne mozes mijenjati datum proknjizene ili ponistene (VOID) temeljnice.")
 
         if self.ledger_id and self.date:
             if self.status == self.Status.POSTED and self._is_in_closed_period():
@@ -288,12 +288,21 @@ class JournalEntry(models.Model):
             self.posted_by = user
         self.save(update_fields=["status", "posted_at", "posted_by"])
 
+    def void(self):
+        if self.status != self.Status.DRAFT:
+            raise ValidationError("Mozes ponistiti (VOID) samo temeljnicu u statusu DRAFT.")
+        self.status = self.Status.VOID
+        self.save(update_fields=["status"])
+
     def __str__(self) -> str:
         return f"{self.ledger} #{self.number} ({self.date})"
 
     def reverse(self, *, reverse_date: date_cls | None = None, user=None) -> "JournalEntry":
         if self.status != self.Status.POSTED:
             raise ValidationError("Mozes stornirati samo proknjizenu temeljnicu.")
+
+        if self.reversed_entry_id:
+            raise ValidationError("Ne mozes stornirati storno temeljnicu.")
 
         if hasattr(self, "reversal"):
             raise ValidationError("Ova temeljnica je vec stornirana.")
@@ -382,8 +391,8 @@ class JournalItem(models.Model):
                 .values_list("status", flat=True)
                 .first()
             )
-            if status == JournalEntry.Status.POSTED:
-                raise ValidationError("Ne mozes spremati stavke na proknjizenoj temeljnici.")
+            if status in (JournalEntry.Status.POSTED, JournalEntry.Status.VOID):
+                raise ValidationError("Ne mozes spremati stavke na proknjizenoj ili ponistenoj (VOID) temeljnici.")
 
         super().save(*args, **kwargs)
         self._orig_entry_id = self.entry_id
@@ -395,8 +404,8 @@ class JournalItem(models.Model):
                 .values_list("status", flat=True)
                 .first()
             )
-            if status == JournalEntry.Status.POSTED:
-                raise ValidationError("Ne mozes obrisati stavku proknjizene temeljnice.")
+            if status in (JournalEntry.Status.POSTED, JournalEntry.Status.VOID):
+                raise ValidationError("Ne mozes obrisati stavku s proknjizene ili ponistene (VOID) temeljnice.")
         return super().delete(*args, **kwargs)
 
     def __str__(self) -> str:
