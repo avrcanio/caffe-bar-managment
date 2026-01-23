@@ -96,6 +96,8 @@ export default function NewPurchaseOrderPage() {
       }
       return [...prev, { ...item, key, quantity: qty }];
     });
+    setToast({ type: "success", message: "Artikl dodan." });
+    setTimeout(() => setToast(null), 2000);
   };
 
   const removeFromCart = (key: string) => {
@@ -187,7 +189,7 @@ export default function NewPurchaseOrderPage() {
           .slice()
           .sort((a, b) => a.name.localeCompare(b.name, "hr", { sensitivity: "base" })),
       ])
-      .sort(([a], [b]) => a.localeCompare(b, "hr", { sensitivity: "base" }));
+      .sort(([a], [b]) => (a as string).localeCompare(b as string, "hr", { sensitivity: "base" }));
   }, [artikli]);
 
   useEffect(() => {
@@ -209,7 +211,8 @@ export default function NewPurchaseOrderPage() {
     );
 
     groupedArtikli.forEach(([group], index) => {
-      const node = groupRefs.current[group];
+      const groupKey = group as string;
+      const node = groupRefs.current[groupKey];
       if (node) {
         node.setAttribute("data-index", String(index));
         observer.observe(node);
@@ -220,7 +223,7 @@ export default function NewPurchaseOrderPage() {
   }, [groupedArtikli]);
 
   const activeGroupLabel =
-    groupedArtikli[activeGroupIndex]?.[0] || "Ostalo";
+    (groupedArtikli[activeGroupIndex]?.[0] as string) || "Ostalo";
 
   const handleSend = async () => {
     if (!savedId) {
@@ -273,14 +276,12 @@ export default function NewPurchaseOrderPage() {
         <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div className="space-y-2">
             <p className="text-sm uppercase tracking-[0.3em] text-black/60">
-              Novi purchase order
+              Nova Narudžba
             </p>
-            <h1 className={`${dmSerif.className} text-4xl`}>
-              Odabir artikala po dobavljacu
-            </h1>
+            
           </div>
           <Link
-            href="/"
+            href="/purchase-orders"
             className="rounded-full border border-black/20 px-5 py-2 text-xs uppercase tracking-[0.2em] text-black/70"
           >
             Povratak
@@ -321,7 +322,7 @@ export default function NewPurchaseOrderPage() {
                 <button
                   onClick={() => {
                     const next = Math.max(activeGroupIndex - 1, 0);
-                    const label = groupedArtikli[next]?.[0];
+                    const label = groupedArtikli[next]?.[0] as string;
                     if (label && groupRefs.current[label]) {
                       groupRefs.current[label]?.scrollIntoView({
                         behavior: "smooth",
@@ -342,7 +343,7 @@ export default function NewPurchaseOrderPage() {
                       activeGroupIndex + 1,
                       groupedArtikli.length - 1
                     );
-                    const label = groupedArtikli[next]?.[0];
+                    const label = groupedArtikli[next]?.[0] as string;
                     if (label && groupRefs.current[label]) {
                       groupRefs.current[label]?.scrollIntoView({
                         behavior: "smooth",
@@ -359,21 +360,21 @@ export default function NewPurchaseOrderPage() {
             <div className="space-y-4">
               {groupedArtikli.map(([group, items]) => (
                 <div
-                  key={group}
+                  key={group as string}
                   ref={(node) => {
-                    groupRefs.current[group] = node;
+                    groupRefs.current[group as string] = node;
                   }}
                   className="space-y-3"
                 >
                   <div className="flex items-center justify-between">
                     <p className="text-xs uppercase tracking-[0.25em] text-black/50">
-                      {group}
+                      {group as string}
                     </p>
                     <span className="text-xs text-black/50">
                       {items.length} artikala
                     </span>
                   </div>
-                  {items.map((item) => {
+                  {(items as SupplierArtikl[]).map((item) => {
                     const key = `${item.id}-${item.unitId ?? "none"}`;
                     return (
                       <div
@@ -516,7 +517,7 @@ export default function NewPurchaseOrderPage() {
               disabled={saving}
               className="mt-4 w-full rounded-full bg-[#f27323] px-4 py-3 text-xs uppercase tracking-[0.3em] text-black shadow-[0_12px_24px_rgba(242,115,35,0.35)] disabled:opacity-60"
             >
-              {saving ? "Spremanje..." : "Spremi PO"}
+              {saving ? "Spremanje..." : "Spremi Narudžbu"}
             </button>
           </div>
         </section>

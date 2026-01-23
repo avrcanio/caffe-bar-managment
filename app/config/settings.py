@@ -41,6 +41,10 @@ CSRF_TRUSTED_ORIGINS = _split_env_list(
     "CSRF_TRUSTED_ORIGINS", "https://mozart.sibenik1983.hr"
 )
 
+# Ensure correct scheme/host when behind a reverse proxy (for absolute URLs).
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+USE_X_FORWARDED_HOST = True
+
 
 # Application definition
 
