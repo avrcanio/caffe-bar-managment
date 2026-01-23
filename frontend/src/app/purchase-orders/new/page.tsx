@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { DM_Serif_Display } from "next/font/google";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -34,6 +34,9 @@ export default function NewPurchaseOrderPage() {
   const [sendingEmail, setSendingEmail] = useState(false);
   const [sendError, setSendError] = useState("");
   const [sendSuccess, setSendSuccess] = useState("");
+  const groupRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const [activeGroupIndex, setActiveGroupIndex] = useState(0);
+  const pageEndRef = useRef<HTMLDivElement | null>(null);
   const [toast, setToast] = useState<{
     type: "success" | "error";
     message: string;
@@ -168,6 +171,57 @@ export default function NewPurchaseOrderPage() {
     }, 0);
   }, [cart]);
 
+  const groupedArtikli = useMemo(() => {
+    const groups: Record<string, SupplierArtikl[]> = {};
+    for (const item of artikli) {
+      const key = item.baseGroup || "Ostalo";
+      if (!groups[key]) {
+        groups[key] = [];
+      }
+      groups[key].push(item);
+    }
+    return Object.entries(groups)
+      .map(([group, items]) => [
+        group,
+        items
+          .slice()
+          .sort((a, b) => a.name.localeCompare(b.name, "hr", { sensitivity: "base" })),
+      ])
+      .sort(([a], [b]) => a.localeCompare(b, "hr", { sensitivity: "base" }));
+  }, [artikli]);
+
+  useEffect(() => {
+    if (!groupedArtikli.length) {
+      setActiveGroupIndex(0);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .map((entry) => Number(entry.target.getAttribute("data-index")))
+          .sort((a, b) => a - b);
+        if (visible.length) {
+          setActiveGroupIndex(visible[0]);
+        }
+      },
+      { rootMargin: "-20% 0px -70% 0px", threshold: [0, 1] }
+    );
+
+    groupedArtikli.forEach(([group], index) => {
+      const node = groupRefs.current[group];
+      if (node) {
+        node.setAttribute("data-index", String(index));
+        observer.observe(node);
+      }
+    });
+
+    return () => observer.disconnect();
+  }, [groupedArtikli]);
+
+  const activeGroupLabel =
+    groupedArtikli[activeGroupIndex]?.[0] || "Ostalo";
+
   const handleSend = async () => {
     if (!savedId) {
       return;
@@ -262,80 +316,138 @@ export default function NewPurchaseOrderPage() {
                 {loading ? "Ucitavanje" : `${artikli.length} dostupno`}
               </span>
             </div>
+            {groupedArtikli.length ? (
+              <div className="sticky top-4 z-10 flex items-center justify-between rounded-full border border-black/15 bg-white/90 px-4 py-2 text-xs uppercase tracking-[0.25em] text-black/60 shadow-[0_12px_30px_rgba(10,10,10,0.1)]">
+                <button
+                  onClick={() => {
+                    const next = Math.max(activeGroupIndex - 1, 0);
+                    const label = groupedArtikli[next]?.[0];
+                    if (label && groupRefs.current[label]) {
+                      groupRefs.current[label]?.scrollIntoView({
+                        behavior: "smooth",
+                        block: "start",
+                      });
+                    }
+                  }}
+                  className="rounded-full border border-black/20 bg-white/5 px-3 py-1 text-[10px] uppercase tracking-[0.2em] text-black/70"
+                >
+                  ◀
+                </button>
+                <span className="text-[11px] uppercase tracking-[0.25em] text-black/70">
+                  {activeGroupLabel}
+                </span>
+                <button
+                  onClick={() => {
+                    const next = Math.min(
+                      activeGroupIndex + 1,
+                      groupedArtikli.length - 1
+                    );
+                    const label = groupedArtikli[next]?.[0];
+                    if (label && groupRefs.current[label]) {
+                      groupRefs.current[label]?.scrollIntoView({
+                        behavior: "smooth",
+                        block: "start",
+                      });
+                    }
+                  }}
+                  className="rounded-full border border-black/20 bg-white/5 px-3 py-1 text-[10px] uppercase tracking-[0.2em] text-black/70"
+                >
+                  ▶
+                </button>
+              </div>
+            ) : null}
             <div className="space-y-4">
-              {artikli.map((item) => {
-                const key = `${item.id}-${item.unitId ?? "none"}`;
-                return (
-                  <div
-                    key={key}
-                    className="rounded-2xl border border-black/10 bg-white/70 p-4"
-                  >
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                      <div className="flex items-center gap-4">
-                        <div className="h-[77px] w-[48px] overflow-hidden rounded-xl border border-black/10 bg-white">
-                          {item.image ? (
-                            // eslint-disable-next-line @next/next/no-img-element
-                            <img
-                              src={item.image}
-                              alt={item.name}
-                              className="h-full w-full object-cover"
-                            />
-                          ) : (
-                            <div className="flex h-full w-full items-center justify-center text-xs text-black/40">
-                              no image
-                            </div>
-                          )}
-                        </div>
-                        <div>
-                          <p className="text-sm font-semibold">{item.name}</p>
-                          <p className="text-xs uppercase tracking-[0.2em] text-black/50">
-                            {item.code || "code"} ·{" "}
-                            {item.baseGroup || "base group"}
-                          </p>
-                          <p className="text-xs text-black/60">
-                            JM: {item.unitName || "?"} · Cijena:{" "}
-                            {formatEuro(item.price)}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        <input
-                          type="number"
-                          min="0"
-                          step="1"
-                          inputMode="numeric"
-                          pattern="[0-9]*"
-                          value={quantities[key] || ""}
-                          onChange={(event) =>
-                            setQuantities((prev) => ({
-                              ...prev,
-                              [key]: event.target.value.replace(/\D/g, ""),
-                            }))
-                          }
-                          className="w-24 rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
-                          placeholder="Kolicina"
-                        />
-                        <button
-                          onClick={() => addToCart(item)}
-                          className="rounded-full bg-[#f27323] px-4 py-2 text-xs uppercase tracking-[0.2em] text-black"
-                        >
-                          Dodaj
-                        </button>
-                      </div>
-                    </div>
-                    <div className="mt-3 flex flex-wrap gap-2 text-xs text-black/60">
-                      {(item.stocks || []).map((stock) => (
-                        <span
-                          key={`${stock.warehouseId}-${item.id}`}
-                          className="rounded-full border border-black/10 bg-white/60 px-3 py-1"
-                        >
-                          {stock.warehouseName}: {stock.quantity}
-                        </span>
-                      ))}
-                    </div>
+              {groupedArtikli.map(([group, items]) => (
+                <div
+                  key={group}
+                  ref={(node) => {
+                    groupRefs.current[group] = node;
+                  }}
+                  className="space-y-3"
+                >
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs uppercase tracking-[0.25em] text-black/50">
+                      {group}
+                    </p>
+                    <span className="text-xs text-black/50">
+                      {items.length} artikala
+                    </span>
                   </div>
-                );
-              })}
+                  {items.map((item) => {
+                    const key = `${item.id}-${item.unitId ?? "none"}`;
+                    return (
+                      <div
+                        key={key}
+                        className="rounded-2xl border border-black/10 bg-white/70 p-4"
+                      >
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="flex items-center gap-4">
+                            <div className="h-[77px] w-[48px] overflow-hidden rounded-xl border border-black/10 bg-white">
+                              {item.image ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img
+                                  src={item.image}
+                                  alt={item.name}
+                                  className="h-full w-full object-cover"
+                                />
+                              ) : (
+                                <div className="flex h-full w-full items-center justify-center text-xs text-black/40">
+                                  no image
+                                </div>
+                              )}
+                            </div>
+                            <div>
+                              <p className="text-sm font-semibold">{item.name}</p>
+                              <p className="text-xs uppercase tracking-[0.2em] text-black/50">
+                                {item.code || "code"} ·{" "}
+                                {item.baseGroup || "base group"}
+                              </p>
+                              <p className="text-xs text-black/60">
+                                JM: {item.unitName || "?"} · Cijena:{" "}
+                                {formatEuro(item.price)}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <input
+                              type="number"
+                              min="0"
+                              step="1"
+                              inputMode="numeric"
+                              pattern="[0-9]*"
+                              value={quantities[key] || ""}
+                              onChange={(event) =>
+                                setQuantities((prev) => ({
+                                  ...prev,
+                                  [key]: event.target.value.replace(/\D/g, ""),
+                                }))
+                              }
+                              className="w-24 rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
+                              placeholder="Kolicina"
+                            />
+                            <button
+                              onClick={() => addToCart(item)}
+                              className="rounded-full bg-[#f27323] px-4 py-2 text-xs uppercase tracking-[0.2em] text-black"
+                            >
+                              Dodaj
+                            </button>
+                          </div>
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-2 text-xs text-black/60">
+                          {(item.stocks || []).map((stock) => (
+                            <span
+                              key={`${stock.warehouseId}-${item.id}`}
+                              className="rounded-full border border-black/10 bg-white/60 px-3 py-1"
+                            >
+                              {stock.warehouseName}: {stock.quantity}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
               {!loading && artikli.length === 0 ? (
                 <div className="rounded-2xl border border-black/10 bg-white/70 p-4 text-sm text-black/60">
                   Nema artikala za odabranog dobavljaca.
@@ -409,6 +521,18 @@ export default function NewPurchaseOrderPage() {
           </div>
         </section>
       </div>
+      {artikli.length > 0 ? (
+        <button
+          type="button"
+          onClick={() =>
+            pageEndRef.current?.scrollIntoView({ behavior: "smooth" })
+          }
+          className="fixed bottom-6 right-6 z-40 rounded-full border border-black/20 bg-white/80 px-4 py-3 text-[10px] uppercase tracking-[0.2em] text-black/70 shadow-[0_12px_24px_rgba(10,10,10,0.2)]"
+        >
+          Na kraj
+        </button>
+      ) : null}
+      <div ref={pageEndRef} />
       {showSendPrompt ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-6">
           <div className="w-full max-w-md rounded-3xl border border-black/15 bg-white p-6 shadow-[0_30px_60px_rgba(10,10,10,0.3)]">

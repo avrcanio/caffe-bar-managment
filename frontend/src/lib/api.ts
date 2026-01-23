@@ -71,13 +71,22 @@ export async function apiRequest(
     finalHeaders["X-CSRFToken"] = csrfToken;
   }
 
-  return fetch(path, {
+  const response = await fetch(path, {
     method,
     headers: finalHeaders,
     body: finalBody,
     credentials: "include",
     signal,
   });
+
+  if (response.status === 401 && typeof window !== "undefined") {
+    const currentPath = window.location.pathname;
+    if (currentPath !== "/login") {
+      window.location.href = "/login";
+    }
+  }
+
+  return response;
 }
 
 async function buildApiError(response: Response): Promise<ApiError> {

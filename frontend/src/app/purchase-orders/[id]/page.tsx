@@ -56,12 +56,12 @@ export default function PurchaseOrderDetailPage() {
       groups[key].push(item);
     });
     return Object.entries(groups)
-      .map(([group, groupItems]): [string, PurchaseOrder["items"]] => [
+      .map(([group, groupItems]) => [
         group,
         groupItems
           .slice()
           .sort((a, b) => a.name.localeCompare(b.name, "hr", { sensitivity: "base" })),
-      ])
+      ] as [string, PurchaseOrder["items"]])
       .sort(([a], [b]) => (a as string).localeCompare(b as string, "hr", { sensitivity: "base" }));
   }, [order]);
 
@@ -84,7 +84,8 @@ export default function PurchaseOrderDetailPage() {
     );
 
     groupedItems.forEach(([group], index) => {
-      const node = groupRefs.current[group as string];
+      const groupName = group as string;
+      const node = groupRefs.current[groupName];
       if (node) {
         node.setAttribute("data-index", String(index));
         observer.observe(node);

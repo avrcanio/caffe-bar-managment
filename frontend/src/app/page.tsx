@@ -98,8 +98,13 @@ export default function Home() {
             <button
               onClick={async () => {
                 setLoggingOut(true);
-                await apiPostJson("/api/logout/", undefined, { csrf: true });
-                router.push("/login");
+                try {
+                  await apiPostJson("/api/logout/", undefined, { csrf: true });
+                } catch (err) {
+                  // If session already expired, ignore and continue to login.
+                } finally {
+                  router.push("/login");
+                }
               }}
               className="rounded-full border border-black/20 px-5 py-2 text-xs uppercase tracking-[0.2em] text-black/70"
               disabled={loggingOut}
