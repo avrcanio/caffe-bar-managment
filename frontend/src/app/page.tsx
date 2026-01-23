@@ -20,7 +20,12 @@ export default function Home() {
   const [summary, setSummary] = useState<PurchaseOrderSummary | null>(null);
   const [mailCount, setMailCount] = useState<number | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [userName, setUserName] = useState<string | null>(null);
+  const [toast, setToast] = useState<{
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
   const router = useRouter();
 
   useEffect(() => {
@@ -71,6 +76,19 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[#f2ebe0] text-[#121212]">
+      {toast ? (
+        <div className="fixed left-1/2 top-6 z-[60] w-[min(90vw,420px)] -translate-x-1/2">
+          <div
+            className={`rounded-2xl px-4 py-3 text-sm shadow-[0_20px_40px_rgba(10,10,10,0.25)] ${
+              toast.type === "success"
+                ? "bg-black text-white"
+                : "bg-red-600 text-white"
+            }`}
+          >
+            {toast.message}
+          </div>
+        </div>
+      ) : null}
       <div className="mx-auto flex min-h-screen max-w-6xl flex-col gap-8 px-6 py-12">
         <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div className="space-y-3">
@@ -92,8 +110,35 @@ export default function Home() {
             ) : null}
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            <button className="rounded-full border border-black/20 px-5 py-2 text-xs uppercase tracking-[0.2em] text-black/70">
-              Sync podatke
+            <button
+              onClick={async () => {
+                if (syncing) {
+                  return;
+                }
+                setSyncing(true);
+                try {
+                  await apiPostJson("/api/warehouses/sync/", undefined, {
+                    csrf: true,
+                  });
+                  setToast({
+                    type: "success",
+                    message: "Sync zavrsen.",
+                  });
+                } catch (err) {
+                  const detail =
+                    err instanceof Error
+                      ? err.message
+                      : "Sync nije uspio.";
+                  setToast({ type: "error", message: detail });
+                } finally {
+                  setTimeout(() => setToast(null), 2000);
+                  setSyncing(false);
+                }
+              }}
+              className="rounded-full border border-black/20 px-5 py-2 text-xs uppercase tracking-[0.2em] text-black/70"
+              disabled={syncing}
+            >
+              {syncing ? "Sync..." : "Sync podatke"}
             </button>
             <button
               onClick={async () => {

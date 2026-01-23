@@ -766,6 +766,9 @@ class WarehouseIdAdmin(admin.ModelAdmin):
         if action == "import_warehouse_ids":
             func = self.get_actions(request)[action][0]
             return func(self, request, WarehouseId.objects.all())
+        if action == "import_warehouse_stock_for_warehouses":
+            func = self.get_actions(request)[action][0]
+            return func(self, request, WarehouseId.objects.all())
         return super().response_action(request, queryset)
 
 

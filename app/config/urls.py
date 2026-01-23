@@ -40,6 +40,7 @@ from stock.api import (
     InventoryItemDetailView,
     InventoryItemListCreateView,
     InventoryListCreateView,
+    WarehouseStockSyncView,
     WarehouseIdListView,
 )
 
@@ -61,6 +62,7 @@ urlpatterns = [
     path('api/inventories/', InventoryListCreateView.as_view(), name='api-inventory-list'),
     path('api/inventories/<int:pk>/', InventoryDetailView.as_view(), name='api-inventory-detail'),
     path('api/warehouses/', WarehouseIdListView.as_view(), name='api-warehouse-list'),
+    path('api/warehouses/sync/', WarehouseStockSyncView.as_view(), name='api-warehouse-sync'),
     path('api/inventory-items/', InventoryItemListCreateView.as_view(), name='api-inventory-item-list'),
     path('api/inventory-items/<int:pk>/', InventoryItemDetailView.as_view(), name='api-inventory-item-detail'),
     path('api/purchase-orders/', PurchaseOrderListCreateView.as_view(), name='api-purchase-order-list'),

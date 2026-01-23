@@ -4,6 +4,8 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from rest_framework.authentication import SessionAuthentication
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework import serializers
+from drf_spectacular.utils import extend_schema
 from rest_framework.views import APIView
 
 
@@ -44,6 +46,17 @@ class LogoutView(APIView):
 class MeView(APIView):
     permission_classes = [IsAuthenticated]
 
+    class OutputSerializer(serializers.Serializer):
+        id = serializers.IntegerField()
+        username = serializers.CharField()
+        email = serializers.EmailField(allow_null=True, allow_blank=True, required=False)
+        first_name = serializers.CharField(allow_null=True, allow_blank=True, required=False)
+        last_name = serializers.CharField(allow_null=True, allow_blank=True, required=False)
+
+    @extend_schema(
+        responses=OutputSerializer,
+        description="Returns the currently authenticated user.",
+    )
     def get(self, request):
         user = request.user
         return Response(

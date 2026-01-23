@@ -7,7 +7,22 @@ const nextConfig = {};
 const pwaConfig = {
   dest: "public",
   disable: process.env.NODE_ENV === "development",
+  cleanupOutdatedCaches: true,
+  clientsClaim: true,
+  skipWaiting: true,
   runtimeCaching: [
+    {
+      urlPattern: new RegExp("^/_next/.*", "i"),
+      handler: "NetworkFirst",
+      options: {
+        cacheName: "next-assets",
+        networkTimeoutSeconds: 10,
+        expiration: {
+          maxEntries: 50,
+          maxAgeSeconds: 60,
+        },
+      },
+    },
     {
       urlPattern: new RegExp("^/api/.*", "i"),
       handler: "NetworkFirst",

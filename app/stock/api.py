@@ -1,7 +1,15 @@
+import requests
+
+from django.db import transaction
 from rest_framework import generics, serializers
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from artikli.models import Artikl, UnitOfMeasureData
+from artikli.remaris_connector import RemarisConnector
 from stock.models import Inventory, InventoryItem, WarehouseId
+from stock.models import WarehouseStock
 
 
 class InventorySerializer(serializers.ModelSerializer):
@@ -88,3 +96,103 @@ class InventoryItemListCreateView(generics.ListCreateAPIView):
 class InventoryItemDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = InventoryItem.objects.all()
     serializer_class = InventoryItemSerializer
+
+
+class WarehouseStockSyncView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        warehouses = list(WarehouseId.objects.all())
+        if not warehouses:
+            return Response(
+                {"detail": "Nema skladista za sync."},
+                status=400,
+            )
+
+        connector = RemarisConnector()
+        connector.login()
+
+        created = 0
+        updated = 0
+        skipped = 0
+
+        try:
+            with transaction.atomic():
+                for warehouse in warehouses:
+                    payload = {
+                        "dataSource": "warehouseStockDS",
+                        "operationType": "fetch",
+                        "startRow": 0,
+                        "endRow": 10001,
+                        "textMatchStyle": "exact",
+                        "componentId": "warehouseStockGrid",
+                        "oldValues": None,
+                        "data": {
+                            "warehouseId": warehouse.rm_id,
+                            "allBaseGroups": True,
+                            "showFilter": 20,
+                            "request": "?_3403.578121292664",
+                        },
+                    }
+
+                    response = connector.post_json(
+                        "WarehouseStock/GetGridData?isc_dataFormat=json",
+                        payload,
+                        referer_path="/WarehouseStock",
+                    )
+
+                    data = response.get("response", {}).get("data", [])
+
+                    for item in data:
+                        wh_id = item.get("id")
+                        if wh_id is None:
+                            skipped += 1
+                            continue
+
+                        product_code = item.get("productCode", "")
+                        product = None
+                        if product_code:
+                            product = Artikl.objects.filter(code=product_code).first()
+
+                        defaults = {
+                            "warehouse_id_id": warehouse.rm_id,
+                            "product": product,
+                            "product_name": item.get("productName", ""),
+                            "product_code": product_code,
+                            "unit": item.get("unit", ""),
+                            "quantity": item.get("quantity", 0),
+                            "base_group_name": item.get("baseGroupName", ""),
+                            "active": bool(item.get("active", False)),
+                        }
+
+                        _, was_created = WarehouseStock.objects.update_or_create(
+                            wh_id=wh_id,
+                            defaults=defaults,
+                        )
+                        if was_created:
+                            created += 1
+                        else:
+                            updated += 1
+        except requests.RequestException as exc:
+            status_code = None
+            response_text = None
+            if getattr(exc, "response", None) is not None:
+                status_code = exc.response.status_code
+                response_text = exc.response.text
+            detail = "status={status} response={response}".format(
+                status=status_code if status_code is not None else "n/a",
+                response=response_text if response_text else "n/a",
+            )
+            return Response(
+                {"detail": f"Sync failed. Remaris request error. {detail}"},
+                status=502,
+            )
+
+        return Response(
+            {
+                "detail": "Sync complete.",
+                "created": created,
+                "updated": updated,
+                "skipped": skipped,
+            }
+        )
