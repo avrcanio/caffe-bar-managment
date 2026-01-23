@@ -1,12 +1,14 @@
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
+from typing import Iterable
 
 from django.core.exceptions import ValidationError
 from django.db.models import Sum, Max
 
 from accounting.models import Ledger, JournalItem, JournalEntry, Account
 from configuration.models import DocumentType
+from orders.models import WarehouseInput, WarehouseInputItem
 
 
 def get_single_ledger() -> Ledger:
@@ -136,6 +138,81 @@ def trial_balance(date_from: date, date_to: date, *, only_postable: bool = True,
     }
 
 
+TWOPLACES = Decimal("0.01")
+
+
+def q2(x: Decimal) -> Decimal:
+    return x.quantize(TWOPLACES, rounding=ROUND_HALF_UP)
+
+
+@dataclass(frozen=True)
+class PurchaseTotals:
+    net_by_rate: dict[Decimal, Decimal]
+    net_total: Decimal
+    vat_total: Decimal
+    gross_total: Decimal
+    deposit_total: Decimal
+    payable_total: Decimal
+
+
+def compute_purchase_totals_from_items(
+    items: Iterable[WarehouseInputItem],
+    *,
+    deposit_total: Decimal | None = None,
+) -> PurchaseTotals:
+    net_by_rate: dict[Decimal, Decimal] = {}
+    computed_deposit = Decimal("0.00")
+
+    for it in items:
+        if it.total is None:
+            raise ValidationError("WarehouseInputItem.total je NULL – ne mogu izračunati osnovicu.")
+        tax_group = getattr(it, "tax_group", None)
+        if tax_group is None:
+            tax_group = getattr(getattr(it, "artikl", None), "tax_group", None)
+        if not tax_group:
+            raise ValidationError("WarehouseInputItem nema tax_group – ne mogu izračunati PDV.")
+
+        rate = Decimal(str(tax_group.rate))
+        line_net = Decimal(str(it.total))
+        percent = q2(rate * Decimal("100.00"))
+        net_by_rate[percent] = net_by_rate.get(percent, Decimal("0.00")) + line_net
+
+        if getattr(it, "artikl_id", None) and getattr(it.artikl, "deposit_id", None):
+            dep_amount = Decimal(str(it.artikl.deposit.amount_eur))
+            qty = Decimal(str(it.quantity))
+            computed_deposit += q2(dep_amount * qty)
+
+    net_by_rate = {r: q2(v) for r, v in net_by_rate.items()}
+    net_total = q2(sum(net_by_rate.values(), Decimal("0.00")))
+
+    vat_total = Decimal("0.00")
+    for percent, base in net_by_rate.items():
+        vat_total += q2(base * percent / Decimal("100.00"))
+    vat_total = q2(vat_total)
+
+    gross_total = q2(net_total + vat_total)
+    if deposit_total is None:
+        deposit_total = computed_deposit
+    deposit_total = q2(deposit_total or Decimal("0.00"))
+    payable_total = q2(gross_total + deposit_total)
+
+    return PurchaseTotals(
+        net_by_rate=net_by_rate,
+        net_total=net_total,
+        vat_total=vat_total,
+        gross_total=gross_total,
+        deposit_total=deposit_total,
+        payable_total=payable_total,
+    )
+
+
+def flatten_input_items(inputs: Iterable[WarehouseInput]) -> list[WarehouseInputItem]:
+    items: list[WarehouseInputItem] = []
+    for wi in inputs:
+        items.extend(list(wi.items.all()))
+    return items
+
+
 def _next_entry_number(ledger: Ledger) -> int:
     last = JournalEntry.objects.filter(ledger=ledger).aggregate(
         max_number=Max("number")
@@ -186,4 +263,108 @@ def post_sales_invoice(*, document_type: DocumentType, date: date, net: Decimal,
         )
 
     entry.post()
+    return entry
+
+
+def post_purchase_invoice_cash_from_items(
+    *,
+    document_type: DocumentType,
+    doc_date: date,
+    items: Iterable[WarehouseInputItem],
+    cash_account: Account,
+    deposit_total: Decimal | None = None,
+    deposit_account: Account | None = None,
+    description: str = "",
+) -> JournalEntry:
+    if not document_type.expense_account_id:
+        raise ValidationError("DocumentType nema postavljen expense_account (trošak/nabava).")
+
+    if not cash_account.is_postable:
+        raise ValidationError("Cash konto mora biti postable.")
+
+
+    items_list = list(items)
+    if not items_list:
+        raise ValidationError("Nema stavki (items) – ne mogu knjižiti ulazni račun.")
+
+    totals = compute_purchase_totals_from_items(items_list, deposit_total=deposit_total)
+
+    if totals.vat_total != Decimal("0.00") and not document_type.vat_input_account_id:
+        raise ValidationError("Imamo PDV na stavkama, ali DocumentType nema vat_input_account (pretporez).")
+
+    if totals.deposit_total != Decimal("0.00") and not deposit_account:
+        raise ValidationError("Na stavkama postoji depozit, ali deposit_account nije zadan.")
+
+    ledger = document_type.ledger or get_single_ledger()
+
+    entry = JournalEntry.objects.create(
+        ledger=ledger,
+        number=_next_entry_number(ledger),
+        date=doc_date,
+        description=description or "Ulazni račun (gotovina)",
+        status=JournalEntry.Status.DRAFT,
+    )
+
+    JournalItem.objects.create(
+        entry=entry,
+        account=document_type.expense_account,
+        debit=totals.net_total,
+        credit=Decimal("0.00"),
+        description="Nabava/trošak (osnovica)",
+    )
+
+    if totals.vat_total != Decimal("0.00"):
+        JournalItem.objects.create(
+            entry=entry,
+            account=document_type.vat_input_account,
+            debit=totals.vat_total,
+            credit=Decimal("0.00"),
+            description="Pretporez (PDV ulaz)",
+        )
+
+    if totals.deposit_total != Decimal("0.00"):
+        JournalItem.objects.create(
+            entry=entry,
+            account=deposit_account,
+            debit=totals.deposit_total,
+            credit=Decimal("0.00"),
+            description="Povratna naknada (ambalaža/depozit)",
+        )
+
+    JournalItem.objects.create(
+        entry=entry,
+        account=cash_account,
+        debit=Decimal("0.00"),
+        credit=totals.payable_total,
+        description="Plaćeno gotovinom",
+    )
+
+    entry.post()
+    return entry
+
+
+def post_purchase_invoice_cash_from_inputs(
+    *,
+    document_type: DocumentType,
+    doc_date: date,
+    inputs: Iterable[WarehouseInput],
+    cash_account: Account,
+    deposit_account: Account | None = None,
+    description: str = "",
+) -> JournalEntry:
+    items = flatten_input_items(inputs)
+    inputs_list = list(inputs)
+    if any(wi.journal_entry_id for wi in inputs_list):
+        raise ValidationError("Jedna od primki je već proknjižena.")
+    entry = post_purchase_invoice_cash_from_items(
+        document_type=document_type,
+        doc_date=doc_date,
+        items=items,
+        cash_account=cash_account,
+        deposit_account=deposit_account,
+        description=description or "Ulazni račun (gotovina) - više primki",
+    )
+    for wi in inputs_list:
+        wi.journal_entry = entry
+        wi.save(update_fields=["journal_entry"])
     return entry

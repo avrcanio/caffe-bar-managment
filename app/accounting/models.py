@@ -16,6 +16,13 @@ class Ledger(models.Model):
     """
     name = models.CharField(max_length=200)
     oib = models.CharField(max_length=11, blank=True, default="")
+    company_profile = models.OneToOneField(
+        "configuration.CompanyProfile",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="ledger",
+    )
 
     def clean(self):
         qs = Ledger.objects.all()
@@ -25,6 +32,9 @@ class Ledger(models.Model):
             raise ValidationError("U ovoj bazi smije postojati samo jedan Ledger (1 firma = 1 baza).")
 
     def save(self, *args, **kwargs):
+        if self.company_profile_id:
+            self.name = self.company_profile.name
+            self.oib = self.company_profile.oib
         self.full_clean()
         return super().save(*args, **kwargs)
 

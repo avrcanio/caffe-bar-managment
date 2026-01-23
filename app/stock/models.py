@@ -250,3 +250,125 @@ class WarehouseTransferItem(models.Model):
     class Meta:
         verbose_name = "Stavka međuskladišnice"
         verbose_name_plural = "Stavke međuskladišnice"
+
+
+class StockLot(models.Model):
+    warehouse = models.ForeignKey(
+        "stock.WarehouseId",
+        to_field="rm_id",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="stock_lots",
+    )
+    artikl = models.ForeignKey(
+        "artikli.Artikl",
+        to_field="rm_id",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="stock_lots",
+    )
+    received_at = models.DateTimeField()
+    unit_cost = models.DecimalField(max_digits=12, decimal_places=4)
+    qty_in = models.DecimalField(max_digits=12, decimal_places=4, validators=[MinValueValidator(0)])
+    qty_remaining = models.DecimalField(max_digits=12, decimal_places=4, validators=[MinValueValidator(0)])
+    source_item = models.ForeignKey(
+        "orders.WarehouseInputItem",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="stock_lots",
+    )
+
+    def __str__(self) -> str:
+        name = self.artikl.name if self.artikl else "Artikl ?"
+        warehouse_name = self.warehouse.name if self.warehouse else "Skladiste ?"
+        return f"{name} @ {warehouse_name} ({self.qty_remaining}/{self.qty_in})"
+
+    class Meta:
+        verbose_name = "FIFO sloj"
+        verbose_name_plural = "FIFO slojevi"
+
+
+class StockMove(models.Model):
+    class MoveType(models.TextChoices):
+        IN = "in", "Ulaz"
+        OUT = "out", "Izlaz"
+        TRANSFER = "transfer", "Transfer"
+        ADJUST = "adjust", "Ispravak"
+
+    move_type = models.CharField(max_length=20, choices=MoveType.choices)
+    date = models.DateTimeField()
+    reference = models.CharField(max_length=200, blank=True, default="")
+    note = models.TextField(blank=True, default="")
+
+    def __str__(self) -> str:
+        return f"{self.move_type} @ {self.date:%Y-%m-%d %H:%M}"
+
+    class Meta:
+        verbose_name = "Skladisno kretanje"
+        verbose_name_plural = "Skladisna kretanja"
+
+
+class StockMoveLine(models.Model):
+    move = models.ForeignKey(
+        "stock.StockMove",
+        on_delete=models.CASCADE,
+        related_name="lines",
+    )
+    warehouse = models.ForeignKey(
+        "stock.WarehouseId",
+        to_field="rm_id",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="stock_move_lines",
+    )
+    artikl = models.ForeignKey(
+        "artikli.Artikl",
+        to_field="rm_id",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="stock_move_lines",
+    )
+    quantity = models.DecimalField(max_digits=12, decimal_places=4, validators=[MinValueValidator(0)])
+    unit_cost = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+    source_item = models.ForeignKey(
+        "orders.WarehouseInputItem",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="stock_move_lines",
+    )
+
+    def __str__(self) -> str:
+        name = self.artikl.name if self.artikl else "Artikl ?"
+        return f"{name} ({self.quantity})"
+
+    class Meta:
+        verbose_name = "Stavka kretanja"
+        verbose_name_plural = "Stavke kretanja"
+
+
+class StockAllocation(models.Model):
+    move_line = models.ForeignKey(
+        "stock.StockMoveLine",
+        on_delete=models.CASCADE,
+        related_name="allocations",
+    )
+    lot = models.ForeignKey(
+        "stock.StockLot",
+        on_delete=models.PROTECT,
+        related_name="allocations",
+    )
+    qty = models.DecimalField(max_digits=12, decimal_places=4, validators=[MinValueValidator(0)])
+    unit_cost = models.DecimalField(max_digits=12, decimal_places=4)
+
+    def __str__(self) -> str:
+        return f"{self.lot} -> {self.qty}"
+
+    class Meta:
+        verbose_name = "FIFO alokacija"
+        verbose_name_plural = "FIFO alokacije"

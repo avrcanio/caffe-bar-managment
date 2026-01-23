@@ -16,6 +16,10 @@ from stock.models import (
     Inventory,
     InventoryItem,
     ProductStockDS,
+    StockAllocation,
+    StockLot,
+    StockMove,
+    StockMoveLine,
     WarehouseId,
     WarehouseStock,
     WarehouseTransfer,
@@ -857,3 +861,50 @@ class WarehouseTransferAdmin(admin.ModelAdmin):
         else:
             obj.created_by = request.user
         super().save_model(request, obj, form, change)
+
+
+class StockMoveLineInline(admin.TabularInline):
+    model = StockMoveLine
+    extra = 0
+    fields = ("warehouse", "artikl", "quantity", "unit_cost", "source_item")
+    autocomplete_fields = ("artikl", "warehouse")
+
+
+@admin.register(StockMove)
+class StockMoveAdmin(admin.ModelAdmin):
+    list_display = ("id", "move_type", "date", "reference")
+    list_filter = ("move_type",)
+    search_fields = ("reference",)
+    inlines = [StockMoveLineInline]
+
+
+@admin.register(StockMoveLine)
+class StockMoveLineAdmin(admin.ModelAdmin):
+    list_display = ("id", "move", "warehouse", "artikl", "quantity", "unit_cost", "source_item")
+    list_filter = ("move__move_type", "warehouse", "artikl")
+    search_fields = ("artikl__name", "artikl__code", "move__reference")
+    raw_id_fields = ("move", "warehouse", "artikl", "source_item")
+
+
+@admin.register(StockLot)
+class StockLotAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "warehouse",
+        "artikl",
+        "received_at",
+        "unit_cost",
+        "qty_in",
+        "qty_remaining",
+        "source_item",
+    )
+    list_filter = ("warehouse", "artikl")
+    search_fields = ("artikl__name", "artikl__code")
+
+
+@admin.register(StockAllocation)
+class StockAllocationAdmin(admin.ModelAdmin):
+    list_display = ("id", "move_line", "lot", "qty", "unit_cost")
+    list_filter = ("lot__warehouse", "lot__artikl")
+    search_fields = ("lot__artikl__name", "lot__artikl__code")
+    raw_id_fields = ("move_line", "lot")

@@ -10,8 +10,8 @@ from .models import Ledger, Account, Period, JournalEntry, JournalItem
 
 @admin.register(Ledger)
 class LedgerAdmin(admin.ModelAdmin):
-    list_display = ("id", "name", "oib")
-    search_fields = ("name", "oib")
+    list_display = ("id", "name", "oib", "company_profile")
+    search_fields = ("name", "oib", "company_profile__name", "company_profile__oib")
 
     def has_add_permission(self, request):
         return not Ledger.objects.exists()

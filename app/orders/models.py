@@ -363,6 +363,22 @@ class WarehouseInput(models.Model):
     submit_command = models.CharField(max_length=50, default="_save_", verbose_name="submit")
     raw_payload = models.JSONField(null=True, blank=True, verbose_name="raw payload")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="kreirano")
+    journal_entry = models.ForeignKey(
+        "accounting.JournalEntry",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="warehouse_inputs",
+        verbose_name="temeljnica",
+    )
+    stock_move = models.OneToOneField(
+        "stock.StockMove",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="warehouse_input",
+        verbose_name="skladisno kretanje",
+    )
 
     def __str__(self) -> str:
         return f"Primka {self.id} ({self.order_id})"

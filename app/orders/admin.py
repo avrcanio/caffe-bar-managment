@@ -7,6 +7,7 @@ import json
 
 from django import forms
 from django.contrib import admin, messages
+from django.core.exceptions import ValidationError
 from email.utils import formataddr, parseaddr
 from django.db import models, transaction
 from django.core.mail import EmailMessage
@@ -18,6 +19,7 @@ import requests
 
 from configuration.models import CompanyProfile, OrderEmailTemplate
 from artikli.remaris_connector import RemarisConnector
+from stock.services import post_warehouse_input_to_stock
 
 from .models import (
     PurchaseOrder,
@@ -314,7 +316,7 @@ class WarehouseInputAdmin(admin.ModelAdmin):
     search_fields = ("id", "invoice_code", "delivery_note", "purchase_order__id")
     autocomplete_fields = ("order", "purchase_order", "supplier", "payment_type", "warehouse", "document_type")
     inlines = [WarehouseInputItemInline]
-    actions = ["send_warehouse_input_to_remaris"]
+    actions = ["send_warehouse_input_to_remaris", "post_warehouse_input_to_stock_action"]
 
     @admin.action(description="Send to Remaris", permissions=["change"])
     def send_warehouse_input_to_remaris(self, request, queryset):
@@ -378,6 +380,7 @@ class WarehouseInputAdmin(admin.ModelAdmin):
                 warehouse_input.remaris_id = remaris_id
                 warehouse_input.save(update_fields=["raw_payload", "date_modified", "remaris_id"])
                 updated_ids += 1
+
             else:
                 warehouse_input.save(update_fields=["raw_payload", "date_modified"])
             sent += 1
@@ -400,6 +403,47 @@ class WarehouseInputAdmin(admin.ModelAdmin):
                 f"Slanje nije uspjelo. Fail: {failed}.",
                 level=messages.ERROR,
             )
+
+    @admin.action(description="Proknjizi primku u skladiste", permissions=["change"])
+    def post_warehouse_input_to_stock_action(self, request, queryset):
+        posted = 0
+        skipped = 0
+        failed = 0
+
+        already_posted = queryset.filter(stock_move__isnull=False).count()
+        queryset = queryset.filter(stock_move__isnull=True)
+
+        for warehouse_input in queryset.select_related("warehouse"):
+            try:
+                post_warehouse_input_to_stock(warehouse_input=warehouse_input)
+                posted += 1
+            except ValidationError as exc:
+                skipped += 1
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id} preskocena: {exc}",
+                    level=messages.WARNING,
+                )
+            except Exception as exc:
+                failed += 1
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id} greska: {exc}",
+                    level=messages.ERROR,
+                )
+
+        if posted:
+            self.message_user(request, f"Proknjizeno primki: {posted}", level=messages.SUCCESS)
+        if already_posted:
+            self.message_user(
+                request,
+                f"Preskoceno (vec proknjizeno): {already_posted}",
+                level=messages.WARNING,
+            )
+        if skipped:
+            self.message_user(request, f"Preskoceno primki: {skipped}", level=messages.WARNING)
+        if failed:
+            self.message_user(request, f"Greske: {failed}", level=messages.ERROR)
 
 
 @admin.action(description="Send order email", permissions=["change"])

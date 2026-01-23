@@ -66,6 +66,7 @@ INSTALLED_APPS = [
     'orders',
     'mailbox_app',
     'accounting',
+    'purchases',
 ]
 
 MIDDLEWARE = [
