@@ -1,0 +1,102 @@
+services:
+  postgis:
+    image: postgis/postgis:16-3.4
+    container_name: postgis-postgis-1
+    environment:
+      POSTGRES_USER: postgis
+      POSTGRES_PASSWORD: postgis
+      POSTGRES_DB: mozzart_db
+    ports:
+      - "127.0.0.1:5432:5432"
+      - "100.64.0.3:5433:5432"
+    volumes:
+      - postgis_postgis_data16:/var/lib/postgresql/data
+    networks:
+      - hetzner_net
+  redis:
+    image: redis:7-alpine
+    container_name: mozzart-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - hetzner_net
+  web:
+    build: .
+    container_name: mozzart
+    command: bash -lc "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
+    volumes:
+      - ./app:/app
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://postgis:postgis@postgis:5432/mozzart_db
+    depends_on:
+      - postgis
+      - redis
+    ports:
+      - "8003:8000"
+    networks:
+      - hetzner_net
+  celery_worker:
+    build: .
+    container_name: mozzart-celery-worker
+    command: celery -A config worker -l info
+    volumes:
+      - ./app:/app
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://postgis:postgis@postgis:5432/mozzart_db
+    depends_on:
+      - postgis
+      - redis
+    networks:
+      - hetzner_net
+  celery_beat:
+    build: .
+    container_name: mozzart-celery-beat
+    command: celery -A config beat -l info
+    volumes:
+      - ./app:/app
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://postgis:postgis@postgis:5432/mozzart_db
+    depends_on:
+      - postgis
+      - redis
+    networks:
+      - hetzner_net
+  frontend:
+    image: node:20-alpine
+    container_name: mozzart-frontend
+    working_dir: /app
+    command: sh -lc "npm install && npm run dev"
+    volumes:
+      - ./frontend:/app
+    ports:
+      - "3001:3000"
+    depends_on:
+      - web
+    networks:
+      - hetzner_net
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: tailscale
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - tailscale_state:/var/lib/tailscale
+    network_mode: host
+
+networks:
+  hetzner_net:
+    external: true
+
+volumes:
+  postgis_postgis_data16:
+    external: true
+  tailscale_state:

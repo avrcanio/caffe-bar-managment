@@ -1,0 +1,15 @@
+{
+  "dataSource": "warehouseStockDS",
+  "operationType": "fetch",
+  "startRow": 0,
+  "endRow": 75,
+  "textMatchStyle": "exact",
+  "componentId": "warehouseStockGrid",
+  "oldValues": null,
+  "data": {
+    "warehouseId": 4,
+    "allBaseGroups": true,
+    "showFilter": 20,
+    "request": "?_9896.52755945407"
+  }
+}

@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html style="height: 100%">
+<head>
+	<meta charset="utf-8" />
+    <title>Mozart - Remaris Master</title>
+	<link href="/favicon.png" rel="shortcut icon" type="image/x-icon" />
+	<meta name="viewport" content="width=device-width" />
+
+    <link href='https://fonts.googleapis.com/css?family=Open+Sans:400,700' rel='stylesheet' type='text/css'>
+    <link rel="stylesheet" href="//maxcdn.bootstrapcdn.com/font-awesome/4.3.0/css/font-awesome.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/normalize/5.0.0/normalize.min.css">
+
+	<link href="https://cdn.remaris.hr/static/2.142.0.0-1fb0ae6d/Content/utilis/utilis.css" rel="stylesheet"/>
+
+	<link href="https://cdn.remaris.hr/static/2.142.0.0-1fb0ae6d/Content/themes/grey/theme.css" rel="stylesheet"/>
+
+	<link href="https://cdn.remaris.hr/static/2.142.0.0-1fb0ae6d/Content/base.css" rel="stylesheet"/>
+
+
+	<script src="https://cdn.remaris.hr/static/2.142.0.0-1fb0ae6d/Scripts/jquery.js"></script>
+
+	<script src="https://cdn.remaris.hr/static/2.142.0.0-1fb0ae6d/Scripts/mvc.js"></script>
+
+
+
+
+    <script src="https://cdn.remaris.hr/static/2.142.0.0-1fb0ae6d/Scripts/localization_hr.js"></script>
+
+
+	<script src="https://cdn.remaris.hr/static/2.142.0.0-1fb0ae6d/Scripts/scripts.js"></script>
+
+	
+	<script type="text/javascript">
+		$(window).load(function() {
+			$("#txtUsername").focus();
+		});
+	</script>
+
+	<script src="https://cdn.remaris.hr/static/2.142.0.0-1fb0ae6d/Scripts/start.js"></script>
+
+</head>
+<body>
+	
+<script type="text/javascript" defer>
+    var allPermissionsBool =  false;
+    var permissions = [];
+    var manualBaseUrl = '//upute.gastromaster.com.hr/remaris-master/2/hr/';
+
+    // scButtonsHeight - visina SVIH smartclient gumbi (button-a)
+    var scButtonsHeight = 25;
+
+
+    
+    //Used in javascript files
+    //Global variable that points to /Content dir on CDN or locally
+    var STATIC_CONTENT_DIRECTORY = "https://cdn.remaris.hr/static/2.142.0.0-1fb0ae6d/Content/";
+
+    if (typeof isc !== 'undefined') {
+        //smart client defaults
+        isc.PrintCanvas.addProperties({ printFrameURL: "/Resources/sc/system/helpers/printFrame.html" });
+    }
+
+    var enableButtons = function(){
+        _.defer(function(){
+
+            $("[data-u-managerpermission]").each(function(){
+                var buttonPermission = this.getAttribute('data-u-managerpermission');
+                var buttonPermissionType = this.getAttribute('data-u-managerpermissiontype');
+
+                if(allPermissionsBool && (!buttonPermission || buttonPermission!='fake'))
+                {
+                    $(this).button({ disabled: false });
+                }
+                else
+                {
+                    var cookie = utilis.Context._getDataFromCookie();
+                    var CtxLocationId = null;
+                    var CtxOrganizationId = null;
+
+                    if (cookie != null)
+                    {
+                        CtxLocationId = utilis.Context._getDataFromCookie().LocationId;
+                        CtxOrganizationId = utilis.Context._getDataFromCookie().OrganizationId;
+                    }
+
+                    for(i= 0; i<permissions.length; ++i)
+                    {
+                        var userPermission = permissions[i];
+
+                        if(userPermission.PermissionName == buttonPermission)
+                        {
+                            var enableButton = false;
+                            switch(buttonPermissionType)
+                            {
+                                case "Read":
+                                    enableButton = userPermission.Read;
+                                    break;
+                                case "Insert":
+                                    enableButton = userPermission.Insert;
+                                    break;
+                                case "Edit":
+                                    enableButton = userPermission.Edit;
+                                    break;
+                                case "Print":
+                                    enableButton = userPermission.Print;
+                                    break;
+                            }
+
+                            if((userPermission.LocationId == null ||
+                               userPermission.LocationId == CtxLocationId
+                                ) && enableButton)
+                            {
+                                $(this).button({ disabled: false });
+                                break;
+                            }
+                            else
+                            {
+                                $(this).button({ disabled: true });
+                            }
+                        }
+                    }
+                }
+            })
+
+            if (window.customEnableButtons)
+            {
+                window.customEnableButtons();
+            }
+
+            // Wire up click to open new tab, on elements with help tag
+            $("[data-help]").not(".helpLabel").each(function() {
+                $(this).addClass('helpLabel');
+                $(this).click(function() {
+                    window.open(manualBaseUrl + "topic/" + $(this).attr('data-help'), '_blank');
+                })
+            });
+            
+            // Put into content-commands (as a section button)
+            $(".entity-help").not(".contentCommand").each(function () {
+                $(this).addClass("contentCommand").appendTo(".content-commands");
+            });
+
+            // Put into content-commands (as a section button)
+            $("[data-history-url]").appendTo(".content-commands");
+
+            // Also, put any  buttons with this class into content-commands (as a section button)
+            $(".as-content-command").not(".contentCommand").each(function () {
+                $(this).addClass("contentCommand").appendTo(".content-commands");
+            });
+
+            // Wire up click to request ajax data, on elements with history-url tag
+            $("[data-history-url]").not(".historyEvent").each(function () {
+                $(this).addClass('historyEvent'); // mark that event is set
+                $(this).click(function () {
+                    $.ajax({
+                        url: $(this).data("history-url"),
+                        type: "GET"
+                    }).done(function (data) {
+                        isc.say(data);
+                    });
+                })
+            });
+        })
+    }
+
+    //Run only if JQuery not defined
+    if(!!window.jQuery) {
+        $(document).on('app-context-change', function() {
+            enableButtons();
+        });
+
+        $(document).ajaxComplete(function( event, xhr, settings ) {
+            enableButtons();
+        });
+
+        var customLang = {
+            searching: function () {
+                return 'Unesite 1 ili više znakova';
+            },
+            noResults: function () {
+                return 'Nema rezultata pretraživanja';
+            }, 
+            errorLoading: function () {
+                return 'Rezultati se nisu mogli učitati';
+            },
+            inputTooShort: function () {
+                return 'Molimo unesite barem 1 znak';
+            },
+            loadingMore: function () {
+                return 'Učitavanje dodatnih rezultata...';
+            },
+        };
+
+        $.extend($.fn.select2.defaults.defaults, {
+            language: customLang
+        });
+    }
+
+    //SmartClient Entity History button
+    function getScHistoryButton(url) {
+        return isc.Button.create({
+            title: "Povijest izmjena",
+            icon: "https://cdn.remaris.hr/static/2.142.0.0-1fb0ae6d/Content/images/user-calendar.png",
+            showDisabledIcon: false,
+            width: 120,
+            height: scButtonsHeight,
+            click: function () {
+                if(url()) {
+                    scShowEntityHistory(url());
+                }
+            }
+        })
+    }
+
+    function scShowEntityHistory(url) {
+        isc.RPCManager.sendRequest({
+            callback: function (data) {
+                if(data){
+                    isc.say(data.data);
+                }
+            }, actionURL: url, useSimpleHttp: true, contentType: "application/json",
+        });
+    }
+
+    //SmartClient Help button
+    function getScHelpButton(buttonTitle, helpUrl, width) {
+        var btnWidth = 120;
+        if (width != undefined) {
+            btnWidth = width;
+        }
+        return isc.Button.create({
+            title: buttonTitle,
+            icon: "https://cdn.remaris.hr/static/2.142.0.0-1fb0ae6d/Content/images/help-icon.png",
+            showDisabledIcon: false,
+            width: btnWidth,
+            height: scButtonsHeight,
+            click: function () {
+                window.open(manualBaseUrl + "topic/" + helpUrl, '_blank');
+            }
+        })
+    }
+
+    var isSystemUser = "false";
+
+    function getPermissionForPrint(permissionName) {
+        if (isSystemUser == "true") {
+            return true;
+        }
+        if (allPermissionsBool) {
+            return true;
+        }
+        for (i = 0; i < permissions.length; i++) {
+            if (permissions[i].PermissionName == permissionName) {
+                if (permissions[i].Print) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    function getPermissionForRead(permissionName) {
+        if (isSystemUser == "true") {
+            return true;
+        }
+        if (allPermissionsBool) {
+            return true;
+        }
+        for (i = 0; i < permissions.length; i++) {
+            if (permissions[i].PermissionName == permissionName) {
+                if (permissions[i].Read) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    function getPermissionForCreateOrUpdate(permissionName) {
+        if (isSystemUser == "true") {
+            return true;
+        }
+        if (allPermissionsBool) {
+            return true;
+        }
+        for (i = 0; i < permissions.length; i++) {
+            if (permissions[i].PermissionName == permissionName) {
+                if (permissions[i].Insert && permissions[i].Edit) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+
+    function convertToIsoDate(date) {
+        if (!date) {
+            return null;
+        }
+        return date.toISOString().split("T")[0];
+    }
+
+
+    var ajaxRequest = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function () {
+        var res = ajaxRequest.apply(this, arguments);
+        this.setRequestHeader('AJAX-REQUEST', 'AJAX-REQUEST');
+        return res;
+    }
+</script>
+
+
+
+<body class="customLoginbody" style="height: 100%">
+    <div class="customLoginwrapper" style="box-sizing: border-box">
+        <form id="loginFrm" class="login" action="/Account/Logon?" method="post">
+            <div style="text-align:center;">
+                <img class="puff-in-center" src="https://cdn.remaris.hr/static/2.142.0.0-1fb0ae6d/Content/images/remaris-master.png" style="max-width: 100%; height: 80px" />
+            </div>
+            <p style="margin-top: 10px; margin-bottom: 10px">Unesite korisničko ime i lozinku</p>
+            <input Class="customBoxSizing" data-val="true" data-val-required="Obavezno polje." id="txtUsername" name="UserName" placeholder="korisničko ime" type="text" value="" />
+            <i class="fa fa-user"></i>
+            <span class="field-validation-valid" data-valmsg-for="UserName" data-valmsg-replace="true"></span>
+            <input Class="customBoxSizing" data-val="true" data-val-required="Obavezno polje." id="Password" name="Password" placeholder="lozinka" type="password" />
+            <i class="fa fa-key"></i>
+            <span class="field-validation-valid" data-valmsg-for="Password" data-valmsg-replace="true"></span>
+            <button id="loginButton" type="submit">
+                <i class="customLoginspinner"></i>
+                <span class="state">Prijavi se</span>
+            </button>
+        </form>
+        <footer style="margin-top: 10px"><a class="loginAnchor" target="blank" href="http://www.remaris.com/">www.remaris.com</a></footer>
+        <div style="padding-top:10px; float:left; color: #FFFFFF">2.142.0.0</div>
+    </div>
+</body>
+
+<script>
+    // Clearing session storage for april fools day prank and entering user email
+    if (window.sessionStorage) {
+        sessionStorage.clear();
+    }
+
+    // Original function is in custom.js available only to mobile layout
+    var logOut = function () {
+        if (typeof hostApp != 'undefined' && hostApp) {
+            // Use host app interface
+            hostApp.logOut();
+            return true;
+        } else if (typeof hostAppIos != 'undefined' && hostAppIos) {
+            // Use protocol to notify ios host app
+            window.location = "remaris://host.app/logOut";
+            return true;
+        }
+        return false;
+    }
+
+    logOut();
+
+    $('#loginButton').on('click', function (e) {
+        e.preventDefault();
+        var userName = $("#txtUsername").val();
+        var password = $("#Password").val();
+        if (userName != null && userName.length >= 1 &&
+            password != null && password.length >= 1) {
+            var form = $("#loginFrm")
+            $state = form.find('button > .state');
+            form.addClass('loading');
+            $state.html('Autoriziram <br/><br/><img src="https://cdn.remaris.hr/static/2.142.0.0-1fb0ae6d/Content/images/loginProgress.svg" />');
+            form.submit();
+        }
+        return false;
+    });
+</script>
+
+</body>
+</html>

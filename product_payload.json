@@ -1,0 +1,14 @@
+{
+  "dataSource": "productDS",
+  "operationType": "fetch",
+  "startRow": 0,
+  "endRow": 75,
+  "textMatchStyle": "exact",
+  "componentId": "productGrid",
+  "oldValues": null,
+  "sortBy": ["name"],
+  "data": {
+    "productActiveFilter": "20",
+    "productFilter": "10"
+  }
+}
