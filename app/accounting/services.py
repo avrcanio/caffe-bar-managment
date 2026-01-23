@@ -2,9 +2,11 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
-from django.db.models import Sum
+from django.core.exceptions import ValidationError
+from django.db.models import Sum, Max
 
 from accounting.models import Ledger, JournalItem, JournalEntry, Account
+from configuration.models import DocumentType
 
 
 def get_single_ledger() -> Ledger:
@@ -132,3 +134,56 @@ def trial_balance(date_from: date, date_to: date, *, only_postable: bool = True,
         "total_credit": total_c,
         "difference": total_d - total_c,
     }
+
+
+def _next_entry_number(ledger: Ledger) -> int:
+    last = JournalEntry.objects.filter(ledger=ledger).aggregate(
+        max_number=Max("number")
+    )["max_number"]
+    if last is None:
+        last = JournalEntry.objects.filter(ledger=ledger).order_by("-number").values_list("number", flat=True).first()
+    return (last or 0) + 1
+
+
+def post_sales_invoice(*, document_type: DocumentType, date: date, net: Decimal, vat: Decimal, description: str = "") -> JournalEntry:
+    if not document_type.ar_account_id:
+        raise ValidationError("DocumentType nema postavljen AR konto (kupci).")
+    if not document_type.revenue_account_id:
+        raise ValidationError("DocumentType nema postavljen revenue konto (prihod).")
+    if vat != Decimal("0.00") and not document_type.vat_output_account_id:
+        raise ValidationError("DocumentType nema postavljen VAT output konto (PDV obveza).")
+
+    ledger = document_type.ledger or get_single_ledger()
+    gross = net + vat
+
+    entry = JournalEntry.objects.create(
+        ledger=ledger,
+        number=_next_entry_number(ledger),
+        date=date,
+        description=description or "Izlazni racun",
+        status=JournalEntry.Status.DRAFT,
+    )
+
+    JournalItem.objects.create(
+        entry=entry,
+        account=document_type.ar_account,
+        debit=gross,
+        credit=Decimal("0.00"),
+    )
+    JournalItem.objects.create(
+        entry=entry,
+        account=document_type.revenue_account,
+        debit=Decimal("0.00"),
+        credit=net,
+    )
+
+    if vat != Decimal("0.00"):
+        JournalItem.objects.create(
+            entry=entry,
+            account=document_type.vat_output_account,
+            debit=Decimal("0.00"),
+            credit=vat,
+        )
+
+    entry.post()
+    return entry
