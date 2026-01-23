@@ -384,8 +384,13 @@ class SupplierArtiklListView(APIView):
             unit_id = unit.id if unit else None
             unit_name = unit.name if unit else None
             image_url = artikl.image.url if artikl and artikl.image else None
+            image_46x75_url = None
+            if artikl and artikl.image:
+                image_46x75_url = f"/api/artikli/{artikl.rm_id}/image-46x75/"
             if image_url and request is not None:
                 image_url = request.build_absolute_uri(image_url)
+            if image_46x75_url and request is not None:
+                image_46x75_url = request.build_absolute_uri(image_46x75_url)
             results.append(
                 {
                     "artikl_id": artikl.id if artikl else None,
@@ -393,6 +398,7 @@ class SupplierArtiklListView(APIView):
                     "name": artikl.name if artikl else None,
                     "code": artikl.code if artikl else None,
                     "image": image_url,
+                    "image_46x75": image_46x75_url,
                     "base_group": base_group,
                     "unit_of_measure": unit_id,
                     "unit_name": unit_name,

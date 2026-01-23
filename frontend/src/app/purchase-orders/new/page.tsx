@@ -389,10 +389,10 @@ export default function NewPurchaseOrderPage() {
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                           <div className="flex items-center gap-4">
                             <div className="h-[77px] w-[48px] overflow-hidden rounded-xl border border-black/10 bg-white">
-                              {item.image ? (
+                              {item.image46x75 ? (
                                 // eslint-disable-next-line @next/next/no-img-element
                                 <img
-                                  src={item.image}
+                                  src={item.image46x75}
                                   alt={item.name}
                                   className="h-full w-full object-cover"
                                 />

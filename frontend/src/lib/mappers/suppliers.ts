@@ -22,6 +22,7 @@ export type SupplierArtiklDTO = {
   name: string;
   code: string | null;
   image: string | null;
+  image_46x75?: string | null;
   base_group: string | null;
   unit_of_measure: number | null;
   unit_name: string | null;
@@ -41,6 +42,7 @@ export type SupplierArtikl = {
   name: string;
   code: string | null;
   image: string | null;
+  image46x75?: string | null;
   baseGroup: string | null;
   unitId: number | null;
   unitName: string | null;
@@ -72,6 +74,7 @@ export const mapSupplierArtikli = (
     name: item.name,
     code: item.code,
     image: item.image,
+    image46x75: item.image_46x75 ?? null,
     baseGroup: item.base_group,
     unitId: item.unit_of_measure,
     unitName: item.unit_name,
