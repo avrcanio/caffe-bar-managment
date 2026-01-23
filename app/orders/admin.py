@@ -257,7 +257,10 @@ def _warehouse_input_payload(warehouse_input):
         "TypeName": "WarehouseInputViewModel",
         "Id": str(warehouse_input.remaris_id) if warehouse_input.remaris_id else "",
         "DateModified": _fmt_datetime(warehouse_input.date_modified or now) if is_update else "",
-        "DocumentType": str(warehouse_input.document_type or "10"),
+        "DocumentType": str(
+            warehouse_input.document_type_code
+            or (warehouse_input.document_type.code if warehouse_input.document_type else "10")
+        ),
         "IsInPdvSystem": "True" if warehouse_input.is_in_pdv_system else "False",
         "ExportDocumentTypeRequired": "False",
         "WarehouseId": str(warehouse_input.warehouse.rm_id) if warehouse_input.warehouse else "",
@@ -309,7 +312,7 @@ class WarehouseInputAdmin(admin.ModelAdmin):
     list_display = ("id", "order", "supplier", "warehouse", "date", "document_type", "total", "is_canceled")
     list_filter = ("document_type", "is_canceled", "supplier", "warehouse")
     search_fields = ("id", "invoice_code", "delivery_note", "purchase_order__id")
-    autocomplete_fields = ("order", "purchase_order", "supplier", "payment_type", "warehouse")
+    autocomplete_fields = ("order", "purchase_order", "supplier", "payment_type", "warehouse", "document_type")
     inlines = [WarehouseInputItemInline]
     actions = ["send_warehouse_input_to_remaris"]
 

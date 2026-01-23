@@ -1,0 +1,23 @@
+dev.mozart.sibenik1983.local {
+    tls /certs/dev.mozart.sibenik1983.local.pem /certs/dev.mozart.sibenik1983.local-key.pem
+
+    handle /api* {
+        reverse_proxy web:8000
+    }
+
+    handle /backend* {
+        reverse_proxy web:8000
+    }
+
+    handle /static* {
+        reverse_proxy web:8000
+    }
+
+    handle /admin* {
+        reverse_proxy web:8000
+    }
+
+    handle {
+        reverse_proxy frontend:3000
+    }
+}

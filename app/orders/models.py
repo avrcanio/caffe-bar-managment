@@ -325,7 +325,15 @@ class WarehouseInput(models.Model):
     remaris_id = models.IntegerField(null=True, blank=True, unique=True, verbose_name="remaris id")
     date = models.DateField(verbose_name="datum")
     date_modified = models.DateTimeField(null=True, blank=True, verbose_name="datum izmjene")
-    document_type = models.CharField(max_length=10, default="10", verbose_name="tip dokumenta")
+    document_type_code = models.CharField(max_length=10, default="10", verbose_name="tip dokumenta (sifra)")
+    document_type = models.ForeignKey(
+        "configuration.DocumentType",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="warehouse_inputs",
+        verbose_name="tip dokumenta",
+    )
     is_in_pdv_system = models.BooleanField(default=True, verbose_name="u PDV sustavu")
     warehouse = models.ForeignKey(
         "stock.WarehouseId",

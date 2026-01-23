@@ -3,8 +3,18 @@ from django.http import HttpResponseRedirect
 from django.urls import path, reverse
 from django.db import transaction
 
+from accounting.services import get_single_ledger
 from artikli.remaris_connector import RemarisConnector
-from .models import CompanyProfile, OrderEmailTemplate, PaymentType, PointOfIssueData, RemarisCookie, TaxGroup
+from .models import (
+    Account,
+    CompanyProfile,
+    DocumentType,
+    OrderEmailTemplate,
+    PaymentType,
+    PointOfIssueData,
+    RemarisCookie,
+    TaxGroup,
+)
 
 
 @admin.action(description="Import mjesta izdavanja from Remaris", permissions=["change"])
@@ -253,3 +263,98 @@ class CompanyProfileAdmin(admin.ModelAdmin):
 class OrderEmailTemplateAdmin(admin.ModelAdmin):
     list_display = ("subject_template", "active")
     list_filter = ("active",)
+
+
+@admin.register(DocumentType)
+class DocumentTypeAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "name",
+        "ar_code",
+        "ap_code",
+        "vat_output_code",
+        "vat_input_code",
+        "revenue_code",
+        "expense_code",
+    )
+    list_filter = ("direction", "is_active")
+    search_fields = ("name", "code")
+    ordering = ("sort_order", "name")
+    autocomplete_fields = (
+        "stock_account",
+        "counterpart_account",
+        "ar_account",
+        "ap_account",
+        "vat_output_account",
+        "vat_input_account",
+        "revenue_account",
+        "expense_account",
+    )
+    exclude = ("ledger",)
+
+    def ar_code(self, obj):
+        return getattr(obj.ar_account, "code", "")
+
+    ar_code.short_description = "AR"
+
+    def ap_code(self, obj):
+        return getattr(obj.ap_account, "code", "")
+
+    ap_code.short_description = "AP"
+
+    def vat_output_code(self, obj):
+        return getattr(obj.vat_output_account, "code", "")
+
+    vat_output_code.short_description = "PDV izlaz"
+
+    def vat_input_code(self, obj):
+        return getattr(obj.vat_input_account, "code", "")
+
+    vat_input_code.short_description = "PDV ulaz"
+
+    def revenue_code(self, obj):
+        return getattr(obj.revenue_account, "code", "")
+
+    revenue_code.short_description = "Prihod"
+
+    def expense_code(self, obj):
+        return getattr(obj.expense_account, "code", "")
+
+    expense_code.short_description = "Rashod"
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        fk_names = {
+            "ar_account",
+            "ap_account",
+            "vat_output_account",
+            "vat_input_account",
+            "revenue_account",
+            "expense_account",
+        }
+
+        obj_id = request.resolver_match.kwargs.get("object_id")
+        if db_field.name in fk_names and obj_id:
+            try:
+                obj = DocumentType.objects.get(pk=obj_id)
+                if obj.ledger_id:
+                    kwargs["queryset"] = Account.objects.filter(
+                        ledger=obj.ledger,
+                        is_postable=True,
+                        is_active=True,
+                    ).order_by("code")
+            except DocumentType.DoesNotExist:
+                pass
+
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    def save_model(self, request, obj, form, change):
+        if not obj.ledger_id:
+            obj.ledger = get_single_ledger()
+        super().save_model(request, obj, form, change)
+
+
+@admin.register(Account)
+class AccountAdmin(admin.ModelAdmin):
+    list_display = ("code", "name", "is_active")
+    list_filter = ("is_active",)
+    search_fields = ("code", "name")

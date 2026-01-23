@@ -31,7 +31,6 @@ services:
     environment:
       DATABASE_URL: postgresql://postgis:postgis@postgis:5432/mozzart_db
     depends_on:
-      - postgis
       - redis
     ports:
       - "8003:8000"
@@ -48,7 +47,6 @@ services:
     environment:
       DATABASE_URL: postgresql://postgis:postgis@postgis:5432/mozzart_db
     depends_on:
-      - postgis
       - redis
     networks:
       - hetzner_net
@@ -63,7 +61,6 @@ services:
     environment:
       DATABASE_URL: postgresql://postgis:postgis@postgis:5432/mozzart_db
     depends_on:
-      - postgis
       - redis
     networks:
       - hetzner_net
@@ -78,6 +75,21 @@ services:
       - "3001:3000"
     depends_on:
       - web
+    networks:
+      - hetzner_net
+  caddy:
+    image: caddy:2-alpine
+    container_name: mozzart-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/certs:/certs:ro
+      - caddy_data:/data
+    depends_on:
+      - web
+      - frontend
     networks:
       - hetzner_net
   tailscale:
@@ -100,3 +112,4 @@ volumes:
   postgis_postgis_data16:
     external: true
   tailscale_state:
+  caddy_data:

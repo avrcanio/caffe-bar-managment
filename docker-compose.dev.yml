@@ -1,24 +1,33 @@
 services:
+  postgis:
+    profiles:
+      - disabled
   web:
     container_name: mozzart-dev
     env_file:
       - .env.dev
     environment:
-      DATABASE_URL: postgresql://postgis:postgis@postgis:5432/dev_mozzart_db
+      DATABASE_URL: ${DATABASE_URL}
     ports:
       - "8004:8000"
+    depends_on:
+      - redis
   celery_worker:
     container_name: mozzart-dev-celery-worker
     env_file:
       - .env.dev
     environment:
-      DATABASE_URL: postgresql://postgis:postgis@postgis:5432/dev_mozzart_db
+      DATABASE_URL: ${DATABASE_URL}
+    depends_on:
+      - redis
   celery_beat:
     container_name: mozzart-dev-celery-beat
     env_file:
       - .env.dev
     environment:
-      DATABASE_URL: postgresql://postgis:postgis@postgis:5432/dev_mozzart_db
+      DATABASE_URL: ${DATABASE_URL}
+    depends_on:
+      - redis
   frontend:
     container_name: mozzart-frontend-dev
     env_file:
