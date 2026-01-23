@@ -87,16 +87,18 @@ async function buildApiError(response: Response): Promise<ApiError> {
   } catch (err) {
     data = null;
   }
+  const detailMessage =
+    data &&
+    typeof data === "object" &&
+    "detail" in data &&
+    typeof (data as { detail?: unknown }).detail === "string"
+      ? (data as { detail?: string }).detail || ""
+      : "";
   const message =
-    (data &&
-      typeof data === "object" &&
-      "detail" in data &&
-      typeof (data as { detail?: unknown }).detail === "string" &&
-      (data as { detail?: string }).detail) ||
+    detailMessage ||
     (data && typeof data === "object"
       ? JSON.stringify(data)
-      : null) ||
-    `Request failed: ${response.status}`;
+      : `Request failed: ${response.status}`);
   const error = new Error(message) as ApiError;
   error.status = response.status;
   error.data = data;
@@ -118,6 +120,38 @@ export async function apiPostJson<T>(
 ): Promise<T> {
   const response = await apiRequest(path, {
     method: "POST",
+    body,
+    ...options,
+  });
+  if (!response.ok) {
+    throw await buildApiError(response);
+  }
+  return response.json();
+}
+
+export async function apiPutJson<T>(
+  path: string,
+  body?: unknown,
+  options: Omit<ApiRequestOptions, "method" | "body"> = {}
+): Promise<T> {
+  const response = await apiRequest(path, {
+    method: "PUT",
+    body,
+    ...options,
+  });
+  if (!response.ok) {
+    throw await buildApiError(response);
+  }
+  return response.json();
+}
+
+export async function apiPatchJson<T>(
+  path: string,
+  body?: unknown,
+  options: Omit<ApiRequestOptions, "method" | "body"> = {}
+): Promise<T> {
+  const response = await apiRequest(path, {
+    method: "PATCH",
     body,
     ...options,
   });

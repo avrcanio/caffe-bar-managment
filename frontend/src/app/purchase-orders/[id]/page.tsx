@@ -4,27 +4,17 @@ import { useEffect, useState } from "react";
 import { DM_Serif_Display } from "next/font/google";
 import Link from "next/link";
 import { useParams } from "next/navigation";
+import { apiGetJson } from "@/lib/api";
+import { formatDate, formatEuro } from "@/lib/format";
+import EmptyState from "@/components/EmptyState";
+import LoadingCard from "@/components/LoadingCard";
+import {
+  mapPurchaseOrder,
+  PurchaseOrder,
+  PurchaseOrderDTO,
+} from "@/lib/mappers";
 
 const dmSerif = DM_Serif_Display({ subsets: ["latin"], weight: "400" });
-
-type PurchaseOrderItem = {
-  id: number;
-  artikl_name?: string | null;
-  quantity: string;
-  unit_name?: string | null;
-  price?: string | null;
-};
-
-type PurchaseOrder = {
-  id: number;
-  supplier_name?: string | null;
-  status_display?: string | null;
-  ordered_at: string;
-  total_net: string;
-  total_gross: string;
-  total_deposit: string;
-  items?: PurchaseOrderItem[];
-};
 
 export default function PurchaseOrderDetailPage() {
   const params = useParams();
@@ -37,17 +27,16 @@ export default function PurchaseOrderDetailPage() {
     const run = async () => {
       setLoading(true);
       setError("");
-      const response = await fetch(`/api/purchase-orders/${id}/`, {
-        credentials: "include",
-      });
-      if (!response.ok) {
+      try {
+        const data = await apiGetJson<PurchaseOrderDTO>(
+          `/api/purchase-orders/${id}/`
+        );
+        setOrder(mapPurchaseOrder(data));
+      } catch (err) {
         setError("Ne mogu ucitati purchase order.");
+      } finally {
         setLoading(false);
-        return;
       }
-      const data = await response.json();
-      setOrder(data);
-      setLoading(false);
     };
     if (id) {
       run();
@@ -60,14 +49,11 @@ export default function PurchaseOrderDetailPage() {
         <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div className="space-y-2">
             <p className="text-sm uppercase tracking-[0.3em] text-black/60">
-              Purchase order
-            </p>
-            <h1 className={`${dmSerif.className} text-4xl`}>
-              PO-{id}
-            </h1>
+              Narudžba {id}
+            </p>           
           </div>
           <Link
-            href="/"
+            href="/purchase-orders"
             className="rounded-full border border-black/20 px-5 py-2 text-xs uppercase tracking-[0.2em] text-black/70"
           >
             Povratak
@@ -75,9 +61,7 @@ export default function PurchaseOrderDetailPage() {
         </header>
 
         {loading ? (
-          <div className="rounded-2xl border border-black/10 bg-white/70 p-4 text-sm text-black/60">
-            Ucitavanje purchase ordera...
-          </div>
+          <LoadingCard message="Ucitavanje purchase ordera..." />
         ) : null}
         {error ? (
           <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-600">
@@ -91,15 +75,18 @@ export default function PurchaseOrderDetailPage() {
               {[
                 {
                   label: "Dobavljac",
-                  value: order.supplier_name || "-",
+                  value: order.supplierName,
                 },
                 {
                   label: "Status",
-                  value: order.status_display || "-",
+                  value: order.statusLabel,
                 },
                 {
                   label: "Datum",
-                  value: new Date(order.ordered_at).toLocaleString(),
+                  value: formatDate(order.orderedAt, {
+                    dateStyle: "short",
+                    timeStyle: "short",
+                  }),
                 },
               ].map((card) => (
                 <div
@@ -123,18 +110,16 @@ export default function PurchaseOrderDetailPage() {
                     className="rounded-2xl border border-black/10 bg-white/70 px-4 py-3"
                   >
                     <p className="text-sm font-semibold">
-                      {item.artikl_name || "Artikl"}
+                      {item.name}
                     </p>
                     <p className="text-xs text-black/60">
-                      {item.quantity} {item.unit_name || ""} ·{" "}
-                      {item.price || "-"} EUR
+                      {item.quantity} {item.unitName || ""} ·{" "}
+                      {formatEuro(item.price)}
                     </p>
                   </div>
                 ))}
                 {order.items && order.items.length === 0 ? (
-                  <p className="text-sm text-black/60">
-                    Nema stavki u narudzbi.
-                  </p>
+                  <EmptyState message="Nema stavki u narudzbi." />
                 ) : null}
               </div>
             </section>
@@ -143,15 +128,15 @@ export default function PurchaseOrderDetailPage() {
               {[
                 {
                   label: "Total net",
-                  value: `${order.total_net} EUR`,
+                  value: formatEuro(order.totalNet),
                 },
                 {
                   label: "Total gross",
-                  value: `${order.total_gross} EUR`,
+                  value: formatEuro(order.totalGross),
                 },
                 {
                   label: "Povratna naknada",
-                  value: `${order.total_deposit} EUR`,
+                  value: formatEuro(order.totalDeposit),
                 },
               ].map((card) => (
                 <div

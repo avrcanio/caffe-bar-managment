@@ -1,52 +1,22 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { DM_Serif_Display } from "next/font/google";
 import Link from "next/link";
 import { apiGetJson } from "@/lib/api";
+import { formatDateTime } from "@/lib/format";
+import EmptyState from "@/components/EmptyState";
+import LoadingCard from "@/components/LoadingCard";
+import {
+  MailListDTO,
+  MailMessage,
+  MailMessageDetail,
+  MailMessageDetailDTO,
+  mapMailList,
+  mapMailMessageDetail,
+} from "@/lib/mappers";
 
 const dmSerif = DM_Serif_Display({ subsets: ["latin"], weight: "400" });
-
-type MailMessage = {
-  id: number;
-  mailbox: string;
-  subject: string;
-  from_email: string;
-  to_emails: string;
-  sent_at: string | null;
-  attachments_count: number;
-};
-
-type MailAttachment = {
-  id: number;
-  filename: string;
-  content_type: string;
-  size: number;
-  file_url: string | null;
-};
-
-type MailMessageDetail = {
-  id: number;
-  mailbox: string;
-  subject: string;
-  from_email: string;
-  to_emails: string;
-  cc_emails: string;
-  sent_at: string | null;
-  body_text: string;
-  body_html: string;
-  attachments: MailAttachment[];
-};
-
-type MailListResponse = {
-  count: number;
-  results: MailMessage[];
-};
-
-const euroDate = (value: string | null) => {
-  if (!value) return "-";
-  return new Date(value).toLocaleString();
-};
 
 export default function MailboxPage() {
   const [messages, setMessages] = useState<MailMessage[]>([]);
@@ -59,7 +29,7 @@ export default function MailboxPage() {
   const [error, setError] = useState("");
   const [detailLoading, setDetailLoading] = useState(false);
 
-  const loadMessages = async () => {
+  const loadMessages = useCallback(async () => {
     setLoading(true);
     setError("");
     const params = new URLSearchParams({ page_size: "20" });
@@ -67,23 +37,24 @@ export default function MailboxPage() {
     if (dateFrom) params.set("date_from", dateFrom);
     if (dateTo) params.set("date_to", dateTo);
     try {
-      const data = await apiGetJson<MailListResponse>(
+      const data = await apiGetJson<MailListDTO>(
         `/api/mailbox/messages/?${params.toString()}`
       );
-      setMessages(data.results || []);
-      if (data.results?.length && !selectedId) {
-        setSelectedId(data.results[0].id);
+      const mapped = mapMailList(data);
+      setMessages(mapped.items || []);
+      if (mapped.items?.length && !selectedId) {
+        setSelectedId(mapped.items[0].id);
       }
     } catch (err) {
       setError("Ne mogu ucitati mailove.");
     } finally {
       setLoading(false);
     }
-  };
+  }, [query, dateFrom, dateTo, selectedId]);
 
   useEffect(() => {
     loadMessages();
-  }, []);
+  }, [loadMessages]);
 
   useEffect(() => {
     if (!selectedId) {
@@ -93,10 +64,10 @@ export default function MailboxPage() {
     const run = async () => {
       setDetailLoading(true);
       try {
-        const data = await apiGetJson<MailMessageDetail>(
+        const data = await apiGetJson<MailMessageDetailDTO>(
           `/api/mailbox/messages/${selectedId}/`
         );
-        setSelected(data);
+        setSelected(mapMailMessageDetail(data));
       } finally {
         setDetailLoading(false);
       }
@@ -173,6 +144,7 @@ export default function MailboxPage() {
               </span>
             </div>
             <div className="space-y-2">
+              {loading ? <LoadingCard /> : null}
               {messages.map((message) => (
                 <button
                   key={message.id}
@@ -187,32 +159,28 @@ export default function MailboxPage() {
                     {message.subject || "(bez predmeta)"}
                   </p>
                   <p className="truncate text-xs uppercase tracking-[0.2em] text-black/50">
-                    {message.from_email}
+                    {message.fromEmail}
                   </p>
                   <p className="mt-2 break-words text-xs text-black/60">
-                    {euroDate(message.sent_at)}
+                    {formatDateTime(message.sentAt)}
                   </p>
                   <p className="text-xs text-black/60">
-                    Privitci: {message.attachments_count}
+                    Privitci: {message.attachmentsCount}
                   </p>
                 </button>
               ))}
               {!loading && messages.length === 0 ? (
-                <p className="text-sm text-black/60">
-                  Nema mailova prema filterima.
-                </p>
+                <EmptyState message="Nema mailova prema filterima." />
               ) : null}
             </div>
           </div>
 
           <div className="min-w-0 rounded-3xl border border-black/15 bg-white/85 p-6 shadow-[0_20px_50px_rgba(10,10,10,0.2)] overflow-hidden">
             {detailLoading ? (
-              <p className="text-sm text-black/60">Ucitavanje...</p>
+              <LoadingCard message="Ucitavanje..." />
             ) : null}
             {emptyDetail ? (
-              <p className="text-sm text-black/60">
-                Odaberi mail za prikaz.
-              </p>
+              <EmptyState message="Odaberi mail za prikaz." />
             ) : null}
             {selected ? (
               <div className="space-y-4">
@@ -220,52 +188,54 @@ export default function MailboxPage() {
                   <p className="text-xs uppercase tracking-[0.2em] text-black/50">
                     Predmet
                   </p>
-                  <p className="break-words text-lg font-semibold">
+                    <p className="break-words text-lg font-semibold">
                     {selected.subject || "(bez predmeta)"}
-                  </p>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div>
-                    <p className="text-xs uppercase tracking-[0.2em] text-black/50">
-                      Od
                     </p>
-                    <p className="break-all text-sm max-w-full">
-                      {selected.from_email}
-                    </p>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.2em] text-black/50">
+                        Od
+                      </p>
+                      <p className="break-all text-sm max-w-full">
+                      {selected.fromEmail}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.2em] text-black/50">
+                        Poslano
+                      </p>
+                      <p className="text-sm">
+                      {formatDateTime(selected.sentAt)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.2em] text-black/50">
+                        Za
+                      </p>
+                      <p className="break-all text-sm max-w-full">
+                      {selected.toEmails}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.2em] text-black/50">
+                        CC
+                      </p>
+                      <p className="break-all text-sm max-w-full">
+                      {selected.ccEmails || "-"}
+                      </p>
+                    </div>
                   </div>
                   <div>
                     <p className="text-xs uppercase tracking-[0.2em] text-black/50">
-                      Poslano
+                      Sadrzaj
                     </p>
-                    <p className="text-sm">{euroDate(selected.sent_at)}</p>
+                    <div className="mt-2 rounded-2xl border border-black/10 bg-white/70 p-4 text-sm text-black/70 break-words">
+                    {selected.bodyText || "Nema tekstualnog sadržaja."}
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-xs uppercase tracking-[0.2em] text-black/50">
-                      Za
-                    </p>
-                    <p className="break-all text-sm max-w-full">
-                      {selected.to_emails}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-xs uppercase tracking-[0.2em] text-black/50">
-                      CC
-                    </p>
-                    <p className="break-all text-sm max-w-full">
-                      {selected.cc_emails || "-"}
-                    </p>
-                  </div>
-                </div>
-                <div>
-                  <p className="text-xs uppercase tracking-[0.2em] text-black/50">
-                    Sadrzaj
-                  </p>
-                  <div className="mt-2 rounded-2xl border border-black/10 bg-white/70 p-4 text-sm text-black/70 break-words">
-                    {selected.body_text || "Nema tekstualnog sadržaja."}
-                  </div>
-                </div>
-                {selected.attachments.length ? (
-                  <div>
+                  {selected.attachments.length ? (
+                    <div>
                     <p className="text-xs uppercase tracking-[0.2em] text-black/50">
                       Privitci
                     </p>
@@ -273,7 +243,7 @@ export default function MailboxPage() {
                       {selected.attachments.map((att) => (
                         <a
                           key={att.id}
-                          href={att.file_url || "#"}
+                          href={att.fileUrl || "#"}
                           className="rounded-xl border border-black/10 bg-white/70 px-4 py-2 text-sm text-black/70 break-all"
                         >
                           {att.filename || "attachment"} ({att.size} B)

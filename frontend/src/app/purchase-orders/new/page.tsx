@@ -1,37 +1,21 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { DM_Serif_Display } from "next/font/google";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiGetJson, apiPostJson } from "@/lib/api";
+import { formatEuro } from "@/lib/format";
+import {
+  mapSupplierArtikli,
+  mapSuppliers,
+  Supplier,
+  SupplierArtikl,
+  SupplierArtiklDTO,
+  SupplierDTO,
+} from "@/lib/mappers";
 
 const dmSerif = DM_Serif_Display({ subsets: ["latin"], weight: "400" });
-
-type Supplier = {
-  id: number;
-  name: string;
-  rm_id: number;
-};
-
-type StockRow = {
-  warehouse_id: number | null;
-  warehouse_name: string;
-  quantity: string;
-};
-
-type SupplierArtikl = {
-  artikl_id: number;
-  artikl_rm_id: number | null;
-  name: string;
-  code: string | null;
-  image: string | null;
-  base_group: string | null;
-  unit_of_measure: number | null;
-  unit_name: string | null;
-  price: string | null;
-  stocks: StockRow[];
-};
 
 type CartItem = SupplierArtikl & { key: string; quantity: string };
 
@@ -59,8 +43,8 @@ export default function NewPurchaseOrderPage() {
   useEffect(() => {
     const run = async () => {
       try {
-        const data = await apiGetJson<Supplier[]>("/api/suppliers/");
-        setSuppliers(data || []);
+        const data = await apiGetJson<SupplierDTO[]>("/api/suppliers/");
+        setSuppliers(mapSuppliers(data || []));
       } catch (err) {
         setError("Ne mogu ucitati dobavljace.");
       }
@@ -77,10 +61,10 @@ export default function NewPurchaseOrderPage() {
       setLoading(true);
       setError("");
       try {
-        const data = await apiGetJson<{ results?: SupplierArtikl[] }>(
+        const data = await apiGetJson<{ results?: SupplierArtiklDTO[] }>(
           `/api/suppliers/${supplierId}/artikli/`
         );
-        setArtikli(data.results || []);
+        setArtikli(mapSupplierArtikli(data.results || []));
       } catch (err) {
         setError("Ne mogu ucitati artikle za dobavljaca.");
       } finally {
@@ -91,9 +75,9 @@ export default function NewPurchaseOrderPage() {
   }, [supplierId]);
 
   const addToCart = (item: SupplierArtikl) => {
-    const key = `${item.artikl_id}-${item.unit_of_measure ?? "none"}`;
+    const key = `${item.id}-${item.unitId ?? "none"}`;
     const qty = quantities[key];
-    if (!item.unit_of_measure) {
+    if (!item.unitId) {
       setSaveError("Artikl nema jedinicu mjere.");
       return;
     }
@@ -113,6 +97,14 @@ export default function NewPurchaseOrderPage() {
 
   const removeFromCart = (key: string) => {
     setCart((prev) => prev.filter((entry) => entry.key !== key));
+    setQuantities((prev) => {
+      if (!(key in prev)) {
+        return prev;
+      }
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
   };
 
   const handleCreate = async () => {
@@ -132,8 +124,8 @@ export default function NewPurchaseOrderPage() {
         {
           supplier: Number(supplierId),
           items: cart.map((item) => ({
-            artikl: item.artikl_id,
-            unit_of_measure: item.unit_of_measure,
+            artikl: item.id,
+            unit_of_measure: item.unitId,
             quantity: item.quantity,
             price: item.price ?? null,
           })),
@@ -272,7 +264,7 @@ export default function NewPurchaseOrderPage() {
             </div>
             <div className="space-y-4">
               {artikli.map((item) => {
-                const key = `${item.artikl_id}-${item.unit_of_measure ?? "none"}`;
+                const key = `${item.id}-${item.unitId ?? "none"}`;
                 return (
                   <div
                     key={key}
@@ -282,6 +274,7 @@ export default function NewPurchaseOrderPage() {
                       <div className="flex items-center gap-4">
                         <div className="h-[77px] w-[48px] overflow-hidden rounded-xl border border-black/10 bg-white">
                           {item.image ? (
+                            // eslint-disable-next-line @next/next/no-img-element
                             <img
                               src={item.image}
                               alt={item.name}
@@ -297,11 +290,11 @@ export default function NewPurchaseOrderPage() {
                           <p className="text-sm font-semibold">{item.name}</p>
                           <p className="text-xs uppercase tracking-[0.2em] text-black/50">
                             {item.code || "code"} ·{" "}
-                            {item.base_group || "base group"}
+                            {item.baseGroup || "base group"}
                           </p>
                           <p className="text-xs text-black/60">
-                            JM: {item.unit_name || "?"} · Cijena:{" "}
-                            {item.price || "-"} EUR
+                            JM: {item.unitName || "?"} · Cijena:{" "}
+                            {formatEuro(item.price)}
                           </p>
                         </div>
                       </div>
@@ -309,12 +302,14 @@ export default function NewPurchaseOrderPage() {
                         <input
                           type="number"
                           min="0"
-                          step="0.01"
+                          step="1"
+                          inputMode="numeric"
+                          pattern="[0-9]*"
                           value={quantities[key] || ""}
                           onChange={(event) =>
                             setQuantities((prev) => ({
                               ...prev,
-                              [key]: event.target.value,
+                              [key]: event.target.value.replace(/\D/g, ""),
                             }))
                           }
                           className="w-24 rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
@@ -331,10 +326,10 @@ export default function NewPurchaseOrderPage() {
                     <div className="mt-3 flex flex-wrap gap-2 text-xs text-black/60">
                       {(item.stocks || []).map((stock) => (
                         <span
-                          key={`${stock.warehouse_id}-${item.artikl_id}`}
+                          key={`${stock.warehouseId}-${item.id}`}
                           className="rounded-full border border-black/10 bg-white/60 px-3 py-1"
                         >
-                          {stock.warehouse_name}: {stock.quantity}
+                          {stock.warehouseName}: {stock.quantity}
                         </span>
                       ))}
                     </div>
@@ -362,12 +357,20 @@ export default function NewPurchaseOrderPage() {
                 >
                   <p className="text-sm font-semibold">{item.name}</p>
                   <p className="text-xs text-black/60">
-                    {item.quantity} {item.unit_name || ""} ·{" "}
-                    {item.price || "-"} EUR
+                    {item.quantity} {item.unitName || ""} ·{" "}
+                    {formatEuro(item.price)}
+                  </p>
+                  <p className="mt-1 text-xs text-black/60">
+                    Ukupno:{" "}
+                    {item.price !== null
+                      ? formatEuro(
+                          Number(item.quantity || 0) * Number(item.price || 0)
+                        )
+                      : "-"}
                   </p>
                   <button
                     onClick={() => removeFromCart(item.key)}
-                    className="mt-2 text-xs uppercase tracking-[0.2em] text-black/60"
+                    className="mt-2 rounded-full border border-black/15 bg-white/70 px-3 py-1 text-[10px] uppercase tracking-[0.2em] text-black/60"
                   >
                     Ukloni
                   </button>
@@ -380,7 +383,7 @@ export default function NewPurchaseOrderPage() {
               ) : null}
             </div>
             <div className="mt-6 rounded-2xl border border-black/10 bg-black px-4 py-3 text-sm text-white">
-              Procijenjeni total: {cartTotal.toFixed(2)} EUR
+              Procijenjeni total: {formatEuro(cartTotal)}
             </div>
             {saveError ? (
               <p className="mt-3 text-sm text-red-600">{saveError}</p>

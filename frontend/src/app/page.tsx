@@ -5,31 +5,16 @@ import { DM_Serif_Display } from "next/font/google";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiGetJson, apiPostJson } from "@/lib/api";
+import { formatEuro } from "@/lib/format";
+import {
+  mapPurchaseOrderList,
+  mapUser,
+  PurchaseOrderListDTO,
+  PurchaseOrderSummary,
+  UserDTO,
+} from "@/lib/mappers";
 
 const dmSerif = DM_Serif_Display({ subsets: ["latin"], weight: "400" });
-
-type PurchaseOrderSummary = {
-  count: number;
-  total_net: number;
-  total_gross: number;
-  total_deposit: number;
-  status_counts?: Record<string, { count: number; total_gross: number }>;
-};
-
-type PurchaseOrderResponse = {
-  summary: PurchaseOrderSummary;
-};
-
-type MeResponse = {
-  first_name?: string | null;
-  last_name?: string | null;
-  username?: string | null;
-};
-
-const euroFormatter = new Intl.NumberFormat("hr-HR", {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
 
 export default function Home() {
   const [summary, setSummary] = useState<PurchaseOrderSummary | null>(null);
@@ -42,10 +27,10 @@ export default function Home() {
     const run = async () => {
       try {
         const params = new URLSearchParams({ page_size: "1" });
-        const payload = await apiGetJson<PurchaseOrderResponse>(
+        const payload = await apiGetJson<PurchaseOrderListDTO>(
           `/api/purchase-orders/?${params.toString()}`
         );
-        setSummary(payload.summary || null);
+        setSummary(mapPurchaseOrderList(payload).summary);
       } catch (err) {
         setSummary(null);
       }
@@ -56,11 +41,9 @@ export default function Home() {
   useEffect(() => {
     const run = async () => {
       try {
-        const data = await apiGetJson<MeResponse>("/api/me/");
-        const fullName = [data.first_name, data.last_name]
-          .filter(Boolean)
-          .join(" ");
-        setUserName(fullName || data.username || null);
+        const data = await apiGetJson<UserDTO>("/api/me/");
+        const user = mapUser(data);
+        setUserName(user.fullName || user.username || null);
       } catch (err) {
         setUserName(null);
       }
@@ -83,7 +66,7 @@ export default function Home() {
   }, []);
 
   const statusCounts = useMemo(() => {
-    return summary?.status_counts || {};
+    return summary?.statusCounts || {};
   }, [summary]);
 
   return (
@@ -153,9 +136,9 @@ export default function Home() {
                   <p className="mt-1 text-xs uppercase tracking-[0.2em] text-black/50">
                     Bruto:{" "}
                     {summary
-                      ? `${euroFormatter.format(
-                          statusCounts[item.key]?.total_gross ?? 0
-                        )} EUR`
+                      ? formatEuro(
+                          statusCounts[item.key]?.totalGross ?? 0
+                        )
                       : "-"}
                   </p>
                 </div>
