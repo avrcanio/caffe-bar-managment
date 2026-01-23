@@ -57,3 +57,7 @@ Thumbs.db
 cookies.txt
 *.bak
 *.tmp
+.env
+.env.dev
+dev_dump.dump
+caddy/certs/
