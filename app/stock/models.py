@@ -298,10 +298,59 @@ class StockMove(models.Model):
         TRANSFER = "transfer", "Transfer"
         ADJUST = "adjust", "Ispravak"
 
+    class Purpose(models.TextChoices):
+        SALE = "sale", "Prodaja"
+        CONSUMPTION = "consumption", "Utrošak"
+        WASTE = "waste", "Otpis"
+        ADJUSTMENT = "adjustment", "Inventurna korekcija"
+
     move_type = models.CharField(max_length=20, choices=MoveType.choices)
     date = models.DateTimeField()
     reference = models.CharField(max_length=200, blank=True, default="")
     note = models.TextField(blank=True, default="")
+    purpose = models.CharField(
+        max_length=20,
+        choices=Purpose.choices,
+        blank=True,
+        default="",
+    )
+    from_warehouse = models.ForeignKey(
+        "stock.WarehouseId",
+        to_field="rm_id",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="stock_moves_out",
+    )
+    to_warehouse = models.ForeignKey(
+        "stock.WarehouseId",
+        to_field="rm_id",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="stock_moves_in",
+    )
+    reversed_move = models.OneToOneField(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="reversal",
+    )
+    journal_entry = models.OneToOneField(
+        "accounting.JournalEntry",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="stock_move",
+    )
+    sales_journal_entry = models.OneToOneField(
+        "accounting.JournalEntry",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="stock_sale_move",
+    )
 
     def __str__(self) -> str:
         return f"{self.move_type} @ {self.date:%Y-%m-%d %H:%M}"
@@ -372,3 +421,139 @@ class StockAllocation(models.Model):
     class Meta:
         verbose_name = "FIFO alokacija"
         verbose_name_plural = "FIFO alokacije"
+
+
+class StockReservation(models.Model):
+    warehouse = models.ForeignKey(
+        "stock.WarehouseId",
+        to_field="rm_id",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="stock_reservations",
+    )
+    artikl = models.ForeignKey(
+        "artikli.Artikl",
+        to_field="rm_id",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="stock_reservations",
+    )
+    quantity = models.DecimalField(max_digits=12, decimal_places=4, validators=[MinValueValidator(0)])
+    source_type = models.CharField(max_length=50, blank=True, default="")
+    source_id = models.IntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    released_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self) -> str:
+        name = self.artikl.name if self.artikl else "Artikl ?"
+        warehouse_name = self.warehouse.name if self.warehouse else "Skladiste ?"
+        return f"{name} @ {warehouse_name} ({self.quantity})"
+
+    class Meta:
+        verbose_name = "Rezervacija zalihe"
+        verbose_name_plural = "Rezervacije zaliha"
+
+
+class StockAccountingConfig(models.Model):
+    inventory_account = models.ForeignKey(
+        "accounting.Account",
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    cogs_account = models.ForeignKey(
+        "accounting.Account",
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    default_sale_warehouse = models.ForeignKey(
+        "stock.WarehouseId",
+        to_field="rm_id",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    default_purchase_warehouse = models.ForeignKey(
+        "stock.WarehouseId",
+        to_field="rm_id",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    default_replenish_from_warehouse = models.ForeignKey(
+        "stock.WarehouseId",
+        to_field="rm_id",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    auto_replenish_on_sale = models.BooleanField(default=False)
+
+    def clean(self):
+        super().clean()
+        qs = StockAccountingConfig.objects.all()
+        if self.pk:
+            qs = qs.exclude(pk=self.pk)
+        if qs.exists():
+            raise ValidationError(
+                "Smije postojati samo jedan StockAccountingConfig (1 baza = 1 firma)."
+            )
+        if not self.inventory_account_id or not self.cogs_account_id:
+            raise ValidationError("Postavi inventory_account i cogs_account.")
+        if not self.default_sale_warehouse_id:
+            raise ValidationError(
+                {"default_sale_warehouse": "Postavi default skladiste za prodaju (SALE)."}
+            )
+        if not self.default_purchase_warehouse_id:
+            raise ValidationError(
+                {
+                    "default_purchase_warehouse": (
+                        "Postavi default skladiste za nabavu/primke (IN)."
+                    )
+                }
+            )
+        if self.auto_replenish_on_sale and not self.default_replenish_from_warehouse_id:
+            raise ValidationError(
+                {
+                    "default_replenish_from_warehouse": (
+                        "Postavi skladiste za automatsku dopunu (replenish)."
+                    )
+                }
+            )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return "Stock accounting config"
+
+    class Meta:
+        verbose_name = "Konfiguracija robnog knjizenja"
+        verbose_name_plural = "Konfiguracija robnog knjizenja"
+
+
+class ReplenishRequestLine(models.Model):
+    artikl = models.ForeignKey(
+        "artikli.Artikl",
+        to_field="rm_id",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="replenish_request_lines",
+    )
+    quantity = models.DecimalField(max_digits=12, decimal_places=4, validators=[MinValueValidator(0)])
+    note = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self) -> str:
+        name = self.artikl.name if self.artikl else "Artikl ?"
+        return f"{name} x {self.quantity}"
+
+    class Meta:
+        verbose_name = "Replenish stavka"
+        verbose_name_plural = "Replenish stavke"

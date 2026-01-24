@@ -266,6 +266,58 @@ def post_sales_invoice(*, document_type: DocumentType, date: date, net: Decimal,
     return entry
 
 
+def post_sales_cash(
+    *,
+    document_type: DocumentType,
+    date: date,
+    net: Decimal,
+    vat: Decimal,
+    cash_account: Account,
+    description: str = "",
+) -> JournalEntry:
+    if not cash_account:
+        raise ValidationError("Nedostaje cash konto.")
+    if not document_type.revenue_account_id:
+        raise ValidationError("DocumentType nema revenue konto.")
+    if vat != Decimal("0.00") and not document_type.vat_output_account_id:
+        raise ValidationError("DocumentType nema VAT output konto.")
+
+    ledger = document_type.ledger or get_single_ledger()
+    gross = net + vat
+
+    entry = JournalEntry.objects.create(
+        ledger=ledger,
+        number=_next_entry_number(ledger),
+        date=date,
+        description=description or "Gotovinska prodaja",
+        status=JournalEntry.Status.DRAFT,
+    )
+
+    JournalItem.objects.create(
+        entry=entry,
+        account=cash_account,
+        debit=gross,
+        credit=Decimal("0.00"),
+    )
+    JournalItem.objects.create(
+        entry=entry,
+        account=document_type.revenue_account,
+        debit=Decimal("0.00"),
+        credit=net,
+    )
+
+    if vat != Decimal("0.00"):
+        JournalItem.objects.create(
+            entry=entry,
+            account=document_type.vat_output_account,
+            debit=Decimal("0.00"),
+            credit=vat,
+        )
+
+    entry.post()
+    return entry
+
+
 def post_purchase_invoice_cash_from_items(
     *,
     document_type: DocumentType,

@@ -62,7 +62,11 @@ class PostStockOutTests(TestCase):
         self.assertEqual(lots[0].qty_remaining, Decimal("0.0000"))
         self.assertEqual(lots[1].qty_remaining, Decimal("2.0000"))
 
-        allocations = StockAllocation.objects.filter(move_line__move=move).order_by("id")
+        allocations = (
+            StockAllocation.objects.filter(move_line__move=move)
+            .select_related("move_line", "lot")
+            .order_by("id")
+        )
         self.assertEqual(allocations.count(), 2)
         self.assertEqual(allocations[0].qty, Decimal("5.0000"))
         self.assertEqual(allocations[1].qty, Decimal("1.0000"))
