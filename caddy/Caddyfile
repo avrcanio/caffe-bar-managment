@@ -9,11 +9,15 @@ dev.mozart.sibenik1983.local {
         reverse_proxy web:8000
     }
 
-    handle /static* {
+    handle /static/* {
         reverse_proxy web:8000
     }
 
-    handle /admin* {
+    handle /media/* {
+        reverse_proxy web:8000
+    }
+
+    handle /admin/* {
         reverse_proxy web:8000
     }
 

@@ -68,6 +68,7 @@ class PostSaleMissingDefaultWarehouseTests(TestCase):
                 inventory_account=self.inventory,
                 cogs_account=self.cogs,
                 default_purchase_warehouse=self.warehouse,
+                default_cash_account=self.cash,
             )
 
         cfg = StockAccountingConfig.objects.create(
@@ -76,6 +77,7 @@ class PostSaleMissingDefaultWarehouseTests(TestCase):
             default_sale_warehouse=self.warehouse,
             default_purchase_warehouse=self.warehouse,
             auto_replenish_on_sale=False,
+            default_cash_account=self.cash,
         )
         StockAccountingConfig.objects.filter(pk=cfg.pk).update(default_sale_warehouse=None)
         cfg.refresh_from_db()

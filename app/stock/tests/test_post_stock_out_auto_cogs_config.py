@@ -39,6 +39,7 @@ class PostStockOutAutoCogsConfigTests(TestCase):
             default_sale_warehouse=self.warehouse,
             default_purchase_warehouse=self.warehouse,
             auto_replenish_on_sale=False,
+            default_cash_account=self.cogs,
         )
 
         supplier = Supplier.objects.create(rm_id=1, name="Dobavljac")

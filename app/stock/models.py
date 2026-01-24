@@ -492,6 +492,20 @@ class StockAccountingConfig(models.Model):
         related_name="+",
     )
     auto_replenish_on_sale = models.BooleanField(default=False)
+    default_cash_account = models.ForeignKey(
+        "accounting.Account",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    default_deposit_account = models.ForeignKey(
+        "accounting.Account",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
 
     def clean(self):
         super().clean()
@@ -524,6 +538,8 @@ class StockAccountingConfig(models.Model):
                     )
                 }
             )
+        if not self.default_cash_account_id:
+            raise ValidationError({"default_cash_account": "Postavi default cash konto."})
 
     def save(self, *args, **kwargs):
         self.full_clean()

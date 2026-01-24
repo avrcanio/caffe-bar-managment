@@ -13,6 +13,9 @@ class SupplierInvoice(models.Model):
     invoice_date = models.DateField()
     received_at = models.DateField(null=True, blank=True)
     deposit_total = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    total_net = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    total_vat = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    total_gross = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     notes = models.TextField(blank=True, default="")
 
     inputs = models.ManyToManyField(WarehouseInput, related_name="supplier_invoices", blank=True)
@@ -23,6 +26,27 @@ class SupplierInvoice(models.Model):
         blank=True,
         on_delete=models.PROTECT,
         related_name="supplier_invoice",
+    )
+    document_type = models.ForeignKey(
+        "configuration.DocumentType",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="supplier_invoices",
+    )
+    cash_account = models.ForeignKey(
+        "accounting.Account",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    deposit_account = models.ForeignKey(
+        "accounting.Account",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
     )
 
     paid_cash = models.BooleanField(default=False)

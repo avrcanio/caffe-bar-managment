@@ -35,6 +35,15 @@ class ReplenishToSaleWarehouseTests(TestCase):
 
         self.warehouse_main = WarehouseId.objects.create(rm_id=1, name="Glavno")
         self.warehouse_bar = WarehouseId.objects.create(rm_id=2, name="Sank")
+        cash = Account.objects.create(
+            ledger=self.ledger,
+            code="1000",
+            name="Blagajna",
+            type=Account.AccountType.ASSET,
+            normal_side=Account.NormalSide.DEBIT,
+            is_postable=True,
+            is_active=True,
+        )
         StockAccountingConfig.objects.create(
             inventory_account=self.inventory,
             cogs_account=self.cogs,
@@ -42,6 +51,7 @@ class ReplenishToSaleWarehouseTests(TestCase):
             default_purchase_warehouse=self.warehouse_main,
             default_replenish_from_warehouse=self.warehouse_main,
             auto_replenish_on_sale=False,
+            default_cash_account=cash,
         )
 
         supplier = Supplier.objects.create(rm_id=1, name="Dobavljac")

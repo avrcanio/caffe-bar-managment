@@ -955,6 +955,8 @@ class StockAccountingConfigAdmin(admin.ModelAdmin):
         "default_purchase_warehouse",
         "default_replenish_from_warehouse",
         "auto_replenish_on_sale",
+        "default_cash_account",
+        "default_deposit_account",
     )
     autocomplete_fields = (
         "inventory_account",
@@ -962,6 +964,8 @@ class StockAccountingConfigAdmin(admin.ModelAdmin):
         "default_sale_warehouse",
         "default_purchase_warehouse",
         "default_replenish_from_warehouse",
+        "default_cash_account",
+        "default_deposit_account",
     )
 
     def has_add_permission(self, request):

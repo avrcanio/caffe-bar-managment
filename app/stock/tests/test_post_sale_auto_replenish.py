@@ -81,6 +81,7 @@ class PostSaleAutoReplenishTests(TestCase):
             default_purchase_warehouse=self.warehouse_main,
             default_replenish_from_warehouse=self.warehouse_main,
             auto_replenish_on_sale=True,
+            default_cash_account=self.cash,
         )
 
         supplier = Supplier.objects.create(rm_id=1, name="Dobavljac")
