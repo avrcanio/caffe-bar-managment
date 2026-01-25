@@ -27,7 +27,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = 'django-insecure-wc!j%l#1$h&#)@10j=kk@h)58$f&)_zrbdy&s%&pks$x&%h_1#'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 
 def _split_env_list(value, default):
     raw = os.getenv(value, default)
