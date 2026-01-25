@@ -9,6 +9,7 @@ import { formatDate, formatEuro } from "@/lib/format";
 import EmptyState from "@/components/EmptyState";
 import FilterSelect from "@/components/FilterSelect";
 import LoadingCard from "@/components/LoadingCard";
+import SendPromptModal from "@/components/SendPromptModal";
 import {
   mapPurchaseOrderList,
   PurchaseOrder,
@@ -39,6 +40,9 @@ export default function PurchaseOrdersPage() {
   const [orderedFrom, setOrderedFrom] = useState("");
   const [orderedTo, setOrderedTo] = useState("");
   const [loadingDetailId, setLoadingDetailId] = useState<number | null>(null);
+  const [showSendPrompt, setShowSendPrompt] = useState(false);
+  const [sendOrderId, setSendOrderId] = useState<number | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
   const router = useRouter();
 
   useEffect(() => {
@@ -70,7 +74,7 @@ export default function PurchaseOrdersPage() {
       }
     };
     run();
-  }, [statusFilter, supplierFilter, orderedFrom, orderedTo]);
+  }, [statusFilter, supplierFilter, orderedFrom, orderedTo, refreshKey]);
 
   useEffect(() => {
     const run = async () => {
@@ -170,7 +174,7 @@ export default function PurchaseOrdersPage() {
                   setLoadingDetailId(po.id);
                   router.push(`/purchase-orders/${po.id}`);
                 }}
-                className="grid cursor-pointer grid-cols-1 gap-3 rounded-2xl border border-black/10 bg-white/70 px-4 py-3 transition hover:border-black/30 md:grid-cols-[1.4fr_0.8fr_0.7fr_0.7fr] md:items-center"
+                className="grid cursor-pointer grid-cols-1 gap-3 rounded-2xl border border-black/10 bg-white/70 px-4 py-3 transition hover:border-black/30 md:grid-cols-[1.4fr_0.9fr_0.7fr_0.7fr_0.7fr_auto] md:items-center"
               >
                 <div>
                   <p className="text-sm font-semibold">PO-{po.id}</p>
@@ -179,14 +183,29 @@ export default function PurchaseOrdersPage() {
                 </p>
               </div>
               <p className="text-sm text-black/70 md:text-center">
-                  {po.statusLabel}
+                {po.statusLabel}
               </p>
               <p className="text-xs uppercase tracking-[0.2em] text-black/50 md:text-center">
-                  {formatDate(po.orderedAt)}
+                {po.paymentTypeName || "-"}
+              </p>
+              <p className="text-xs uppercase tracking-[0.2em] text-black/50 md:text-center">
+                {formatDate(po.orderedAt)}
               </p>
               <p className="text-sm font-semibold md:text-right">
-                  {formatEuro(po.totalGross)}
+                {formatEuro(po.totalGross)}
               </p>
+                {po.statusCode === "created" ? (
+                  <button
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setSendOrderId(po.id);
+                      setShowSendPrompt(true);
+                    }}
+                    className="w-full rounded-full border border-black/20 bg-white/80 px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-black/70 md:w-auto"
+                  >
+                    Posalji
+                  </button>
+                ) : null}
                 {loadingDetailId === po.id ? (
                   <span className="inline-flex h-3 w-3 animate-spin rounded-full border border-black/50 border-t-transparent md:justify-self-end" />
                 ) : null}
@@ -195,6 +214,15 @@ export default function PurchaseOrdersPage() {
           </div>
         </section>
       </div>
+      <SendPromptModal
+        open={showSendPrompt}
+        orderId={sendOrderId}
+        onClose={() => {
+          setShowSendPrompt(false);
+          setSendOrderId(null);
+        }}
+        onSent={() => setRefreshKey((value) => value + 1)}
+      />
     </main>
   );
 }

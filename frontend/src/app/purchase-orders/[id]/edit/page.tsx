@@ -4,17 +4,22 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { DM_Serif_Display } from "next/font/google";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { apiGetJson, apiPostJson, apiPutJson } from "@/lib/api";
+import { apiGetJson, apiPutJson } from "@/lib/api";
 import { formatEuro } from "@/lib/format";
+import SendPromptModal from "@/components/SendPromptModal";
+import ToastBanner from "@/components/ToastBanner";
 import {
   mapSupplierArtikli,
   mapSuppliers,
+  mapPaymentTypes,
   Supplier,
   SupplierArtikl,
   SupplierArtiklDTO,
   SupplierDTO,
   PurchaseOrderDTO,
   mapPurchaseOrder,
+  PaymentType,
+  PaymentTypeDTO,
 } from "@/lib/mappers";
 
 const dmSerif = DM_Serif_Display({ subsets: ["latin"], weight: "400" });
@@ -35,6 +40,8 @@ export default function EditPurchaseOrderPage() {
   const id = params?.id as string;
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [supplierId, setSupplierId] = useState("");
+  const [paymentTypes, setPaymentTypes] = useState<PaymentType[]>([]);
+  const [paymentTypeId, setPaymentTypeId] = useState("");
   const [artikli, setArtikli] = useState<SupplierArtikl[]>([]);
   const [quantities, setQuantities] = useState<Record<string, string>>({});
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -47,9 +54,6 @@ export default function EditPurchaseOrderPage() {
     message: string;
   } | null>(null);
   const [showSendPrompt, setShowSendPrompt] = useState(false);
-  const [sendingEmail, setSendingEmail] = useState(false);
-  const [sendError, setSendError] = useState("");
-  const [sendSuccess, setSendSuccess] = useState("");
   const groupRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const itemRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const quantityRefs = useRef<Record<string, HTMLInputElement | null>>({});
@@ -71,6 +75,20 @@ export default function EditPurchaseOrderPage() {
 
   useEffect(() => {
     const run = async () => {
+      try {
+        const data = await apiGetJson<PaymentTypeDTO[]>(
+          "/api/payment-types/"
+        );
+        setPaymentTypes(mapPaymentTypes(data || []));
+      } catch (err) {
+        setPaymentTypes([]);
+      }
+    };
+    run();
+  }, []);
+
+  useEffect(() => {
+    const run = async () => {
       if (!id) return;
       try {
         const data = await apiGetJson<PurchaseOrderDTO>(
@@ -78,6 +96,9 @@ export default function EditPurchaseOrderPage() {
         );
         const order = mapPurchaseOrder(data);
         setSupplierId(String(order.supplierId));
+        setPaymentTypeId(
+          order.paymentTypeId ? String(order.paymentTypeId) : ""
+        );
         const nextCart: CartItem[] = order.items.map((item) => ({
           key: `${item.artiklId}-${item.unitId}`,
           artiklId: item.artiklId,
@@ -236,6 +257,10 @@ export default function EditPurchaseOrderPage() {
       setSaveError("Odaberi dobavljaca prije spremanja.");
       return false;
     }
+    if (!paymentTypeId) {
+      setSaveError("Odaberi tip placanja prije spremanja.");
+      return false;
+    }
     if (cart.length === 0) {
       setSaveError("Dodaj barem jednu stavku.");
       return false;
@@ -247,6 +272,7 @@ export default function EditPurchaseOrderPage() {
         `/api/purchase-orders/${id}/`,
         {
           supplier: Number(supplierId),
+          payment_type: paymentTypeId ? Number(paymentTypeId) : null,
           items: cart.map((item) => ({
             artikl: item.artiklId,
             unit_of_measure: item.unitId,
@@ -269,49 +295,9 @@ export default function EditPurchaseOrderPage() {
     }
   };
 
-  const handleSend = async () => {
-    if (!id) return;
-    setSendingEmail(true);
-    setSendError("");
-    setSendSuccess("");
-    try {
-      await apiPostJson(`/api/purchase-orders/${id}/send/`, undefined, {
-        csrf: true,
-      });
-      const successMessage = "Narudzba je poslana dobavljacu.";
-      setSendSuccess(successMessage);
-      setToast({ type: "success", message: successMessage });
-      setShowSendPrompt(false);
-      setTimeout(() => {
-        router.push(`/purchase-orders/${id}`);
-      }, 1200);
-    } catch (err) {
-      const detail =
-        err instanceof Error
-          ? err.message
-          : "Slanje narudzbe nije uspjelo.";
-      setSendError(detail);
-      setToast({ type: "error", message: detail });
-    } finally {
-      setSendingEmail(false);
-    }
-  };
-
   return (
     <main className="min-h-screen bg-[#f2ebe0] text-[#121212]">
-      {toast ? (
-        <div className="fixed left-1/2 top-6 z-50 w-[min(90vw,420px)] -translate-x-1/2">
-          <div
-            className={`rounded-2xl px-4 py-3 text-sm shadow-[0_20px_40px_rgba(10,10,10,0.25)] ${
-              toast.type === "success"
-                ? "bg-black text-white"
-                : "bg-red-600 text-white"
-            }`}
-          >
-            {toast.message}
-          </div>
-        </div>
-      ) : null}
+      <ToastBanner toast={toast} />
       <div className="mx-auto flex min-h-screen max-w-6xl flex-col gap-8 px-6 py-12">
         <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div className="space-y-2">
@@ -568,6 +554,23 @@ export default function EditPurchaseOrderPage() {
             <div className="mt-6 rounded-2xl border border-black/10 bg-black px-4 py-3 text-sm text-white">
               Procijenjeni total: {formatEuro(cartTotal)}
             </div>
+            <div className="mt-4">
+              <label className="text-xs uppercase tracking-[0.2em] text-black/50">
+                Tip placanja
+              </label>
+              <select
+                value={paymentTypeId}
+                onChange={(event) => setPaymentTypeId(event.target.value)}
+                className="mt-2 w-full rounded-xl border border-black/20 bg-white px-4 py-3 text-sm"
+              >
+                <option value="">Odaberi tip placanja</option>
+                {paymentTypes.map((type) => (
+                  <option key={type.id} value={type.id}>
+                    {type.name}
+                  </option>
+                ))}
+              </select>
+            </div>
             {saveError ? (
               <p className="mt-3 text-sm text-red-600">{saveError}</p>
             ) : null}
@@ -598,42 +601,15 @@ export default function EditPurchaseOrderPage() {
         </button>
       ) : null}
       <div ref={pageEndRef} />
-      {showSendPrompt ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-6">
-          <div className="w-full max-w-md rounded-3xl border border-black/15 bg-white p-6 shadow-[0_30px_60px_rgba(10,10,10,0.3)]">
-            <h3 className={`${dmSerif.className} text-2xl`}>
-              Poslati narudzbu?
-            </h3>
-            <p className="mt-2 text-sm text-black/60">
-              Zelis li odmah poslati narudzbu dobavljacu emailom?
-            </p>
-            {sendError ? (
-              <p className="mt-3 text-sm text-red-600">{sendError}</p>
-            ) : null}
-            {sendSuccess ? (
-              <p className="mt-3 text-sm text-green-700">{sendSuccess}</p>
-            ) : null}
-            <div className="mt-6 flex gap-3">
-              <button
-                onClick={() => {
-                  setShowSendPrompt(false);
-                  router.push(`/purchase-orders/${id}`);
-                }}
-                className="flex-1 rounded-full border border-black/20 px-4 py-2 text-xs uppercase tracking-[0.2em] text-black/70"
-              >
-                Ne
-              </button>
-              <button
-                onClick={handleSend}
-                disabled={sendingEmail}
-                className="flex-1 rounded-full bg-[#f27323] px-4 py-2 text-xs uppercase tracking-[0.2em] text-black shadow-[0_12px_24px_rgba(242,115,35,0.35)] disabled:opacity-60"
-              >
-                {sendingEmail ? "Slanje..." : "Da, posalji"}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <SendPromptModal
+        open={showSendPrompt}
+        orderId={id}
+        onClose={() => {
+          setShowSendPrompt(false);
+          router.push("/purchase-orders");
+        }}
+        onSent={() => router.push("/purchase-orders")}
+      />
     </main>
   );
 }

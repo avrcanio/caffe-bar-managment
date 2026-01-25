@@ -1,10 +1,26 @@
-# Inventura (stock)
+# Inventura
 
-Ovaj dokument opisuje kako radi inventura, statusi, i admin action za automatsku međuskladišnicu na temelju razlike između inventure i stanja skladišta.
+> Modul: Zalihe
+> Ovisi o: —
+> Koriste ga: Operativa, Admin
+
+## Sadržaj
+- [Modeli](#modeli)
+- [`stock.Inventory`](#`stockinventory`)
+- [`stock.InventoryItem`](#`stockinventoryitem`)
+- [`stock.WarehouseTransfer`](#`stockwarehousetransfer`)
+- [Admin (inventura)](#admin-inventura)
+- [Logika actiona (manjak/višak)](#logika-actiona-manjakvisak)
+- [Kako testirati](#kako-testirati)
+
+
+Ovaj dokument opisuje postojeću (legacy) inventuru, statuse i admin action za automatsku međuskladišnicu na temelju razlike između inventure i stanja skladišta.
+
+Odluka o tome kako se inventura spaja s novim FIFO slojevima i robnim kretanjima još nije donesena.
 
 ## Modeli
 
-### `stock.Inventory`
+## `stock.Inventory`
 - `warehouse` (FK -> `stock.WarehouseId`, mapira `rm_id`)
 - `date`
 - `status`:
@@ -15,18 +31,18 @@ Ovaj dokument opisuje kako radi inventura, statusi, i admin action za automatsku
 
 Status se automatski ažurira pri spremanju/brisanja stavki, osim ako je već `closed`.
 
-### `stock.InventoryItem`
+## `stock.InventoryItem`
 - `inventory` (FK)
 - `artikl` (FK -> `artikli.Artikl`)
 - `quantity`
 - `unit`
 - `note`
 
-### `stock.WarehouseTransfer`
+## `stock.WarehouseTransfer`
 - koristi se za prijenos viška/manjka između skladišta
 - `note` se popunjava s informacijom o inventuri
 
-## Admin (Inventura)
+## Admin (inventura)
 
 U `Inventory` adminu:
 - lista prikazuje `status`
@@ -59,3 +75,5 @@ Napomena: `warehouse_id=8` mora postojati u `WarehouseId` (rm_id=8).
    - da je stanje skladišta syncano (WarehouseStock ažuriran)
    - da su kreirane međuskladišnice za manjak/višak
    - da je `Inventory.status` postavljen na `closed`
+
+[← Back to index](../index.md)

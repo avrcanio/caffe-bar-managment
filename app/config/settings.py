@@ -66,6 +66,8 @@ INSTALLED_APPS = [
     'contacts',
     'orders',
     'mailbox_app',
+    'accounting',
+    'purchases',
 ]
 
 MIDDLEWARE = [

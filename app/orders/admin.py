@@ -7,6 +7,7 @@ import json
 
 from django import forms
 from django.contrib import admin, messages
+from django.core.exceptions import ValidationError
 from email.utils import formataddr, parseaddr
 from django.db import models, transaction
 from django.core.mail import EmailMessage
@@ -17,7 +18,11 @@ from django.urls import reverse
 import requests
 
 from configuration.models import CompanyProfile, OrderEmailTemplate
+from accounting.services import compute_purchase_totals_from_items
 from artikli.remaris_connector import RemarisConnector
+from purchases.models import SupplierInvoice
+from stock.services import get_stock_accounting_config
+from stock.services import post_warehouse_input_to_stock
 
 from .models import (
     PurchaseOrder,
@@ -257,7 +262,10 @@ def _warehouse_input_payload(warehouse_input):
         "TypeName": "WarehouseInputViewModel",
         "Id": str(warehouse_input.remaris_id) if warehouse_input.remaris_id else "",
         "DateModified": _fmt_datetime(warehouse_input.date_modified or now) if is_update else "",
-        "DocumentType": str(warehouse_input.document_type or "10"),
+        "DocumentType": str(
+            warehouse_input.document_type_code
+            or (warehouse_input.document_type.code if warehouse_input.document_type else "10")
+        ),
         "IsInPdvSystem": "True" if warehouse_input.is_in_pdv_system else "False",
         "ExportDocumentTypeRequired": "False",
         "WarehouseId": str(warehouse_input.warehouse.rm_id) if warehouse_input.warehouse else "",
@@ -307,11 +315,15 @@ def _validate_warehouse_input(warehouse_input):
 @admin.register(WarehouseInput)
 class WarehouseInputAdmin(admin.ModelAdmin):
     list_display = ("id", "order", "supplier", "warehouse", "date", "document_type", "total", "is_canceled")
-    list_filter = ("document_type", "is_canceled", "supplier", "warehouse")
+    list_filter = ("document_type", "is_canceled", "supplier", "warehouse", "supplier_invoices")
     search_fields = ("id", "invoice_code", "delivery_note", "purchase_order__id")
-    autocomplete_fields = ("order", "purchase_order", "supplier", "payment_type", "warehouse")
+    autocomplete_fields = ("order", "purchase_order", "supplier", "payment_type", "warehouse", "document_type")
     inlines = [WarehouseInputItemInline]
-    actions = ["send_warehouse_input_to_remaris"]
+    actions = [
+        "send_warehouse_input_to_remaris",
+        "post_warehouse_input_to_stock_action",
+        "create_supplier_invoice_from_inputs",
+    ]
 
     @admin.action(description="Send to Remaris", permissions=["change"])
     def send_warehouse_input_to_remaris(self, request, queryset):
@@ -375,6 +387,7 @@ class WarehouseInputAdmin(admin.ModelAdmin):
                 warehouse_input.remaris_id = remaris_id
                 warehouse_input.save(update_fields=["raw_payload", "date_modified", "remaris_id"])
                 updated_ids += 1
+
             else:
                 warehouse_input.save(update_fields=["raw_payload", "date_modified"])
             sent += 1
@@ -397,6 +410,144 @@ class WarehouseInputAdmin(admin.ModelAdmin):
                 f"Slanje nije uspjelo. Fail: {failed}.",
                 level=messages.ERROR,
             )
+
+    @admin.action(description="Proknjizi primku u skladiste", permissions=["change"])
+    def post_warehouse_input_to_stock_action(self, request, queryset):
+        posted = 0
+        skipped = 0
+        failed = 0
+
+        already_posted = queryset.filter(stock_move__isnull=False).count()
+        queryset = queryset.filter(stock_move__isnull=True)
+
+        for warehouse_input in queryset.select_related("warehouse"):
+            try:
+                post_warehouse_input_to_stock(warehouse_input=warehouse_input)
+                posted += 1
+            except ValidationError as exc:
+                skipped += 1
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id} preskocena: {exc}",
+                    level=messages.WARNING,
+                )
+            except Exception as exc:
+                failed += 1
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id} greska: {exc}",
+                    level=messages.ERROR,
+                )
+
+        if posted:
+            self.message_user(request, f"Proknjizeno primki: {posted}", level=messages.SUCCESS)
+        if already_posted:
+            self.message_user(
+                request,
+                f"Preskoceno (vec proknjizeno): {already_posted}",
+                level=messages.WARNING,
+            )
+        if skipped:
+            self.message_user(request, f"Preskoceno primki: {skipped}", level=messages.WARNING)
+        if failed:
+            self.message_user(request, f"Greske: {failed}", level=messages.ERROR)
+
+    @admin.action(description="Kreiraj ulazni racun iz primki", permissions=["change"])
+    def create_supplier_invoice_from_inputs(self, request, queryset):
+        inputs = queryset.select_related("supplier", "document_type").prefetch_related(
+            "items__artikl__tax_group",
+            "items__artikl__deposit",
+        )
+        if not inputs:
+            self.message_user(request, "Nema odabranih primki.", level=messages.WARNING)
+            return
+
+        already_linked = queryset.filter(supplier_invoices__isnull=False).distinct()
+        if already_linked.exists():
+            pairs = list(
+                already_linked.values_list("id", "supplier_invoices__invoice_number")
+                .distinct()[:50]
+            )
+            self.message_user(
+                request,
+                f"Primke su vec vezane na racun: {pairs} (prikazano prvih 50).",
+                level=messages.ERROR,
+            )
+            return
+
+        suppliers = {inp.supplier_id for inp in inputs if inp.supplier_id}
+        if len(suppliers) != 1:
+            self.message_user(
+                request,
+                "Primke moraju imati istog dobavljaca.",
+                level=messages.ERROR,
+            )
+            return
+
+        invoice_codes = {inp.invoice_code for inp in inputs if inp.invoice_code}
+        if len(invoice_codes) > 1:
+            self.message_user(
+                request,
+                "Primke imaju razlicite brojeve racuna. Odaberi primke istog racuna.",
+                level=messages.ERROR,
+            )
+            return
+
+        supplier = inputs[0].supplier
+        invoice_number = invoice_codes.pop() if invoice_codes else f"AUTO-{inputs[0].id}"
+        invoice_date = max(inp.date for inp in inputs if inp.date)
+        document_types = {inp.document_type_id for inp in inputs if inp.document_type_id}
+        document_type = None
+        if len(document_types) == 1:
+            document_type = inputs[0].document_type
+
+        items = []
+        for inp in inputs:
+            items.extend(list(inp.items.all()))
+        totals = compute_purchase_totals_from_items(items, deposit_total=None)
+
+        cfg = None
+        try:
+            cfg = get_stock_accounting_config()
+        except Exception:
+            cfg = None
+
+        invoice = SupplierInvoice.objects.create(
+            supplier=supplier,
+            invoice_number=invoice_number,
+            invoice_date=invoice_date,
+            deposit_total=totals.deposit_total,
+            total_net=totals.net_total,
+            total_vat=totals.vat_total,
+            total_gross=totals.gross_total,
+            document_type=document_type,
+        )
+        if cfg:
+            update_fields = []
+            if not invoice.cash_account_id and cfg.default_cash_account_id:
+                invoice.cash_account = cfg.default_cash_account
+                update_fields.append("cash_account")
+            if invoice.deposit_total > 0 and not invoice.deposit_account_id and cfg.default_deposit_account_id:
+                invoice.deposit_account = cfg.default_deposit_account
+                update_fields.append("deposit_account")
+            if update_fields:
+                invoice.save(update_fields=update_fields)
+        invoice.inputs.add(*inputs)
+
+        self.message_user(
+            request,
+            f"Ulazni racun kreiran (ID: {invoice.id}).",
+            level=messages.SUCCESS,
+        )
+        url = reverse("admin:purchases_supplierinvoice_change", args=[invoice.id])
+        messages.success(
+            request,
+            format_html(
+                'Kreiran ulazni racun: <a href="{}" target="_blank">#{}</a>',
+                url,
+                invoice.invoice_number,
+            ),
+        )
 
 
 @admin.action(description="Send order email", permissions=["change"])
@@ -526,6 +677,8 @@ def create_warehouse_input(modeladmin, request, queryset):
                     )
                 )
 
+            for wi_item in items:
+                wi_item.id = None
             WarehouseInputItem.objects.bulk_create(items)
             if not order.primka_created:
                 order.primka_created = True

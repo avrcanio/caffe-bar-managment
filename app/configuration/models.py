@@ -1,3 +1,4 @@
+from django.core.exceptions import ValidationError
 from django.db import models
 
 
@@ -89,3 +90,138 @@ class OrderEmailTemplate(models.Model):
     class Meta:
         verbose_name = "Predlozak emaila narudzbe"
         verbose_name_plural = "Predlosci emaila narudzbi"
+
+
+class DocumentType(models.Model):
+    DIRECTION_IN = "in"
+    DIRECTION_OUT = "out"
+    DIRECTION_CHOICES = (
+        (DIRECTION_IN, "Ulaz"),
+        (DIRECTION_OUT, "Izlaz"),
+    )
+
+    name = models.CharField(max_length=150, verbose_name="naziv")
+    code = models.CharField(max_length=50, unique=True, verbose_name="sifra")
+    direction = models.CharField(
+        max_length=3,
+        choices=DIRECTION_CHOICES,
+        verbose_name="smjer",
+    )
+    description = models.TextField(blank=True, default="", verbose_name="opis")
+    sort_order = models.PositiveIntegerField(default=0, verbose_name="redoslijed")
+    is_active = models.BooleanField(default=True, verbose_name="aktivno")
+    ledger = models.ForeignKey(
+        "accounting.Ledger",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="document_types",
+        verbose_name="ledger",
+    )
+    stock_account = models.ForeignKey(
+        "Account",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="document_types_stock",
+        verbose_name="konto zalihe",
+    )
+    counterpart_account = models.ForeignKey(
+        "Account",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="document_types_counterpart",
+        verbose_name="konto protustavke",
+    )
+    ar_account = models.ForeignKey(
+        "accounting.Account",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+        limit_choices_to={"is_postable": True},
+        verbose_name="konto kupaca",
+    )
+    ap_account = models.ForeignKey(
+        "accounting.Account",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+        limit_choices_to={"is_postable": True},
+        verbose_name="konto dobavljaca",
+    )
+    vat_output_account = models.ForeignKey(
+        "accounting.Account",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+        limit_choices_to={"is_postable": True},
+        verbose_name="konto PDV obveze",
+    )
+    vat_input_account = models.ForeignKey(
+        "accounting.Account",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+        limit_choices_to={"is_postable": True},
+        verbose_name="konto pretporeza",
+    )
+    revenue_account = models.ForeignKey(
+        "accounting.Account",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+        limit_choices_to={"is_postable": True},
+        verbose_name="konto prihoda",
+    )
+    expense_account = models.ForeignKey(
+        "accounting.Account",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+        limit_choices_to={"is_postable": True},
+        verbose_name="konto rashoda",
+    )
+
+    def clean(self):
+        if not self.ledger_id:
+            return
+        for field in [
+            "ar_account",
+            "ap_account",
+            "vat_output_account",
+            "vat_input_account",
+            "revenue_account",
+            "expense_account",
+        ]:
+            acc = getattr(self, field)
+            if acc and acc.ledger_id != self.ledger_id:
+                raise ValidationError({field: "Odabrani konto mora biti iz istog ledgera."})
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.code})"
+
+    class Meta:
+        verbose_name = "Tip dokumenta"
+        verbose_name_plural = "Tipovi dokumenata"
+        ordering = ("sort_order", "name")
+
+
+class Account(models.Model):
+    code = models.CharField(max_length=20, unique=True, verbose_name="sifra")
+    name = models.CharField(max_length=255, verbose_name="naziv")
+    is_active = models.BooleanField(default=True, verbose_name="aktivno")
+
+    def __str__(self) -> str:
+        return f"{self.code} - {self.name}"
+
+    class Meta:
+        verbose_name = "Konto"
+        verbose_name_plural = "Konta"
+        ordering = ("code",)

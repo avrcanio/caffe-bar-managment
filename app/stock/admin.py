@@ -16,11 +16,18 @@ from stock.models import (
     Inventory,
     InventoryItem,
     ProductStockDS,
+    ReplenishRequestLine,
+    StockAllocation,
+    StockAccountingConfig,
+    StockLot,
+    StockMove,
+    StockMoveLine,
     WarehouseId,
     WarehouseStock,
     WarehouseTransfer,
     WarehouseTransferItem,
 )
+from stock.services import replenish_to_sale_warehouse
 
 
 @admin.action(description="Import stanje skladišta from Remaris", permissions=["change"])
@@ -861,3 +868,118 @@ class WarehouseTransferAdmin(admin.ModelAdmin):
         else:
             obj.created_by = request.user
         super().save_model(request, obj, form, change)
+
+
+class StockMoveLineInline(admin.TabularInline):
+    model = StockMoveLine
+    extra = 0
+    fields = ("warehouse", "artikl", "quantity", "unit_cost", "source_item")
+    autocomplete_fields = ("artikl", "warehouse")
+
+
+@admin.register(StockMove)
+class StockMoveAdmin(admin.ModelAdmin):
+    list_display = ("id", "move_type", "date", "reference")
+    list_filter = ("move_type",)
+    search_fields = ("reference",)
+    inlines = [StockMoveLineInline]
+
+
+@admin.register(StockMoveLine)
+class StockMoveLineAdmin(admin.ModelAdmin):
+    list_display = ("id", "move", "warehouse", "artikl", "quantity", "unit_cost", "source_item")
+    list_filter = ("move__move_type", "warehouse", "artikl")
+    search_fields = ("artikl__name", "artikl__code", "move__reference")
+    raw_id_fields = ("move", "warehouse", "artikl", "source_item")
+
+
+@admin.register(ReplenishRequestLine)
+class ReplenishRequestLineAdmin(admin.ModelAdmin):
+    list_display = ("id", "artikl", "quantity", "created_at")
+    search_fields = ("artikl__name", "artikl__code")
+    autocomplete_fields = ("artikl",)
+    actions = ["execute_replenish"]
+
+    @admin.action(description="Izvrsi transfer (replenish)", permissions=["change"])
+    def execute_replenish(self, request, queryset):
+        lines = []
+        for line in queryset.select_related("artikl"):
+            if not line.artikl_id:
+                continue
+            lines.append({"artikl": line.artikl, "quantity": line.quantity})
+
+        if not lines:
+            self.message_user(request, "Nema stavki za transfer.", level=messages.WARNING)
+            return
+
+        try:
+            move = replenish_to_sale_warehouse(lines=lines)
+        except Exception as exc:
+            self.message_user(request, f"Transfer nije uspio: {exc}", level=messages.ERROR)
+            return
+
+        self.message_user(
+            request,
+            f"Transfer kreiran (ID: {move.id}).",
+            level=messages.SUCCESS,
+        )
+
+
+@admin.register(StockLot)
+class StockLotAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "warehouse",
+        "artikl",
+        "received_at",
+        "unit_cost",
+        "qty_in",
+        "qty_remaining",
+        "source_item",
+    )
+    list_filter = ("warehouse", "artikl")
+    search_fields = ("artikl__name", "artikl__code")
+
+
+@admin.register(StockAllocation)
+class StockAllocationAdmin(admin.ModelAdmin):
+    list_display = ("id", "move_line", "lot", "qty", "unit_cost")
+    list_filter = ("lot__warehouse", "lot__artikl")
+    search_fields = ("lot__artikl__name", "lot__artikl__code")
+    raw_id_fields = ("move_line", "lot")
+
+
+@admin.register(StockAccountingConfig)
+class StockAccountingConfigAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "inventory_account",
+        "cogs_account",
+        "default_sale_warehouse",
+        "default_purchase_warehouse",
+        "default_replenish_from_warehouse",
+        "auto_replenish_on_sale",
+        "default_cash_account",
+        "default_deposit_account",
+    )
+    autocomplete_fields = (
+        "inventory_account",
+        "cogs_account",
+        "default_sale_warehouse",
+        "default_purchase_warehouse",
+        "default_replenish_from_warehouse",
+        "default_cash_account",
+        "default_deposit_account",
+    )
+
+    def has_add_permission(self, request):
+        return not StockAccountingConfig.objects.exists()
+
+    @admin.action(description="Replenish Glavno -> Sank", permissions=["change"])
+    def replenish_to_sale(self, request, queryset):
+        try:
+            replenish_to_sale_warehouse(lines=[])
+        except Exception as exc:
+            self.message_user(request, f"Replenish nije uspio: {exc}", level=messages.ERROR)
+
+    actions = ["replenish_to_sale"]
