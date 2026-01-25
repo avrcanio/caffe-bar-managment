@@ -32,6 +32,8 @@ yarn-error.log*
 out/
 build
 .vercel
+frontend/public/sw.js
+frontend/public/workbox-*.js
 
 # Environment
 .env

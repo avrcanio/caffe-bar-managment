@@ -4,6 +4,9 @@ services:
       - disabled
   web:
     container_name: mozzart-dev
+    build:
+      args:
+        REQUIREMENTS_FILE: requirements-dev.txt
     env_file:
       - .env.dev
     environment:
@@ -14,6 +17,9 @@ services:
       - redis
   celery_worker:
     container_name: mozzart-dev-celery-worker
+    build:
+      args:
+        REQUIREMENTS_FILE: requirements-dev.txt
     env_file:
       - .env.dev
     environment:
@@ -22,6 +28,9 @@ services:
       - redis
   celery_beat:
     container_name: mozzart-dev-celery-beat
+    build:
+      args:
+        REQUIREMENTS_FILE: requirements-dev.txt
     env_file:
       - .env.dev
     environment:

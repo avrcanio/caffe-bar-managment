@@ -1,13 +1,33 @@
 services:
   web:
+    build:
+      args:
+        REQUIREMENTS_FILE: requirements-prod.txt
+    command: bash -lc "python manage.py migrate && gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 3 --timeout 120"
+    volumes: []
     env_file:
       - .env
+    restart: unless-stopped
   celery_worker:
+    build:
+      args:
+        REQUIREMENTS_FILE: requirements-prod.txt
+    volumes: []
     env_file:
       - .env
+    restart: unless-stopped
   celery_beat:
+    build:
+      args:
+        REQUIREMENTS_FILE: requirements-prod.txt
+    volumes: []
     env_file:
       - .env
+    restart: unless-stopped
   frontend:
     env_file:
       - .env
+    restart: unless-stopped
+  caddy:
+    profiles:
+      - dev
