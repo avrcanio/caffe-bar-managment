@@ -315,7 +315,7 @@ def _validate_warehouse_input(warehouse_input):
 @admin.register(WarehouseInput)
 class WarehouseInputAdmin(admin.ModelAdmin):
     list_display = ("id", "order", "supplier", "warehouse", "date", "document_type", "total", "is_canceled")
-    list_filter = ("document_type", "is_canceled", "supplier", "warehouse")
+    list_filter = ("document_type", "is_canceled", "supplier", "warehouse", "supplier_invoices")
     search_fields = ("id", "invoice_code", "delivery_note", "purchase_order__id")
     autocomplete_fields = ("order", "purchase_order", "supplier", "payment_type", "warehouse", "document_type")
     inlines = [WarehouseInputItemInline]
@@ -538,6 +538,15 @@ class WarehouseInputAdmin(admin.ModelAdmin):
             request,
             f"Ulazni racun kreiran (ID: {invoice.id}).",
             level=messages.SUCCESS,
+        )
+        url = reverse("admin:purchases_supplierinvoice_change", args=[invoice.id])
+        messages.success(
+            request,
+            format_html(
+                'Kreiran ulazni racun: <a href="{}" target="_blank">#{}</a>',
+                url,
+                invoice.invoice_number,
+            ),
         )
 
 

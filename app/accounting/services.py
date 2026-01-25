@@ -395,6 +395,128 @@ def post_purchase_invoice_cash_from_items(
     return entry
 
 
+def post_purchase_invoice_deferred_from_items(
+    *,
+    document_type: DocumentType,
+    doc_date: date,
+    items: Iterable[WarehouseInputItem],
+    ap_account: Account,
+    deposit_total: Decimal | None = None,
+    deposit_account: Account | None = None,
+    description: str = "",
+) -> JournalEntry:
+    if not document_type.expense_account_id:
+        raise ValidationError("DocumentType nema postavljen expense_account (trošak/nabava).")
+
+    if not ap_account or not ap_account.is_postable:
+        raise ValidationError("AP konto mora biti postable.")
+
+    items_list = list(items)
+    if not items_list:
+        raise ValidationError("Nema stavki (items) – ne mogu knjižiti ulazni račun.")
+
+    totals = compute_purchase_totals_from_items(items_list, deposit_total=deposit_total)
+
+    if totals.vat_total != Decimal("0.00") and not document_type.vat_input_account_id:
+        raise ValidationError("Imamo PDV na stavkama, ali DocumentType nema vat_input_account (pretporez).")
+
+    if totals.deposit_total != Decimal("0.00") and not deposit_account:
+        raise ValidationError("Na stavkama postoji depozit, ali deposit_account nije zadan.")
+
+    ledger = document_type.ledger or get_single_ledger()
+
+    entry = JournalEntry.objects.create(
+        ledger=ledger,
+        number=_next_entry_number(ledger),
+        date=doc_date,
+        description=description or "Ulazni racun (odgoda)",
+        status=JournalEntry.Status.DRAFT,
+    )
+
+    JournalItem.objects.create(
+        entry=entry,
+        account=document_type.expense_account,
+        debit=totals.net_total,
+        credit=Decimal("0.00"),
+        description="Nabava/trošak (osnovica)",
+    )
+
+    if totals.vat_total != Decimal("0.00"):
+        JournalItem.objects.create(
+            entry=entry,
+            account=document_type.vat_input_account,
+            debit=totals.vat_total,
+            credit=Decimal("0.00"),
+            description="Pretporez (PDV ulaz)",
+        )
+
+    if totals.deposit_total != Decimal("0.00"):
+        JournalItem.objects.create(
+            entry=entry,
+            account=deposit_account,
+            debit=totals.deposit_total,
+            credit=Decimal("0.00"),
+            description="Povratna naknada (ambalaža/depozit)",
+        )
+
+    JournalItem.objects.create(
+        entry=entry,
+        account=ap_account,
+        debit=Decimal("0.00"),
+        credit=totals.payable_total,
+        description="Dobavljac (odgoda)",
+    )
+
+    entry.post()
+    return entry
+
+
+def post_supplier_invoice_payment(
+    *,
+    invoice,
+    amount: Decimal,
+    payment_account: Account,
+    paid_date: date,
+) -> JournalEntry:
+    if invoice.payment_terms != invoice.PaymentTerms.DEFERRED:
+        raise ValidationError("Placanje je dozvoljeno samo za odgođene racune.")
+    if invoice.payment_status not in (invoice.PaymentStatus.UNPAID, invoice.PaymentStatus.PARTIAL):
+        raise ValidationError("Placanje je vec evidentirano.")
+    if not invoice.journal_entry_id:
+        raise ValidationError("Racun nije proknjizen.")
+    if not invoice.ap_account_id:
+        raise ValidationError("Racun nema AP konto.")
+    if not payment_account or not payment_account.is_postable:
+        raise ValidationError("Payment konto mora biti postable.")
+
+    ledger = invoice.document_type.ledger if invoice.document_type_id else get_single_ledger()
+    entry = JournalEntry.objects.create(
+        ledger=ledger,
+        number=_next_entry_number(ledger),
+        date=paid_date,
+        description=f"Placanje racuna {invoice.invoice_number}",
+        status=JournalEntry.Status.DRAFT,
+    )
+
+    JournalItem.objects.create(
+        entry=entry,
+        account=invoice.ap_account,
+        debit=amount,
+        credit=Decimal("0.00"),
+        description="Dobavljac (placanje)",
+    )
+    JournalItem.objects.create(
+        entry=entry,
+        account=payment_account,
+        debit=Decimal("0.00"),
+        credit=amount,
+        description="Placanje",
+    )
+
+    entry.post()
+    return entry
+
+
 def post_purchase_invoice_cash_from_inputs(
     *,
     document_type: DocumentType,

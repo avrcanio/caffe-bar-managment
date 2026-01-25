@@ -25,6 +25,8 @@ export type PurchaseOrderDTO = {
   supplier_name?: string | null;
   status: string;
   status_display?: string | null;
+  payment_type?: number | null;
+  payment_type_name?: string | null;
   ordered_at: string;
   total_net?: string;
   total_gross: string;
@@ -62,6 +64,8 @@ export type PurchaseOrder = {
   supplierName: string;
   statusCode: string;
   statusLabel: string;
+  paymentTypeId: number | null;
+  paymentTypeName: string | null;
   orderedAt: Date;
   totalNet: number;
   totalGross: number;
@@ -96,6 +100,9 @@ export const mapPurchaseOrder = (order: PurchaseOrderDTO): PurchaseOrder => ({
   supplierName: order.supplier_name || "Dobavljac",
   statusCode: order.status,
   statusLabel: order.status_display || "Status",
+  paymentTypeId:
+    order.payment_type === undefined ? null : order.payment_type ?? null,
+  paymentTypeName: order.payment_type_name || null,
   orderedAt: new Date(order.ordered_at),
   totalNet: toNumber(order.total_net, 0),
   totalGross: toNumber(order.total_gross, 0),

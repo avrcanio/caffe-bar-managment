@@ -132,7 +132,7 @@ export default function PurchaseOrderDetailPage() {
 
         {order ? (
           <>
-            <section className="grid gap-4 md:grid-cols-3">
+            <section className="grid gap-4 md:grid-cols-4">
               {[
                 {
                   label: "Dobavljac",
@@ -142,6 +142,10 @@ export default function PurchaseOrderDetailPage() {
                   label: "Status",
                   value: order.statusLabel,
                   clickable: order.statusCode === "created",
+                },
+                {
+                  label: "Tip placanja",
+                  value: order.paymentTypeName || "-",
                 },
                 {
                   label: "Datum",

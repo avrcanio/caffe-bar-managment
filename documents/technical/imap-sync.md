@@ -1,12 +1,28 @@
-# IMAP Mailbox Sync (Mozzart)
+# IMAP sinkronizacija
 
-This document describes how IMAP sync is configured and how to trigger it.
+> Modul: Tehnički
+> Ovisi o: —
+> Koriste ga: Razvoj, DevOps
 
-## Overview
+## Sadržaj
+- [Pregled](#pregled)
+- [Komponente](#komponente)
+- [Varijable okruženja](#varijable-okruzenja)
+- [Docker servisi](#docker-servisi)
+- [Ručna sinkronizacija](#rucna-sinkronizacija)
+- [Admin gumb](#admin-gumb)
+- [API](#api)
+- [Logs / Rješavanje problema](#logs-rjesavanje-problema)
+- [Lokacije podataka](#lokacije-podataka)
+
+
+Ovaj dokument opisuje kako je IMAP sinkronizacija podešena i kako je pokrenuti.
+
+## Pregled
 
 The IMAP sync runs as a Celery task (`mailbox_app.tasks.sync_imap_mailbox`) and is scheduled every minute via Celery Beat. It stores messages and attachments in the database and media storage.
 
-## Components
+## Komponente
 
 - **Django app**: `mailbox_app`
 - **Models**:
@@ -17,7 +33,7 @@ The IMAP sync runs as a Celery task (`mailbox_app.tasks.sync_imap_mailbox`) and 
 - **Schedule**: every 1 minute
 - **Storage**: attachments saved under `media/mail_attachments/YYYY/MM/DD/`
 
-## Environment Variables
+## Varijable okruženja
 
 Set these in `.env` (or your secrets store):
 
@@ -32,7 +48,7 @@ CELERY_BROKER_URL=redis://redis:6379/0
 CELERY_RESULT_BACKEND=redis://redis:6379/0
 ```
 
-## Docker Services
+## Docker servisi
 
 Required services in `docker-compose.yml`:
 
@@ -47,15 +63,15 @@ Start everything:
 docker compose up -d --build
 ```
 
-## Manual Sync
+## Ručna sinkronizacija
 
-### Admin button
+## Admin gumb
 
 In Django admin:
 - Open **Mailbox states**
 - Click **Sync mailbox now** (top-right button)
 
-### API
+## API
 
 ```
 curl -X POST 'https://mozart.sibenik1983.hr/api/mailbox/sync/' \
@@ -65,7 +81,7 @@ curl -X POST 'https://mozart.sibenik1983.hr/api/mailbox/sync/' \
   -H "X-CSRFToken: ..."
 ```
 
-## Logs / Troubleshooting
+## Logs / Rješavanje problema
 
 Check Celery worker logs:
 
@@ -81,8 +97,9 @@ Common issues:
 - **502 from /admin or /api**  
   nginx → backend connectivity; ensure `mozzart` is in `ALLOWED_HOSTS` and nginx container is on the same Docker network.
 
-## Data Locations
+## Lokacije podataka
 
 - Email metadata stored in `mailbox_app_mailmessage`.
 - Attachments stored in `media/mail_attachments/`.
 
+[← Back to index](../index.md)

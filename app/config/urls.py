@@ -18,6 +18,7 @@ from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
 from django.contrib.admin.views.decorators import staff_member_required
+from django.contrib.staticfiles.urls import staticfiles_urlpatterns
 from django.urls import include, path
 from rest_framework.authtoken.views import obtain_auth_token
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
@@ -26,6 +27,7 @@ from .api_views import CsrfView, LoginView, LogoutView, MeView
 from mailbox_app.api_views import MailboxSyncView
 from mailbox_app.api import MailMessageDetailView, MailMessageListView
 from contacts.api import SupplierListView
+from configuration.api import PaymentTypeListView
 from orders.api import (
     PurchaseOrderDetailView,
     PurchaseOrderItemDetailView,
@@ -71,6 +73,7 @@ urlpatterns = [
     path('api/purchase-orders/<int:order_id>/items/', PurchaseOrderItemListCreateView.as_view(), name='api-purchase-order-item-list'),
     path('api/purchase-order-items/<int:pk>/', PurchaseOrderItemDetailView.as_view(), name='api-purchase-order-item-detail'),
     path('api/suppliers/', SupplierListView.as_view(), name='api-supplier-list'),
+    path('api/payment-types/', PaymentTypeListView.as_view(), name='api-payment-type-list'),
     path('api/suppliers/<int:supplier_id>/artikli/', SupplierArtiklListView.as_view(), name='api-supplier-artikl-list'),
     path("api/mailbox/sync/", MailboxSyncView.as_view(), name="api-mailbox-sync"),
     path("api/mailbox/messages/", MailMessageListView.as_view(), name="api-mailbox-messages"),
@@ -79,3 +82,4 @@ urlpatterns = [
 
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+    urlpatterns += staticfiles_urlpatterns()
