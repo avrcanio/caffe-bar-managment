@@ -111,11 +111,7 @@ def import_warehouse_stock(modeladmin, request, queryset):
     )
 
 
-@admin.action(
-    description="Import stanje artikala iz Remarisa (odabrana skladista)",
-    permissions=["change"],
-)
-def import_warehouse_stock_for_warehouses(modeladmin, request, queryset):
+def _import_warehouse_stock_for_warehouses(modeladmin, request, queryset):
     connector = RemarisConnector()
     connector.login()
 
@@ -212,6 +208,14 @@ def import_warehouse_stock_for_warehouses(modeladmin, request, queryset):
         level=messages.SUCCESS,
     )
     return True
+
+
+@admin.action(
+    description="Import stanje artikala iz Remarisa (odabrana skladista)",
+    permissions=["change"],
+)
+def import_warehouse_stock_for_warehouses(modeladmin, request, queryset):
+    _import_warehouse_stock_for_warehouses(modeladmin, request, queryset)
 
 
 @admin.action(description="Import stanje artikla from Remaris", permissions=["change"])
@@ -602,7 +606,7 @@ def create_transfer_for_inventory_shortage(modeladmin, request, queryset):
                 level=messages.WARNING,
             )
         if warehouses.exists():
-            if not import_warehouse_stock_for_warehouses(
+            if not _import_warehouse_stock_for_warehouses(
                 modeladmin,
                 request,
                 warehouses,
