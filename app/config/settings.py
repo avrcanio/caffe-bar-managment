@@ -44,6 +44,7 @@ CSRF_TRUSTED_ORIGINS = _split_env_list(
 # Ensure correct scheme/host when behind a reverse proxy (for absolute URLs).
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 USE_X_FORWARDED_HOST = True
+USE_X_FORWARDED_PORT = True
 
 
 # Application definition
