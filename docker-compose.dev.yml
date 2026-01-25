@@ -39,3 +39,16 @@ services:
     container_name: mozzart-redis-dev
     ports:
       - "6380:6379"
+  caddy:
+    image: caddy:2-alpine
+    container_name: mozzart-caddy-dev
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/certs:/certs:ro
+      - caddy_data:/data
+    depends_on:
+      - web
+      - frontend
