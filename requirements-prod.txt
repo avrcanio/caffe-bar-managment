@@ -11,3 +11,5 @@ celery>=5.4
 redis>=5.0
 drf-spectacular
 gunicorn>=21.2
+whitenoise>=6.6
+xlrd==1.2.0

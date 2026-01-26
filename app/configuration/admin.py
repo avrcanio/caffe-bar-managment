@@ -4,6 +4,7 @@ from django.urls import path, reverse
 from django.db import transaction
 
 from accounting.services import get_single_ledger
+from accounting.models import Account as AccountingAccount
 from artikli.remaris_connector import RemarisConnector
 from .models import (
     Account,
@@ -337,7 +338,7 @@ class DocumentTypeAdmin(admin.ModelAdmin):
             try:
                 obj = DocumentType.objects.get(pk=obj_id)
                 if obj.ledger_id:
-                    kwargs["queryset"] = Account.objects.filter(
+                    kwargs["queryset"] = AccountingAccount.objects.filter(
                         ledger=obj.ledger,
                         is_postable=True,
                         is_active=True,

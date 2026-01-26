@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from .models import SupplierInvoice
 from accounting.services import (
+    flatten_input_items,
     post_purchase_invoice_cash_from_inputs,
     post_purchase_invoice_deferred_from_items,
     post_supplier_invoice_payment,
@@ -248,7 +249,7 @@ class SupplierInvoiceAdmin(admin.ModelAdmin):
                     entry = post_purchase_invoice_deferred_from_items(
                         document_type=invoice.document_type,
                         doc_date=invoice.invoice_date,
-                        items=invoice.inputs.all(),
+                        items=flatten_input_items(invoice.inputs.all()),
                         ap_account=invoice.ap_account,
                         deposit_account=invoice.deposit_account,
                         description=f"Ulazni racun {invoice.invoice_number} (odgoda)",
