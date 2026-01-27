@@ -25,6 +25,21 @@ class WarehouseStock(models.Model):
     product_code = models.CharField(max_length=50, blank=True, default="")
     unit = models.CharField(max_length=100, blank=True, default="")
     quantity = models.DecimalField(max_digits=12, decimal_places=4)
+    internal_quantity = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        null=True,
+        blank=True,
+        verbose_name="stanje (interno)",
+    )
+    internal_avg_cost = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        null=True,
+        blank=True,
+        verbose_name="prosjecna cijena (interno)",
+    )
+    internal_updated_at = models.DateTimeField(null=True, blank=True, verbose_name="interno azurirano")
     base_group_name = models.CharField(max_length=255, blank=True, default="")
     active = models.BooleanField(default=False)
     def __str__(self) -> str:

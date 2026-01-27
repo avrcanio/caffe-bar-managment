@@ -1,6 +1,7 @@
 import secrets
 
 from django.db import models
+from mptt.models import MPTTModel, TreeForeignKey
 
 
 class Artikl(models.Model):
@@ -41,6 +42,8 @@ class Artikl(models.Model):
         related_name="artikli",
         verbose_name="Kategorija napitaka",
     )
+    is_sellable = models.BooleanField(default=True, verbose_name="Prodajni artikl")
+    is_stock_item = models.BooleanField(default=False, verbose_name="Skladisni artikl")
 
     def __str__(self) -> str:
         return f"{self.code} - {self.name}"
@@ -57,6 +60,58 @@ class Artikl(models.Model):
     class Meta:
         verbose_name = "Artikl"
         verbose_name_plural = "Artikli"
+
+
+class Normativ(models.Model):
+    product = models.OneToOneField(
+        "Artikl",
+        on_delete=models.CASCADE,
+        related_name="normativ",
+        verbose_name="Prodajni (virtualni) artikl",
+        limit_choices_to={"is_sellable": True},
+    )
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = "Normativ"
+        verbose_name_plural = "Normativi"
+
+    def __str__(self) -> str:
+        return f"Normativ: {self.product}"
+
+
+class NormativItem(models.Model):
+    normativ = models.ForeignKey(
+        "Normativ",
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    ingredient = models.ForeignKey(
+        "Artikl",
+        on_delete=models.PROTECT,
+        related_name="used_in_normatives",
+        verbose_name="Skladisni artikl",
+        limit_choices_to={"is_stock_item": True},
+    )
+    qty = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        verbose_name="Kolicina po 1 prodaji",
+        help_text="npr. caj kutija 0.0500, kava kg 0.0090, limun kg 0.0400, med kom 1.0000",
+    )
+
+    class Meta:
+        verbose_name = "Stavka normativa"
+        verbose_name_plural = "Stavke normativa"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["normativ", "ingredient"],
+                name="uniq_normativ_ingredient",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.normativ.product} -> {self.ingredient} ({self.qty})"
 
 
 class UnitOfMeasureData(models.Model):
@@ -82,9 +137,9 @@ class Deposit(models.Model):
         verbose_name_plural = "Povratne naknade"
 
 
-class DrinkCategory(models.Model):
+class DrinkCategory(MPTTModel):
     name = models.CharField(max_length=120)
-    parent = models.ForeignKey(
+    parent = TreeForeignKey(
         "self",
         on_delete=models.PROTECT,
         null=True,
@@ -94,10 +149,13 @@ class DrinkCategory(models.Model):
     is_active = models.BooleanField(default=True)
     sort_order = models.PositiveIntegerField(default=0)
 
+    class MPTTMeta:
+        order_insertion_by = ["sort_order", "name"]
+
     class Meta:
         verbose_name = "Kategorija napitaka"
         verbose_name_plural = "Kategorije napitaka"
-        ordering = ["parent_id", "sort_order", "name"]
+        ordering = ["tree_id", "lft"]
         constraints = [
             models.UniqueConstraint(
                 fields=["parent", "name"],

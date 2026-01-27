@@ -6,6 +6,8 @@ import requests
 
 from django.contrib import admin, messages
 from django.db import transaction
+from django.db.models import DecimalField, F, Sum
+from django.db.models.expressions import ExpressionWrapper
 from django.http import HttpResponseRedirect
 from django.urls import path, reverse
 from django.utils import timezone
@@ -27,7 +29,7 @@ from stock.models import (
     WarehouseTransfer,
     WarehouseTransferItem,
 )
-from stock.services import replenish_to_sale_warehouse
+from stock.services import post_stock_transfer, replenish_to_sale_warehouse, refresh_internal_warehouse_stock
 
 
 @admin.action(description="Import stanje skladišta from Remaris", permissions=["change"])
@@ -635,24 +637,11 @@ def create_transfer_for_inventory_shortage(modeladmin, request, queryset):
                 )
             )
 
-            shortage_transfer = WarehouseTransfer.objects.create(
-                from_warehouse_id=inventory.warehouse_id,
-                to_warehouse_id=target_warehouse_id,
-                date=inventory.date,
-                created_by=request.user,
-                note=shortage_note,
-            )
-            overage_transfer = WarehouseTransfer.objects.create(
-                from_warehouse_id=target_warehouse_id,
-                to_warehouse_id=inventory.warehouse_id,
-                date=inventory.date,
-                created_by=request.user,
-                note=overage_note,
-            )
-
             shortage_items_created = 0
             overage_items_created = 0
             has_items = False
+            shortage_transfer = None
+            overage_move = None
             for item in inventory.items.all():
                 if not item.artikl_id or item.quantity is None:
                     continue
@@ -666,6 +655,14 @@ def create_transfer_for_inventory_shortage(modeladmin, request, queryset):
                 diff_qty = stock_qty - item.quantity
 
                 if diff_qty > 0:
+                    if shortage_transfer is None:
+                        shortage_transfer = WarehouseTransfer.objects.create(
+                            from_warehouse_id=inventory.warehouse_id,
+                            to_warehouse_id=target_warehouse_id,
+                            date=inventory.date,
+                            created_by=request.user,
+                            note=shortage_note,
+                        )
                     WarehouseTransferItem.objects.create(
                         transfer=shortage_transfer,
                         artikl_id=item.artikl_id,
@@ -674,18 +671,49 @@ def create_transfer_for_inventory_shortage(modeladmin, request, queryset):
                     )
                     shortage_items_created += 1
                 elif diff_qty < 0:
-                    WarehouseTransferItem.objects.create(
-                        transfer=overage_transfer,
+                    if overage_move is None:
+                        overage_move = StockMove.objects.create(
+                            move_type=StockMove.MoveType.IN,
+                            date=inventory.date,
+                            reference=overage_note,
+                            note=overage_note,
+                            to_warehouse=inventory.warehouse,
+                        )
+                    qty = abs(diff_qty)
+                    lots = StockLot.objects.filter(
+                        warehouse_id=inventory.warehouse_id,
                         artikl_id=item.artikl_id,
-                        quantity=abs(diff_qty),
-                        unit=item.unit,
+                        qty_remaining__gt=0,
+                    )
+                    agg = lots.aggregate(
+                        qty=Sum("qty_remaining", default=Decimal("0.0000")),
+                        value=Sum(
+                            ExpressionWrapper(
+                                F("qty_remaining") * F("unit_cost"),
+                                output_field=DecimalField(max_digits=18, decimal_places=4),
+                            ),
+                            default=Decimal("0.0000"),
+                        ),
+                    )
+                    base_qty = agg.get("qty") or Decimal("0.0000")
+                    base_value = agg.get("value") or Decimal("0.0000")
+                    unit_cost = (base_value / base_qty) if base_qty else Decimal("0.0000")
+                    StockMoveLine.objects.create(
+                        move=overage_move,
+                        warehouse=inventory.warehouse,
+                        artikl=item.artikl,
+                        quantity=qty,
+                        unit_cost=unit_cost,
+                    )
+                    StockLot.objects.create(
+                        warehouse=inventory.warehouse,
+                        artikl=item.artikl,
+                        received_at=inventory.date,
+                        unit_cost=unit_cost,
+                        qty_in=qty,
+                        qty_remaining=qty,
                     )
                     overage_items_created += 1
-
-            if shortage_items_created == 0:
-                shortage_transfer.delete()
-            if overage_items_created == 0:
-                overage_transfer.delete()
 
             if shortage_items_created == 0 and overage_items_created == 0:
                 if has_items:
@@ -719,12 +747,30 @@ class WarehouseStockAdmin(admin.ModelAdmin):
         "product_name",
         "unit",
         "quantity",
+        "internal_quantity",
+        "internal_avg_cost",
+        "internal_updated_at",
         "base_group_name",
         "active",
     )
     search_fields = ("product__name", "product_code", "product_name", "base_group_name", "unit")
     list_filter = ("warehouse_id", "active", "base_group_name", "unit")
-    actions = [import_warehouse_stock]
+    actions = [import_warehouse_stock, "refresh_internal_stock", "refresh_internal_stock_all"]
+
+    @admin.action(description="Refresh internal stock", permissions=["change"])
+    def refresh_internal_stock(self, request, queryset):
+        wh_ids = list(queryset.values_list("warehouse_id_id", flat=True).distinct())
+        artikl_ids = list(queryset.values_list("product_id", flat=True).distinct())
+        refresh_internal_warehouse_stock(
+            warehouse_ids=[i for i in wh_ids if i],
+            artikl_ids=[i for i in artikl_ids if i],
+        )
+        self.message_user(request, "Internal stock refreshed.", level=messages.SUCCESS)
+
+    @admin.action(description="Refresh internal stock (all)", permissions=["change"])
+    def refresh_internal_stock_all(self, request, queryset):
+        refresh_internal_warehouse_stock()
+        self.message_user(request, "Internal stock refreshed (all).", level=messages.SUCCESS)
 
 
 @admin.register(ProductStockDS)
@@ -854,7 +900,7 @@ class WarehouseTransferAdmin(admin.ModelAdmin):
         "last_error",
     )
     inlines = [WarehouseTransferItemInline]
-    actions = [send_warehouse_transfer_to_remaris]
+    actions = [send_warehouse_transfer_to_remaris, "post_internal_transfer"]
 
     def save_model(self, request, obj, form, change):
         if change:
@@ -868,6 +914,125 @@ class WarehouseTransferAdmin(admin.ModelAdmin):
         else:
             obj.created_by = request.user
         super().save_model(request, obj, form, change)
+
+    @admin.action(description="Proknjizi međuskladišnicu (interno)", permissions=["change"])
+    def post_internal_transfer(self, request, queryset):
+        posted = 0
+        skipped = 0
+        failed = 0
+
+        transfers = queryset.select_related("from_warehouse", "to_warehouse").prefetch_related("items__artikl")
+        for transfer in transfers:
+            if transfer.status == WarehouseTransfer.Status.SENT:
+                skipped += 1
+                continue
+            if transfer.dont_change_inventory_quantity:
+                skipped += 1
+                self.message_user(
+                    request,
+                    f"Transfer {transfer.id} preskocen: dont_change_inventory_quantity.",
+                    level=messages.WARNING,
+                )
+                continue
+            if not transfer.from_warehouse_id or not transfer.to_warehouse_id:
+                failed += 1
+                self.message_user(
+                    request,
+                    f"Transfer {transfer.id} nema oba skladista.",
+                    level=messages.ERROR,
+                )
+                continue
+
+            items = []
+            for item in transfer.items.all():
+                if not item.artikl_id:
+                    continue
+                items.append({"artikl": item.artikl, "quantity": item.quantity})
+
+            if not items:
+                skipped += 1
+                self.message_user(
+                    request,
+                    f"Transfer {transfer.id} nema stavki.",
+                    level=messages.WARNING,
+                )
+                continue
+
+            try:
+                is_inventory_overage = transfer.note.startswith("Inventura visak")
+                if is_inventory_overage:
+                    move = StockMove.objects.create(
+                        move_type=StockMove.MoveType.IN,
+                        date=transfer.date,
+                        reference=f"Inventura visak transfer #{transfer.id}",
+                        note=transfer.note or "",
+                        to_warehouse=transfer.to_warehouse,
+                    )
+                    for item in items:
+                        lots = StockLot.objects.filter(
+                            warehouse_id=transfer.to_warehouse_id,
+                            artikl_id=item["artikl"].rm_id,
+                            qty_remaining__gt=0,
+                        )
+                        agg = lots.aggregate(
+                            qty=Sum("qty_remaining", default=Decimal("0.0000")),
+                            value=Sum(
+                                ExpressionWrapper(
+                                    F("qty_remaining") * F("unit_cost"),
+                                    output_field=DecimalField(max_digits=18, decimal_places=4),
+                                ),
+                                default=Decimal("0.0000"),
+                            ),
+                        )
+                        base_qty = agg.get("qty") or Decimal("0.0000")
+                        base_value = agg.get("value") or Decimal("0.0000")
+                        unit_cost = (base_value / base_qty) if base_qty else Decimal("0.0000")
+                        StockMoveLine.objects.create(
+                            move=move,
+                            warehouse=transfer.to_warehouse,
+                            artikl=item["artikl"],
+                            quantity=item["quantity"],
+                            unit_cost=unit_cost,
+                        )
+                        StockLot.objects.create(
+                            warehouse=transfer.to_warehouse,
+                            artikl=item["artikl"],
+                            received_at=transfer.date,
+                            unit_cost=unit_cost,
+                            qty_in=item["quantity"],
+                            qty_remaining=item["quantity"],
+                        )
+                else:
+                    post_stock_transfer(
+                        from_warehouse=transfer.from_warehouse,
+                        to_warehouse=transfer.to_warehouse,
+                        items=items,
+                        move_date=transfer.date,
+                        reference=f"Transfer #{transfer.id}",
+                        note=transfer.note or "",
+                    )
+                transfer.status = WarehouseTransfer.Status.SENT
+                transfer.last_error = ""
+                transfer.last_synced_at = timezone.now()
+                transfer.save(update_fields=["status", "last_error", "last_synced_at"])
+                posted += 1
+            except Exception as exc:
+                failed += 1
+                transfer.status = WarehouseTransfer.Status.FAILED
+                transfer.last_error = str(exc)
+                transfer.save(update_fields=["status", "last_error"])
+                self.message_user(
+                    request,
+                    f"Transfer {transfer.id} greska: {exc}",
+                    level=messages.ERROR,
+                )
+
+        if posted:
+            self.message_user(request, f"Proknjizeno: {posted}", level=messages.SUCCESS)
+        if skipped:
+            self.message_user(request, f"Preskoceno: {skipped}", level=messages.WARNING)
+        if failed:
+            self.message_user(request, f"Greske: {failed}", level=messages.ERROR)
 
 
 class StockMoveLineInline(admin.TabularInline):

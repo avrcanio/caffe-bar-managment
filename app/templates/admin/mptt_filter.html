@@ -1,0 +1,125 @@
+{% load i18n %}
+{% load mptt_admin %}
+<h3>{% blocktrans with filter_title=title %} By {{ filter_title }} {% endblocktrans %}</h3>
+<div class="mptt-filter" data-mptt-filter>
+  <div class="mptt-filter-controls">
+    <button type="button" class="mptt-filter-expand">Prosiri sve</button>
+    <button type="button" class="mptt-filter-collapse">Sakrij sve</button>
+  </div>
+  <ul>
+  {% for choice in choices %}
+      <li{% if choice.selected %} class="selected"{% endif %}>
+      <a{{ choice.padding_style }} href="{{ choice.query_string|iriencode }}">{{ choice.display }}</a></li>
+  {% endfor %}
+  </ul>
+</div>
+<script>
+  (function () {
+    const root = document.currentScript && document.currentScript.previousElementSibling;
+    if (!root || !root.matches("[data-mptt-filter]")) return;
+    const list = root.querySelector("ul");
+    const items = Array.from(list.querySelectorAll("li"));
+    if (!items.length) return;
+
+    const indent = 10;
+    const nodes = items.map((li) => {
+      const link = li.querySelector("a");
+      const style = link ? link.getAttribute("style") || "" : "";
+      const match = style.match(/padding-(?:left|right):\s*(\d+)px/);
+      const padding = match ? parseInt(match[1], 10) : 0;
+      const depth = Math.max(0, Math.round(padding / indent));
+      li.classList.add("mptt-node");
+      li.style.setProperty("--mptt-depth", depth);
+      return { el: li, depth, isParent: false, collapsed: false };
+    });
+
+    nodes.forEach((node, idx) => {
+      const next = nodes[idx + 1];
+      if (next && next.depth > node.depth) {
+        node.isParent = true;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "mptt-toggle";
+        btn.textContent = "-";
+        btn.addEventListener("click", function (e) {
+          e.preventDefault();
+          node.collapsed = !node.collapsed;
+          btn.textContent = node.collapsed ? "+" : "-";
+          updateVisibility();
+        });
+        node.el.classList.add("mptt-parent");
+        node.el.insertBefore(btn, node.el.firstChild);
+      }
+    });
+
+    function updateVisibility() {
+      const collapsedAtDepth = [];
+      nodes.forEach((node) => {
+        collapsedAtDepth.length = node.depth;
+        const hidden = collapsedAtDepth.some(Boolean);
+        node.el.style.display = hidden ? "none" : "";
+        if (node.isParent) {
+          collapsedAtDepth[node.depth] = node.collapsed;
+        }
+      });
+    }
+
+    const expandBtn = root.querySelector(".mptt-filter-expand");
+    const collapseBtn = root.querySelector(".mptt-filter-collapse");
+    if (expandBtn) {
+      expandBtn.addEventListener("click", function () {
+        nodes.forEach((n) => { if (n.isParent) n.collapsed = false; });
+        nodes.forEach((n) => {
+          const btn = n.el.querySelector(".mptt-toggle");
+          if (btn) btn.textContent = "-";
+        });
+        updateVisibility();
+      });
+    }
+    if (collapseBtn) {
+      collapseBtn.addEventListener("click", function () {
+        nodes.forEach((n) => { if (n.isParent) n.collapsed = true; });
+        nodes.forEach((n) => {
+          const btn = n.el.querySelector(".mptt-toggle");
+          if (btn) btn.textContent = "+";
+        });
+        updateVisibility();
+      });
+    }
+  })();
+</script>
+<style>
+  .mptt-filter-controls {
+    margin: 6px 0 10px;
+  }
+  .mptt-filter-controls button {
+    margin-right: 6px;
+  }
+  .mptt-toggle {
+    margin-right: 6px;
+    padding: 0;
+    width: 14px;
+    height: 14px;
+    border: 1px solid #666;
+    border-radius: 2px;
+    background: #fff;
+    line-height: 12px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .mptt-node {
+    position: relative;
+  }
+  .mptt-node > a {
+    display: inline-block;
+    background-image: repeating-linear-gradient(
+      to right,
+      rgba(0, 0, 0, 0.18) 0,
+      rgba(0, 0, 0, 0.18) 1px,
+      transparent 1px,
+      transparent 10px
+    );
+    background-size: calc(var(--mptt-depth) * 10px) 100%;
+    background-repeat: no-repeat;
+  }
+</style>

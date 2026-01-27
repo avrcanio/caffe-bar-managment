@@ -642,6 +642,60 @@ def get_available_stock(*, warehouse, artikl) -> Decimal:
 
 
 @transaction.atomic
+def refresh_internal_warehouse_stock(*, warehouse_ids: list[int] | None = None, artikl_ids: list[int] | None = None) -> None:
+    lots = StockLot.objects.all()
+    if warehouse_ids:
+        lots = lots.filter(warehouse_id__in=warehouse_ids)
+    if artikl_ids:
+        lots = lots.filter(artikl_id__in=artikl_ids)
+
+    aggregates = (
+        lots
+        .values("warehouse_id", "artikl_id")
+        .annotate(
+            qty=Sum("qty_remaining", default=Decimal("0.0000")),
+            value=Sum(
+                ExpressionWrapper(
+                    F("qty_remaining") * F("unit_cost"),
+                    output_field=DecimalField(max_digits=18, decimal_places=4),
+                ),
+                default=Decimal("0.0000"),
+            ),
+        )
+    )
+
+    now = timezone.now()
+    for row in aggregates:
+        wh_id = row["warehouse_id"]
+        artikl_id = row["artikl_id"]
+        qty = row["qty"] or Decimal("0.0000")
+        value = row["value"] or Decimal("0.0000")
+        avg_cost = (value / qty) if qty else Decimal("0.0000")
+
+        stock_row = WarehouseStock.objects.filter(
+            warehouse_id_id=wh_id,
+            product_id=artikl_id,
+        ).first()
+        if not stock_row:
+            artikl = Artikl.objects.filter(rm_id=artikl_id).first()
+            stock_row = WarehouseStock.objects.create(
+                warehouse_id_id=wh_id,
+                product_id=artikl_id,
+                product_name=getattr(artikl, "name", "") or "",
+                product_code=getattr(artikl, "code", "") or "",
+                unit="",
+                quantity=Decimal("0.0000"),
+                base_group_name="",
+                active=True,
+            )
+
+        stock_row.internal_quantity = qty
+        stock_row.internal_avg_cost = avg_cost
+        stock_row.internal_updated_at = now
+        stock_row.save(update_fields=["internal_quantity", "internal_avg_cost", "internal_updated_at"])
+
+
+@transaction.atomic
 def release_reservation(*, reservation: StockReservation) -> StockReservation:
     if reservation.released_at:
         return reservation

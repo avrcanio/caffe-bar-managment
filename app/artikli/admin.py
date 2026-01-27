@@ -4,8 +4,8 @@ from django.contrib import admin, messages
 from django.http import HttpResponseRedirect
 from django.urls import path, reverse
 from django.db import models, transaction
-from django.db.models import Count
 from django.utils.html import format_html
+from mptt.admin import DraggableMPTTAdmin, TreeRelatedFieldListFilter
 
 from .models import (
     Artikl,
@@ -14,6 +14,8 @@ from .models import (
     Deposit,
     DrinkCategory,
     KeyboardGroupData,
+    Normativ,
+    NormativItem,
     SalesGroupData,
     UnitOfMeasureData,
 )
@@ -137,68 +139,23 @@ def import_artikl_details_from_remaris(modeladmin, request, queryset):
 
 @admin.register(Artikl)
 class ArtiklAdmin(admin.ModelAdmin):
-    list_display = ("rm_id", "code", "name", "deposit", "tax_group", "pnp_category", "drink_category", "image_preview")
+    list_display = (
+        "rm_id",
+        "code",
+        "name",
+        "deposit",
+        "tax_group",
+        "pnp_category",
+        "drink_category",
+        "is_sellable",
+        "is_stock_item",
+        "image_preview",
+    )
     search_fields = ("rm_id", "code", "name")
     actions = [import_artikli_from_remaris, import_artikl_details_from_remaris]
     inlines = []
-    readonly_fields = ("image_preview",)
-    class DrinkCategoryTreeFilter(admin.SimpleListFilter):
-        title = "kategorija napitaka"
-        parameter_name = "drink_category"
-
-        def lookups(self, request, model_admin):
-            categories = list(DrinkCategory.objects.all().order_by("parent_id", "sort_order", "name"))
-            counts = {
-                row["drink_category_id"]: row["c"]
-                for row in Artikl.objects.values("drink_category_id").annotate(c=Count("id"))
-            }
-            children = {}
-            total_counts = {}
-            for cat in categories:
-                children.setdefault(cat.parent_id, []).append(cat)
-
-            def compute_total(cat_id):
-                if cat_id in total_counts:
-                    return total_counts[cat_id]
-                total = counts.get(cat_id, 0)
-                for child in children.get(cat_id, []):
-                    total += compute_total(child.id)
-                total_counts[cat_id] = total
-                return total
-
-            for cat in categories:
-                compute_total(cat.id)
-
-            def walk(parent_id=None, depth=0):
-                for cat in children.get(parent_id, []):
-                    indent = "-- " * depth
-                    total = total_counts.get(cat.id, 0)
-                    yield (str(cat.id), f"{indent}{cat.name} ({total})")
-                    yield from walk(cat.id, depth + 1)
-
-            return list(walk(None, 0))
-
-        def queryset(self, request, queryset):
-            if self.value():
-                selected_id = int(self.value())
-                categories = list(DrinkCategory.objects.all().only("id", "parent_id"))
-                children = {}
-                for cat in categories:
-                    children.setdefault(cat.parent_id, []).append(cat.id)
-
-                to_visit = [selected_id]
-                all_ids = set()
-                while to_visit:
-                    current = to_visit.pop()
-                    if current in all_ids:
-                        continue
-                    all_ids.add(current)
-                    to_visit.extend(children.get(current, []))
-
-                return queryset.filter(drink_category_id__in=all_ids)
-            return queryset
-
-    list_filter = (DrinkCategoryTreeFilter,)
+    readonly_fields = ("image_preview", "normativ_link")
+    list_filter = (("drink_category", TreeRelatedFieldListFilter), "is_sellable", "is_stock_item")
     fields = (
         "rm_id",
         "code",
@@ -207,8 +164,11 @@ class ArtiklAdmin(admin.ModelAdmin):
         "tax_group",
         "pnp_category",
         "drink_category",
+        "is_sellable",
+        "is_stock_item",
         "image",
         "image_preview",
+        "normativ_link",
         "note",
     )
 
@@ -218,6 +178,21 @@ class ArtiklAdmin(admin.ModelAdmin):
         return format_html('<img src="{}" style="max-height: 160px;" />', obj.image.url)
 
     image_preview.short_description = "Preview"
+
+    def normativ_link(self, obj):
+        if not obj or not obj.pk:
+            return "—"
+        if hasattr(obj, "normativ") and obj.normativ_id:
+            url = reverse("admin:artikli_normativ_change", args=[obj.normativ_id])
+            return format_html('<a href="{}" class="button">Uredi normativ</a>', url)
+        url = reverse("admin:artikli_normativ_add")
+        return format_html(
+            '<a href="{}?product={}" class="button">Dodaj normativ</a>',
+            url,
+            obj.pk,
+        )
+
+    normativ_link.short_description = "Normativ"
 
 
 class ArtiklDetailInline(admin.StackedInline):
@@ -264,7 +239,31 @@ class ArtiklDetailAdmin(admin.ModelAdmin):
     search_fields = ("rm_id", "code", "name")
 
 
-ArtiklAdmin.inlines = [ArtiklDetailInline]
+class NormativInline(admin.StackedInline):
+    model = Normativ
+    fk_name = "product"
+    extra = 0
+    max_num = 1
+    fields = ("is_active",)
+    show_change_link = True
+
+
+ArtiklAdmin.inlines = [NormativInline, ArtiklDetailInline]
+
+
+class NormativItemInline(admin.TabularInline):
+    model = NormativItem
+    extra = 0
+    autocomplete_fields = ("ingredient",)
+
+
+@admin.register(Normativ)
+class NormativAdmin(admin.ModelAdmin):
+    list_display = ("product", "is_active")
+    list_filter = ("is_active",)
+    search_fields = ("product__name", "product__code")
+    autocomplete_fields = ("product",)
+    inlines = [NormativItemInline]
 
 
 @admin.register(Deposit)
@@ -277,8 +276,8 @@ class DepositAdmin(admin.ModelAdmin):
 
 
 @admin.register(DrinkCategory)
-class DrinkCategoryAdmin(admin.ModelAdmin):
-    list_display = ("name", "parent", "sort_order", "is_active")
+class DrinkCategoryAdmin(DraggableMPTTAdmin):
+    list_display = ("tree_actions", "indented_title", "parent", "sort_order", "is_active")
     list_filter = ("is_active",)
     search_fields = ("name",)
 

@@ -1,11 +1,12 @@
+from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.contrib import admin, messages
-from django.db.models import Sum, Count
+from django.db.models import Count, Sum
 from django.utils import timezone
+from mptt.admin import TreeRelatedFieldListFilter
 
 from sales.models import SalesInvoice, SalesInvoiceItem
-from artikli.models import DrinkCategory
 from sales.remaris_importer import import_sales_invoices, load_import_defaults
 
 
@@ -30,6 +31,52 @@ def import_sales_invoices_action(modeladmin, request, queryset):
 
 @admin.register(SalesInvoice)
 class SalesInvoiceAdmin(admin.ModelAdmin):
+    class IssuedOnTotalFilter(admin.SimpleListFilter):
+        title = "issued on"
+        parameter_name = "issued_on_range"
+
+        def lookups(self, request, model_admin):
+            base_qs = model_admin.get_queryset(request)
+            today = timezone.localdate()
+            ranges = [
+                ("today", "Danas", today, today),
+                ("last7", "Prošlih 7 dana", today - timedelta(days=6), today),
+                ("month", "Ovaj mjesec", today.replace(day=1), today),
+                ("year", "Ova godina", date(today.year, 1, 1), today),
+            ]
+            lookups = [("any", "Bilo koji datum", None, None)]
+            for key, label, start, end in ranges:
+                total = (
+                    base_qs.filter(issued_on__gte=start, issued_on__lte=end)
+                    .aggregate(total=Sum("total_amount"))
+                    .get("total")
+                    or Decimal("0.00")
+                )
+                total = total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                lookups.append((key, f"{label} ({total:.2f})", start, end))
+            return [(key, label) for key, label, _, _ in lookups]
+
+        def queryset(self, request, queryset):
+            value = self.value()
+            if not value or value == "any":
+                return queryset
+            today = timezone.localdate()
+            if value == "today":
+                return queryset.filter(issued_on=today)
+            if value == "last7":
+                return queryset.filter(
+                    issued_on__gte=today - timedelta(days=6),
+                    issued_on__lte=today,
+                )
+            if value == "month":
+                return queryset.filter(issued_on__gte=today.replace(day=1), issued_on__lte=today)
+            if value == "year":
+                return queryset.filter(
+                    issued_on__gte=date(today.year, 1, 1),
+                    issued_on__lte=today,
+                )
+            return queryset
+
     list_display = (
         "rm_number",
         "issued_on",
@@ -40,7 +87,7 @@ class SalesInvoiceAdmin(admin.ModelAdmin):
         "total_amount",
         "currency",
     )
-    list_filter = ("issued_on", "waiter_name")
+    list_filter = (IssuedOnTotalFilter, "waiter_name")
     search_fields = ("rm_number", "location_name", "waiter_name", "buyer_name")
     actions = [import_sales_invoices_action]
     change_list_template = "admin/sales/salesinvoice/change_list.html"
@@ -62,12 +109,11 @@ class SalesInvoiceAdmin(admin.ModelAdmin):
 @admin.register(SalesInvoiceItem)
 class SalesInvoiceItemAdmin(admin.ModelAdmin):
     list_display = ("invoice", "product_name", "artikl", "quantity", "amount")
-    class DrinkCategoryTreeFilter(admin.SimpleListFilter):
+    class DrinkCategoryTreeCountFilter(TreeRelatedFieldListFilter):
         title = "kategorija napitaka"
-        parameter_name = "drink_category"
 
-        def lookups(self, request, model_admin):
-            categories = list(DrinkCategory.objects.all().order_by("parent_id", "sort_order", "name"))
+        def __init__(self, field, request, params, model, model_admin, field_path):
+            super().__init__(field, request, params, model, model_admin, field_path)
             base_qs = model_admin.get_queryset(request)
             date_filters = {}
             for key in (
@@ -80,58 +126,63 @@ class SalesInvoiceItemAdmin(admin.ModelAdmin):
                     date_filters[key] = request.GET.get(key)
             if date_filters:
                 base_qs = base_qs.filter(**date_filters)
-            counts = {
+
+            raw_counts = {
                 row["artikl__drink_category_id"]: row["c"]
                 for row in base_qs
-                .filter(artikl_id__isnull=False)
+                .filter(artikl__drink_category_id__isnull=False)
                 .values("artikl__drink_category_id")
                 .annotate(c=Count("id"))
             }
+
+            categories = list(self.other_model.objects.all().only("id", "parent_id"))
             children = {}
-            total_counts = {}
+            totals = {}
             for cat in categories:
-                children.setdefault(cat.parent_id, []).append(cat)
+                children.setdefault(cat.parent_id, []).append(cat.id)
 
             def compute_total(cat_id):
-                if cat_id in total_counts:
-                    return total_counts[cat_id]
-                total = counts.get(cat_id, 0)
-                for child in children.get(cat_id, []):
-                    total += compute_total(child.id)
-                total_counts[cat_id] = total
+                if cat_id in totals:
+                    return totals[cat_id]
+                total = raw_counts.get(cat_id, 0)
+                for child_id in children.get(cat_id, []):
+                    total += compute_total(child_id)
+                totals[cat_id] = total
                 return total
 
             for cat in categories:
                 compute_total(cat.id)
 
-            def walk(parent_id=None, depth=0):
-                for cat in children.get(parent_id, []):
-                    indent = "-- " * depth
-                    total = total_counts.get(cat.id, 0)
-                    yield (str(cat.id), f"{indent}{cat.name} ({total})")
-                    yield from walk(cat.id, depth + 1)
+            self._counts = totals
 
-            return list(walk(None, 0))
-
-        def queryset(self, request, queryset):
-            if self.value():
-                selected_id = int(self.value())
-                categories = list(DrinkCategory.objects.all().only("id", "parent_id"))
-                children = {}
-                for cat in categories:
-                    children.setdefault(cat.parent_id, []).append(cat.id)
-
-                to_visit = [selected_id]
-                all_ids = set()
-                while to_visit:
-                    current = to_visit.pop()
-                    if current in all_ids:
-                        continue
-                    all_ids.add(current)
-                    to_visit.extend(children.get(current, []))
-
-                return queryset.filter(artikl__drink_category_id__in=all_ids)
-            return queryset
+        def choices(self, cl):
+            yield {
+                "selected": self.lookup_val is None and not self.lookup_val_isnull,
+                "query_string": cl.get_query_string(
+                    {}, [self.changed_lookup_kwarg, self.lookup_kwarg_isnull]
+                ),
+                "display": "Svi",
+            }
+            for pk_val, val, padding_style in self.lookup_choices:
+                count = self._counts.get(pk_val, 0)
+                yield {
+                    "selected": self.lookup_val == str(pk_val),
+                    "query_string": cl.get_query_string(
+                        {self.changed_lookup_kwarg: pk_val},
+                        [self.lookup_kwarg_isnull],
+                    ),
+                    "display": f"{val} ({count})",
+                    "padding_style": padding_style,
+                }
+            if self.lookup_val_isnull:
+                yield {
+                    "selected": True,
+                    "query_string": cl.get_query_string(
+                        {self.lookup_kwarg_isnull: "True"},
+                        [self.changed_lookup_kwarg],
+                    ),
+                    "display": "-",
+                }
 
     class ArtiklInSalesFilter(admin.SimpleListFilter):
         title = "artikl"
@@ -153,7 +204,7 @@ class SalesInvoiceItemAdmin(admin.ModelAdmin):
                 return queryset.filter(artikl_id=self.value())
             return queryset
 
-    list_filter = (DrinkCategoryTreeFilter, ArtiklInSalesFilter, "invoice__issued_on")
+    list_filter = (("artikl__drink_category", DrinkCategoryTreeCountFilter), ArtiklInSalesFilter, "invoice__issued_on")
     search_fields = ("product_name", "invoice__rm_number", "artikl__name", "artikl__code")
     autocomplete_fields = ("artikl",)
     change_list_template = "admin/sales/salesinvoiceitem/change_list.html"
