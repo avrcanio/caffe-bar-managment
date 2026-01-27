@@ -35,6 +35,13 @@ class SalesInvoiceItem(models.Model):
         on_delete=models.CASCADE,
         related_name="items",
     )
+    artikl = models.ForeignKey(
+        "artikli.Artikl",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="sales_invoice_items",
+    )
     product_name = models.CharField(max_length=255)
     quantity = models.DecimalField(max_digits=12, decimal_places=4)
     amount = models.DecimalField(max_digits=12, decimal_places=2)

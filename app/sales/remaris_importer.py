@@ -14,6 +14,7 @@ from django.utils import timezone
 
 from artikli.remaris_connector import RemarisConnector
 from sales.models import SalesInvoice, SalesInvoiceItem
+from artikli.models import Artikl
 
 
 @dataclass
@@ -336,10 +337,16 @@ def import_sales_invoices(
             )
 
             obj.items.all().delete()
+            product_names = {it.product_name for it in invoice.items if it.product_name}
+            artikl_map = {
+                a.name: a.id
+                for a in Artikl.objects.filter(name__in=product_names)
+            }
             SalesInvoiceItem.objects.bulk_create(
                 [
                     SalesInvoiceItem(
                         invoice=obj,
+                        artikl_id=artikl_map.get(item.product_name),
                         product_name=item.product_name,
                         quantity=item.quantity,
                         amount=item.amount,

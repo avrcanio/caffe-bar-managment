@@ -7,7 +7,9 @@ from django.test import RequestFactory, TestCase
 from django.utils import timezone
 
 from artikli.models import Artikl
+from accounting.models import Account as AccountingAccount, JournalEntry, Ledger
 from contacts.models import Supplier
+from configuration.models import Account as ConfigAccount, DocumentType
 from orders.admin import WarehouseInputAdmin
 from orders.models import PurchaseOrder, WarehouseInput, WarehouseInputItem
 from stock.models import WarehouseId
@@ -32,12 +34,40 @@ class PostWarehouseInputAdminActionTests(TestCase):
         )
         self.warehouse = WarehouseId.objects.create(rm_id=1, name="Skladiste 1")
         self.artikl = Artikl.objects.create(rm_id=10, name="Kava")
+        self.ledger = Ledger.objects.create(name="Test", oib="12345678901")
+        self.acc_stock = AccountingAccount.objects.create(
+            ledger=self.ledger,
+            code="1310",
+            name="Zaliha",
+            type=AccountingAccount.AccountType.ASSET,
+            normal_side=AccountingAccount.NormalSide.DEBIT,
+            is_postable=True,
+        )
+        self.acc_counter = AccountingAccount.objects.create(
+            ledger=self.ledger,
+            code="2200",
+            name="Protustavka",
+            type=AccountingAccount.AccountType.LIABILITY,
+            normal_side=AccountingAccount.NormalSide.CREDIT,
+            is_postable=True,
+        )
+        self.cfg_stock, _ = ConfigAccount.objects.get_or_create(code="1310", defaults={"name": "Zaliha"})
+        self.cfg_counter, _ = ConfigAccount.objects.get_or_create(code="2200", defaults={"name": "Protustavka"})
+        self.doc_type = DocumentType.objects.create(
+            name="Primka",
+            code="10",
+            direction=DocumentType.DIRECTION_IN,
+            ledger=self.ledger,
+            stock_account=self.cfg_stock,
+            counterpart_account=self.cfg_counter,
+        )
 
         self.input = WarehouseInput.objects.create(
             order=self.order,
             supplier=self.supplier,
             date=timezone.localdate(),
             warehouse=self.warehouse,
+            document_type=self.doc_type,
         )
         WarehouseInputItem.objects.create(
             warehouse_input=self.input,
@@ -63,8 +93,18 @@ class PostWarehouseInputAdminActionTests(TestCase):
         self.input.refresh_from_db()
         first_move_id = self.input.stock_move_id
         self.assertIsNotNone(first_move_id)
+        self.assertIsNotNone(self.input.journal_entry_id)
+        entry = self.input.journal_entry
+        self.assertEqual(entry.status, JournalEntry.Status.POSTED)
+        items = list(entry.items.order_by("id"))
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0].account_id, self.acc_stock.id)
+        self.assertEqual(items[0].debit, Decimal("12.50"))
+        self.assertEqual(items[1].account_id, self.acc_counter.id)
+        self.assertEqual(items[1].credit, Decimal("12.50"))
 
         # second run should not create a new move
         self.admin.post_warehouse_input_to_stock_action(request, qs)
         self.input.refresh_from_db()
         self.assertEqual(self.input.stock_move_id, first_move_id)
+        self.assertEqual(self.input.journal_entry_id, entry.id)

@@ -9,7 +9,9 @@ from artikli.remaris_connector import RemarisConnector
 from .models import (
     Account,
     CompanyProfile,
+    ConsumptionTaxCategory,
     DocumentType,
+    LocalGovernmentUnit,
     OrderEmailTemplate,
     PaymentType,
     PointOfIssueData,
@@ -359,3 +361,17 @@ class AccountAdmin(admin.ModelAdmin):
     list_display = ("code", "name", "is_active")
     list_filter = ("is_active",)
     search_fields = ("code", "name")
+
+
+@admin.register(ConsumptionTaxCategory)
+class ConsumptionTaxCategoryAdmin(admin.ModelAdmin):
+    list_display = ("code", "name", "is_active")
+    list_filter = ("is_active",)
+    search_fields = ("code", "name")
+
+
+@admin.register(LocalGovernmentUnit)
+class LocalGovernmentUnitAdmin(admin.ModelAdmin):
+    list_display = ("name", "pnp_rate", "oib", "is_active")
+    list_filter = ("is_active",)
+    search_fields = ("name", "oib")

@@ -172,6 +172,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "mailbox_app.tasks.sync_imap_mailbox",
         "schedule": crontab(minute="*"),
     },
+    "import-sales-invoices-daily": {
+        "task": "sales.tasks.import_sales_invoices_today",
+        "schedule": crontab(hour=23, minute=59),
+    },
 }
 
 

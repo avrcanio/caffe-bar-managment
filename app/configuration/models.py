@@ -1,5 +1,6 @@
 from django.core.exceptions import ValidationError
 from django.db import models
+from decimal import Decimal
 
 
 class PointOfIssueData(models.Model):
@@ -63,6 +64,13 @@ class CompanyProfile(models.Model):
     email = models.EmailField(blank=True, default="", verbose_name="email")
     phone = models.CharField(max_length=50, blank=True, default="", verbose_name="telefon")
     logo = models.ImageField(upload_to="branding/", blank=True, null=True, verbose_name="logo")
+    lgu = models.ForeignKey(
+        "LocalGovernmentUnit",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        verbose_name="Grad / općina (PnP)",
+    )
 
     def __str__(self) -> str:
         return self.name
@@ -225,3 +233,36 @@ class Account(models.Model):
         verbose_name = "Konto"
         verbose_name_plural = "Konta"
         ordering = ("code",)
+
+
+class ConsumptionTaxCategory(models.Model):
+    code = models.CharField(max_length=30, unique=True)
+    name = models.CharField(max_length=100)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = "PnP kategorija"
+        verbose_name_plural = "PnP kategorije"
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class LocalGovernmentUnit(models.Model):
+    name = models.CharField(max_length=150, unique=True, verbose_name="naziv")
+    pnp_rate = models.DecimalField(
+        max_digits=5,
+        decimal_places=4,
+        default=Decimal("0.0200"),
+        help_text="Stopa poreza na potrošnju (npr. 0.0200 za 2%)",
+        verbose_name="PnP stopa",
+    )
+    oib = models.CharField(max_length=11, blank=True, null=True, verbose_name="OIB")
+    is_active = models.BooleanField(default=True, verbose_name="aktivno")
+
+    class Meta:
+        verbose_name = "Grad / Općina (PnP)"
+        verbose_name_plural = "Gradovi / Općine (PnP)"
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.pnp_rate * 100}%)"

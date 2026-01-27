@@ -4,9 +4,19 @@ from django.contrib import admin, messages
 from django.http import HttpResponseRedirect
 from django.urls import path, reverse
 from django.db import models, transaction
+from django.db.models import Count
 from django.utils.html import format_html
 
-from .models import Artikl, ArtiklDetail, BaseGroupData, Deposit, KeyboardGroupData, SalesGroupData, UnitOfMeasureData
+from .models import (
+    Artikl,
+    ArtiklDetail,
+    BaseGroupData,
+    Deposit,
+    DrinkCategory,
+    KeyboardGroupData,
+    SalesGroupData,
+    UnitOfMeasureData,
+)
 from .remaris_parser import parse_bool, parse_decimal, parse_hidden_inputs, parse_int
 from .remaris_connector import RemarisConnector
 
@@ -127,12 +137,80 @@ def import_artikl_details_from_remaris(modeladmin, request, queryset):
 
 @admin.register(Artikl)
 class ArtiklAdmin(admin.ModelAdmin):
-    list_display = ("rm_id", "code", "name", "deposit", "tax_group", "image_preview")
+    list_display = ("rm_id", "code", "name", "deposit", "tax_group", "pnp_category", "drink_category", "image_preview")
     search_fields = ("rm_id", "code", "name")
     actions = [import_artikli_from_remaris, import_artikl_details_from_remaris]
     inlines = []
     readonly_fields = ("image_preview",)
-    fields = ("rm_id", "code", "name", "deposit", "tax_group", "image", "image_preview", "note")
+    class DrinkCategoryTreeFilter(admin.SimpleListFilter):
+        title = "kategorija napitaka"
+        parameter_name = "drink_category"
+
+        def lookups(self, request, model_admin):
+            categories = list(DrinkCategory.objects.all().order_by("parent_id", "sort_order", "name"))
+            counts = {
+                row["drink_category_id"]: row["c"]
+                for row in Artikl.objects.values("drink_category_id").annotate(c=Count("id"))
+            }
+            children = {}
+            total_counts = {}
+            for cat in categories:
+                children.setdefault(cat.parent_id, []).append(cat)
+
+            def compute_total(cat_id):
+                if cat_id in total_counts:
+                    return total_counts[cat_id]
+                total = counts.get(cat_id, 0)
+                for child in children.get(cat_id, []):
+                    total += compute_total(child.id)
+                total_counts[cat_id] = total
+                return total
+
+            for cat in categories:
+                compute_total(cat.id)
+
+            def walk(parent_id=None, depth=0):
+                for cat in children.get(parent_id, []):
+                    indent = "-- " * depth
+                    total = total_counts.get(cat.id, 0)
+                    yield (str(cat.id), f"{indent}{cat.name} ({total})")
+                    yield from walk(cat.id, depth + 1)
+
+            return list(walk(None, 0))
+
+        def queryset(self, request, queryset):
+            if self.value():
+                selected_id = int(self.value())
+                categories = list(DrinkCategory.objects.all().only("id", "parent_id"))
+                children = {}
+                for cat in categories:
+                    children.setdefault(cat.parent_id, []).append(cat.id)
+
+                to_visit = [selected_id]
+                all_ids = set()
+                while to_visit:
+                    current = to_visit.pop()
+                    if current in all_ids:
+                        continue
+                    all_ids.add(current)
+                    to_visit.extend(children.get(current, []))
+
+                return queryset.filter(drink_category_id__in=all_ids)
+            return queryset
+
+    list_filter = (DrinkCategoryTreeFilter,)
+    fields = (
+        "rm_id",
+        "code",
+        "name",
+        "deposit",
+        "tax_group",
+        "pnp_category",
+        "drink_category",
+        "image",
+        "image_preview",
+        "note",
+    )
 
     def image_preview(self, obj):
         if not obj.image:
@@ -196,6 +274,13 @@ class DepositAdmin(admin.ModelAdmin):
     formfield_overrides = {
         models.DecimalField: {"localize": True},
     }
+
+
+@admin.register(DrinkCategory)
+class DrinkCategoryAdmin(admin.ModelAdmin):
+    list_display = ("name", "parent", "sort_order", "is_active")
+    list_filter = ("is_active",)
+    search_fields = ("name",)
 
 
 @admin.action(description="Import unit measures from Remaris", permissions=["change"])

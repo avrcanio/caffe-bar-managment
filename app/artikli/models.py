@@ -17,6 +17,14 @@ class Artikl(models.Model):
         related_name="artikli",
         verbose_name="povratna naknada",
     )
+    pnp_category = models.ForeignKey(
+        "configuration.ConsumptionTaxCategory",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="artikli",
+        verbose_name="PnP kategorija",
+    )
     tax_group = models.ForeignKey(
         "configuration.TaxGroup",
         on_delete=models.SET_NULL,
@@ -24,6 +32,14 @@ class Artikl(models.Model):
         blank=True,
         related_name="artikli",
         verbose_name="porezna grupa",
+    )
+    drink_category = models.ForeignKey(
+        "DrinkCategory",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="artikli",
+        verbose_name="Kategorija napitaka",
     )
 
     def __str__(self) -> str:
@@ -64,6 +80,35 @@ class Deposit(models.Model):
     class Meta:
         verbose_name = "Povratna naknada"
         verbose_name_plural = "Povratne naknade"
+
+
+class DrinkCategory(models.Model):
+    name = models.CharField(max_length=120)
+    parent = models.ForeignKey(
+        "self",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="children",
+    )
+    is_active = models.BooleanField(default=True)
+    sort_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        verbose_name = "Kategorija napitaka"
+        verbose_name_plural = "Kategorije napitaka"
+        ordering = ["parent_id", "sort_order", "name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["parent", "name"],
+                name="uniq_category_name_per_parent",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return self.name
+
+
 
 
 class SalesGroupData(models.Model):

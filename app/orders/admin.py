@@ -18,7 +18,7 @@ from django.urls import reverse
 import requests
 
 from configuration.models import CompanyProfile, OrderEmailTemplate
-from accounting.services import compute_purchase_totals_from_items
+from accounting.services import compute_purchase_totals_from_items, post_warehouse_input_to_journal
 from artikli.remaris_connector import RemarisConnector
 from purchases.models import SupplierInvoice
 from stock.services import get_stock_accounting_config
@@ -411,7 +411,7 @@ class WarehouseInputAdmin(admin.ModelAdmin):
                 level=messages.ERROR,
             )
 
-    @admin.action(description="Proknjizi primku u skladiste", permissions=["change"])
+    @admin.action(description="Proknjizi primku", permissions=["change"])
     def post_warehouse_input_to_stock_action(self, request, queryset):
         posted = 0
         skipped = 0
@@ -420,9 +420,14 @@ class WarehouseInputAdmin(admin.ModelAdmin):
         already_posted = queryset.filter(stock_move__isnull=False).count()
         queryset = queryset.filter(stock_move__isnull=True)
 
-        for warehouse_input in queryset.select_related("warehouse"):
+        for warehouse_input in queryset.select_related("warehouse", "document_type"):
             try:
-                post_warehouse_input_to_stock(warehouse_input=warehouse_input)
+                with transaction.atomic():
+                    post_warehouse_input_to_stock(warehouse_input=warehouse_input)
+                    post_warehouse_input_to_journal(
+                        warehouse_input=warehouse_input,
+                        user=request.user,
+                    )
                 posted += 1
             except ValidationError as exc:
                 skipped += 1
@@ -500,6 +505,9 @@ class WarehouseInputAdmin(admin.ModelAdmin):
         document_type = None
         if len(document_types) == 1:
             document_type = inputs[0].document_type
+        force_cash = any(inp.payment_type_id == 3 for inp in inputs)
+        document_type_id = 3 if force_cash else (document_type.id if document_type else None)
+        cash_account_id = 379 if force_cash else None
 
         items = []
         for inp in inputs:
@@ -520,15 +528,20 @@ class WarehouseInputAdmin(admin.ModelAdmin):
             total_net=totals.net_total,
             total_vat=totals.vat_total,
             total_gross=totals.gross_total,
-            document_type=document_type,
+            document_type_id=document_type_id,
+            cash_account_id=cash_account_id,
+            paid_cash=force_cash,
         )
         if cfg:
             update_fields = []
             if not invoice.cash_account_id and cfg.default_cash_account_id:
                 invoice.cash_account = cfg.default_cash_account
                 update_fields.append("cash_account")
-            if invoice.deposit_total > 0 and not invoice.deposit_account_id and cfg.default_deposit_account_id:
-                invoice.deposit_account = cfg.default_deposit_account
+            if invoice.deposit_total > 0 and not invoice.deposit_account_id:
+                if cfg.default_deposit_account_id:
+                    invoice.deposit_account = cfg.default_deposit_account
+                else:
+                    invoice.deposit_account_id = 1318
                 update_fields.append("deposit_account")
             if update_fields:
                 invoice.save(update_fields=update_fields)
@@ -645,6 +658,8 @@ def create_warehouse_input(modeladmin, request, queryset):
                 date=order.ordered_at.date(),
                 total=order.total_net,
                 purchase_order=order,
+                document_type_id=1,
+                warehouse_id=2,
             )
 
             items = []

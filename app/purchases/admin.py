@@ -10,6 +10,7 @@ from .models import SupplierInvoice
 from accounting.services import (
     flatten_input_items,
     post_purchase_invoice_cash_from_inputs,
+    post_purchase_invoice_close_receipt,
     post_purchase_invoice_deferred_from_items,
     post_supplier_invoice_payment,
 )
@@ -161,7 +162,12 @@ class SupplierInvoiceAdmin(admin.ModelAdmin):
         skipped = 0
         failed = 0
 
-        for invoice in queryset.select_related("document_type", "cash_account", "deposit_account"):
+        for invoice in queryset.select_related(
+            "document_type",
+            "cash_account",
+            "deposit_account",
+            "ap_account",
+        ).prefetch_related("inputs"):
             if invoice.journal_entry_id:
                 skipped += 1
                 self.message_user(
@@ -185,14 +191,28 @@ class SupplierInvoiceAdmin(admin.ModelAdmin):
                 continue
 
             update_fields = []
+            linked_receipt = invoice.inputs.exists()
+            if linked_receipt:
+                not_posted = [
+                    wi.id
+                    for wi in invoice.inputs.all()
+                    if not wi.stock_move_id or not wi.journal_entry_id
+                ]
+                if not_posted:
+                    failed += 1
+                    self.message_user(
+                        request,
+                        f"Racun {invoice.id} ima primke koje nisu proknjizene: {not_posted}.",
+                        level=messages.ERROR,
+                    )
+                    continue
+            if not invoice.ap_account_id and invoice.document_type.ap_account_id:
+                invoice.ap_account = invoice.document_type.ap_account
+                update_fields.append("ap_account")
             if invoice.payment_terms == invoice.PaymentTerms.CASH:
                 if not invoice.cash_account_id and cfg and cfg.default_cash_account_id:
                     invoice.cash_account = cfg.default_cash_account
                     update_fields.append("cash_account")
-            elif invoice.payment_terms == invoice.PaymentTerms.DEFERRED:
-                if not invoice.ap_account_id and invoice.document_type.ap_account_id:
-                    invoice.ap_account = invoice.document_type.ap_account
-                    update_fields.append("ap_account")
 
             if invoice.deposit_total > 0 and not invoice.deposit_account_id:
                 if cfg and cfg.default_deposit_account_id:
@@ -210,7 +230,9 @@ class SupplierInvoiceAdmin(admin.ModelAdmin):
                     level=messages.ERROR,
                 )
                 continue
-            if invoice.payment_terms == invoice.PaymentTerms.DEFERRED and not invoice.ap_account_id:
+            if (linked_receipt and invoice.payment_terms == invoice.PaymentTerms.DEFERRED) or (
+                invoice.payment_terms == invoice.PaymentTerms.DEFERRED and not invoice.ap_account_id
+            ):
                 failed += 1
                 self.message_user(
                     request,
@@ -228,13 +250,43 @@ class SupplierInvoiceAdmin(admin.ModelAdmin):
                 continue
 
             try:
-                if invoice.payment_terms == invoice.PaymentTerms.CASH:
+                if linked_receipt:
+                    items = flatten_input_items(invoice.inputs.all())
+                    include_cash = invoice.payment_terms == invoice.PaymentTerms.CASH
+                    entry = post_purchase_invoice_close_receipt(
+                        document_type=invoice.document_type,
+                        doc_date=invoice.invoice_date,
+                        items=items,
+                        ap_account=invoice.ap_account,
+                        deposit_account=invoice.deposit_account,
+                        cash_account=invoice.cash_account,
+                        include_cash_payment=include_cash,
+                        description=f"Ulazni racun {invoice.invoice_number}",
+                    )
+                    if include_cash:
+                        invoice.paid_cash = True
+                        invoice.paid_at = invoice.paid_at or timezone.localdate()
+                        invoice.payment_status = invoice.PaymentStatus.PAID
+                        self.message_user(
+                            request,
+                            f"Racun {invoice.id} proknjizen kao GOTOVINA.",
+                            level=messages.INFO,
+                        )
+                    else:
+                        invoice.payment_status = invoice.PaymentStatus.UNPAID
+                        self.message_user(
+                            request,
+                            f"Racun {invoice.id} proknjizen kao ODGODA.",
+                            level=messages.INFO,
+                        )
+                elif invoice.payment_terms == invoice.PaymentTerms.CASH:
                     entry = post_purchase_invoice_cash_from_inputs(
                         document_type=invoice.document_type,
                         doc_date=invoice.invoice_date,
                         inputs=invoice.inputs.all(),
                         cash_account=invoice.cash_account,
                         deposit_account=invoice.deposit_account,
+                        link_inputs=False,
                         description=f"Ulazni racun {invoice.invoice_number}",
                     )
                     invoice.paid_cash = True

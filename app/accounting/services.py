@@ -524,11 +524,12 @@ def post_purchase_invoice_cash_from_inputs(
     inputs: Iterable[WarehouseInput],
     cash_account: Account,
     deposit_account: Account | None = None,
+    link_inputs: bool = True,
     description: str = "",
 ) -> JournalEntry:
     items = flatten_input_items(inputs)
     inputs_list = list(inputs)
-    if any(wi.journal_entry_id for wi in inputs_list):
+    if link_inputs and any(wi.journal_entry_id for wi in inputs_list):
         raise ValidationError("Jedna od primki je već proknjižena.")
     entry = post_purchase_invoice_cash_from_items(
         document_type=document_type,
@@ -538,7 +539,211 @@ def post_purchase_invoice_cash_from_inputs(
         deposit_account=deposit_account,
         description=description or "Ulazni račun (gotovina) - više primki",
     )
-    for wi in inputs_list:
-        wi.journal_entry = entry
-        wi.save(update_fields=["journal_entry"])
+    if link_inputs:
+        for wi in inputs_list:
+            wi.journal_entry = entry
+            wi.save(update_fields=["journal_entry"])
+    return entry
+
+
+def post_purchase_invoice_close_receipt(
+    *,
+    document_type: DocumentType,
+    doc_date: date,
+    items: Iterable[WarehouseInputItem],
+    ap_account: Account | None,
+    deposit_account: Account | None = None,
+    cash_account: Account | None = None,
+    include_cash_payment: bool = False,
+    description: str = "",
+) -> JournalEntry:
+    if not document_type.counterpart_account_id:
+        raise ValidationError("DocumentType nema postavljen konto protustavke.")
+    if not include_cash_payment:
+        if not ap_account or not ap_account.is_postable:
+            raise ValidationError("AP konto mora biti postable.")
+
+    items_list = list(items)
+    if not items_list:
+        raise ValidationError("Nema stavki (items) – ne mogu knjižiti ulazni račun.")
+
+    totals = compute_purchase_totals_from_items(items_list, deposit_total=None)
+
+    if totals.vat_total != Decimal("0.00") and not document_type.vat_input_account_id:
+        raise ValidationError("Imamo PDV na stavkama, ali DocumentType nema vat_input_account (pretporez).")
+    if totals.deposit_total != Decimal("0.00") and not deposit_account:
+        raise ValidationError("Na stavkama postoji depozit, ali deposit_account nije zadan.")
+    if include_cash_payment:
+        if not cash_account or not cash_account.is_postable:
+            raise ValidationError("Cash konto mora biti postable.")
+
+    ledger = document_type.ledger or get_single_ledger()
+    counterpart_account = _resolve_account_by_code(
+        ledger=ledger,
+        code=document_type.counterpart_account.code,
+        label="counterpart_account",
+    )
+
+    entry = JournalEntry.objects.create(
+        ledger=ledger,
+        number=_next_entry_number(ledger),
+        date=doc_date,
+        description=description or "Ulazni racun (zatvaranje primke)",
+        status=JournalEntry.Status.DRAFT,
+    )
+
+    JournalItem.objects.create(
+        entry=entry,
+        account=counterpart_account,
+        debit=totals.net_total,
+        credit=Decimal("0.00"),
+        description="Zatvaranje primke (osnovica)",
+    )
+
+    if totals.vat_total != Decimal("0.00"):
+        JournalItem.objects.create(
+            entry=entry,
+            account=document_type.vat_input_account,
+            debit=totals.vat_total,
+            credit=Decimal("0.00"),
+            description="Pretporez (PDV ulaz)",
+        )
+
+    if totals.deposit_total != Decimal("0.00"):
+        JournalItem.objects.create(
+            entry=entry,
+            account=deposit_account,
+            debit=totals.deposit_total,
+            credit=Decimal("0.00"),
+            description="Povratna naknada (ambalaža/depozit)",
+        )
+
+    if include_cash_payment:
+        JournalItem.objects.create(
+            entry=entry,
+            account=cash_account,
+            debit=Decimal("0.00"),
+            credit=totals.payable_total,
+            description="Placanje gotovinom",
+        )
+    else:
+        JournalItem.objects.create(
+            entry=entry,
+            account=ap_account,
+            debit=Decimal("0.00"),
+            credit=totals.payable_total,
+            description="Dobavljac",
+        )
+
+    entry.post()
+    return entry
+
+
+def _resolve_account_by_code(*, ledger: Ledger, code: str, label: str) -> Account:
+    account = (
+        Account.objects
+        .filter(ledger=ledger, code=code, is_postable=True)
+        .first()
+    )
+    if not account:
+        raise ValidationError(f"Nedostaje {label} konto u ledgeru (code={code}).")
+    return account
+
+
+def _warehouse_input_total_from_items(items: Iterable[WarehouseInputItem]) -> Decimal:
+    total = Decimal("0.00")
+    for it in items:
+        if it.total is not None:
+            line_total = Decimal(str(it.total))
+        else:
+            unit_cost_raw = (
+                it.buying_price
+                if it.buying_price is not None
+                else it.price_on_stock_card
+                if it.price_on_stock_card is not None
+                else it.price
+            )
+            if unit_cost_raw is None:
+                raise ValidationError("Nabavna cijena nije postavljena na stavci primke.")
+            line_total = Decimal(str(unit_cost_raw)) * Decimal(str(it.quantity))
+        total += line_total
+    return q2(total)
+
+
+def _warehouse_input_total_from_stock_move(warehouse_input: WarehouseInput) -> Decimal | None:
+    if not warehouse_input.stock_move_id:
+        return None
+    lines = list(warehouse_input.stock_move.lines.all())
+    if not lines:
+        return None
+    total = Decimal("0.00")
+    for line in lines:
+        if line.unit_cost is None:
+            raise ValidationError("StockMoveLine nema unit_cost.")
+        total += Decimal(str(line.quantity)) * Decimal(str(line.unit_cost))
+    return q2(total)
+
+
+def post_warehouse_input_to_journal(*, warehouse_input: WarehouseInput, user=None) -> JournalEntry:
+    if warehouse_input.journal_entry_id:
+        raise ValidationError("Primka je vec proknjizena u journal.")
+
+    document_type = warehouse_input.document_type
+    if not document_type:
+        code = (warehouse_input.document_type_code or "").strip()
+        if code:
+            document_type = DocumentType.objects.filter(code=code).first()
+    if not document_type:
+        raise ValidationError("Primka nema tip dokumenta (DocumentType).")
+
+    if not document_type.stock_account_id:
+        raise ValidationError("DocumentType nema postavljen konto zalihe.")
+    if not document_type.counterpart_account_id:
+        raise ValidationError("DocumentType nema postavljen konto protustavke.")
+
+    ledger = document_type.ledger or get_single_ledger()
+    stock_account = _resolve_account_by_code(
+        ledger=ledger,
+        code=document_type.stock_account.code,
+        label="stock_account",
+    )
+    counterpart_account = _resolve_account_by_code(
+        ledger=ledger,
+        code=document_type.counterpart_account.code,
+        label="counterpart_account",
+    )
+
+    total = _warehouse_input_total_from_stock_move(warehouse_input)
+    if total is None:
+        total = _warehouse_input_total_from_items(warehouse_input.items.all())
+
+    if total <= 0:
+        raise ValidationError("Ukupan iznos primke mora biti > 0.")
+
+    entry = JournalEntry.objects.create(
+        ledger=ledger,
+        number=_next_entry_number(ledger),
+        date=warehouse_input.date,
+        description=f"Primka #{warehouse_input.id}",
+        status=JournalEntry.Status.DRAFT,
+    )
+
+    JournalItem.objects.create(
+        entry=entry,
+        account=stock_account,
+        debit=total,
+        credit=Decimal("0.00"),
+        description="Zaliha (primka)",
+    )
+    JournalItem.objects.create(
+        entry=entry,
+        account=counterpart_account,
+        debit=Decimal("0.00"),
+        credit=total,
+        description="Protustavka (primka)",
+    )
+
+    entry.post(user=user)
+    warehouse_input.journal_entry = entry
+    warehouse_input.save(update_fields=["journal_entry"])
     return entry
