@@ -6,7 +6,13 @@ from django.db.models import Count, Sum
 from django.utils import timezone
 from mptt.admin import TreeRelatedFieldListFilter
 
-from sales.models import SalesInvoice, SalesInvoiceItem
+from sales.models import (
+    Representation,
+    RepresentationItem,
+    RepresentationReason,
+    SalesInvoice,
+    SalesInvoiceItem,
+)
 from sales.remaris_importer import import_sales_invoices, load_import_defaults
 
 
@@ -229,3 +235,49 @@ class SalesInvoiceItemAdmin(admin.ModelAdmin):
         response.context_data["totals_quantity"] = f"{qty:.4f}".replace(".", ",")
         response.context_data["totals_amount"] = f"{amt:.2f}".replace(".", ",")
         return response
+
+
+class RepresentationItemInline(admin.TabularInline):
+    model = RepresentationItem
+    extra = 0
+    autocomplete_fields = ("artikl",)
+
+
+@admin.register(Representation)
+class RepresentationAdmin(admin.ModelAdmin):
+    list_display = ("occurred_at", "warehouse", "user", "reason", "total_items", "total_quantity")
+    list_filter = ("reason", "warehouse")
+    search_fields = ("note", "user__username", "user__first_name", "user__last_name")
+    fields = ("occurred_at", "warehouse", "user", "reason", "note")
+    readonly_fields = ("occurred_at", "user")
+    inlines = [RepresentationItemInline]
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        return qs.annotate(
+            _items_count=Count("items"),
+            _items_qty=Sum("items__quantity"),
+        )
+
+    @admin.display(description="Stavke", ordering="_items_count")
+    def total_items(self, obj):
+        return obj._items_count or 0
+
+    @admin.display(description="Kolicina", ordering="_items_qty")
+    def total_quantity(self, obj):
+        qty = obj._items_qty
+        if qty is None:
+            return "0,0000"
+        return f"{qty:.4f}".replace(".", ",")
+
+    def save_model(self, request, obj, form, change):
+        if not obj.user_id:
+            obj.user = request.user
+        super().save_model(request, obj, form, change)
+
+
+@admin.register(RepresentationReason)
+class RepresentationReasonAdmin(admin.ModelAdmin):
+    list_display = ("name", "code", "is_active", "sort_order")
+    list_filter = ("is_active",)
+    search_fields = ("name", "code")

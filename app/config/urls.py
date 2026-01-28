@@ -24,7 +24,7 @@ from django.views.static import serve
 from rest_framework.authtoken.views import obtain_auth_token
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 
-from .api_views import CsrfView, LoginView, LogoutView, MeView
+from .api_views import CsrfView, LoginView, LogoutView, MeView, UserDetailView
 from mailbox_app.api_views import MailboxSyncView
 from mailbox_app.api import MailMessageDetailView, MailMessageListView
 from contacts.api import SupplierListView
@@ -37,7 +37,21 @@ from orders.api import (
     PurchaseOrderSendView,
     SupplierArtiklListView,
 )
-from artikli.api import ArtiklDetailView, ArtiklListView, UnitOfMeasureListView, ArtiklImage46x75View
+from artikli.api import (
+    ArtiklDetailView,
+    ArtiklListView,
+    UnitOfMeasureListView,
+    ArtiklImage46x75View,
+    ArtiklImage125x200View,
+    DrinkCategoryListView,
+    DrinkCategoryDetailView,
+)
+from sales.api import (
+    RepresentationDetailView,
+    RepresentationListView,
+    RepresentationReasonDetailView,
+    RepresentationReasonListView,
+)
 from stock.api import (
     InventoryDetailView,
     InventoryItemDetailView,
@@ -58,9 +72,17 @@ urlpatterns = [
     path("api/logout/", LogoutView.as_view(), name="api-logout"),
     path('api/token/', obtain_auth_token, name='api-token'),
     path('api/me/', MeView.as_view(), name='api-me'),
+    path('api/users/<int:user_id>/', UserDetailView.as_view(), name='api-user-detail'),
     path('api/artikli/', ArtiklListView.as_view(), name='api-artikl-list'),
     path('api/artikli/<int:rm_id>/', ArtiklDetailView.as_view(), name='api-artikl-detail'),
     path('api/artikli/<int:rm_id>/image-46x75/', ArtiklImage46x75View.as_view(), name='api-artikl-image-46x75'),
+    path('api/artikli/<int:rm_id>/image-125x200/', ArtiklImage125x200View.as_view(), name='api-artikl-image-125x200'),
+    path('api/drink-categories/', DrinkCategoryListView.as_view(), name='api-drink-category-list'),
+    path('api/drink-categories/<int:pk>/', DrinkCategoryDetailView.as_view(), name='api-drink-category-detail'),
+    path('api/representations/', RepresentationListView.as_view(), name='api-representation-list'),
+    path('api/representations/<int:pk>/', RepresentationDetailView.as_view(), name='api-representation-detail'),
+    path('api/representation-reasons/', RepresentationReasonListView.as_view(), name='api-representation-reason-list'),
+    path('api/representation-reasons/<int:pk>/', RepresentationReasonDetailView.as_view(), name='api-representation-reason-detail'),
     path('api/units/', UnitOfMeasureListView.as_view(), name='api-unit-list'),
     path('api/inventories/', InventoryListCreateView.as_view(), name='api-inventory-list'),
     path('api/inventories/<int:pk>/', InventoryDetailView.as_view(), name='api-inventory-detail'),

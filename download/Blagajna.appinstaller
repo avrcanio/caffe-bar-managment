@@ -1,0 +1,15 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<AppInstaller
+  xmlns="http://schemas.microsoft.com/appx/appinstaller/2018"
+  Uri="https://mozart.sibenik1983.hr/download/Blagajna.appinstaller"
+  Version="1.0.2.0">
+  <MainPackage
+    Name="TouchScreenPOS"
+    Publisher="CN=TouchScreenPOS Company Signing"
+    Version="1.0.2.0"
+    Uri="https://mozart.sibenik1983.hr/download/Blagajna_1.0.2.0_x64.msix"
+    ProcessorArchitecture="x64" />
+  <UpdateSettings>
+    <OnLaunch HoursBetweenUpdateChecks="24" />
+  </UpdateSettings>
+</AppInstaller>

@@ -2,7 +2,39 @@ import withPWA from "next-pwa";
 import runtimeCaching from "next-pwa/cache.js";
 
 /** @type {import('next').NextConfig} */
-const nextConfig = {};
+const nextConfig = {
+  async headers() {
+    return [
+      {
+        source: "/download/:path*",
+        headers: [
+          { key: "Cache-Control", value: "no-store" },
+        ],
+      },
+      {
+        source: "/download/Blagajna.appinstaller",
+        headers: [
+          { key: "Content-Type", value: "application/appinstaller" },
+          { key: "Cache-Control", value: "no-store" },
+        ],
+      },
+      {
+        source: "/download/:file*.msix",
+        headers: [
+          { key: "Content-Type", value: "application/msix" },
+          { key: "Cache-Control", value: "no-store" },
+        ],
+      },
+      {
+        source: "/download/:file*.cer",
+        headers: [
+          { key: "Content-Type", value: "application/pkix-cert" },
+          { key: "Cache-Control", value: "no-store" },
+        ],
+      },
+    ];
+  },
+};
 
 const pwaConfig = {
   dest: "public",
