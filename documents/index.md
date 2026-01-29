@@ -25,6 +25,8 @@ Glavni ulaz u dokumentaciju.
 
 ## Računovodstvo
 - [Računovodstvena jezgra](accounting/accounting-core.md)
+- [Blagajnički dnevnik (Cash Ledger)](accounting/cash-ledger.md)
+- [Kontrola blagajne po smjenama (Shift Cash Control)](accounting/shift-cash-control.md) — operativna kontrola gotovine po smjenama
 - [PDV i povratna naknada](accounting/tax-and-deposit.md)
 - [Računovodstvo ↔ zalihe (COGS)](accounting/accounting-stock.md)
 

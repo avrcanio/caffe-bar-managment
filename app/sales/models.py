@@ -10,6 +10,16 @@ class SalesInvoice(models.Model):
     location_name = models.CharField(max_length=255, blank=True, default="")
     buyer_name = models.CharField(max_length=255, blank=True, default="")
     waiter_name = models.CharField(max_length=255, blank=True, default="")
+    net_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+    )
+    vat_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+    )
     total_amount = models.DecimalField(
         max_digits=12,
         decimal_places=2,
@@ -64,6 +74,66 @@ class SalesInvoiceItem(models.Model):
     class Meta:
         verbose_name = "Stavka racuna (promet)"
         verbose_name_plural = "Stavke racuna (promet)"
+
+
+class SalesZPosting(models.Model):
+    issued_on = models.DateField()
+    location_id = models.IntegerField(null=True, blank=True)
+    pos_id = models.IntegerField(null=True, blank=True)
+    net_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    vat_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    cash_account = models.ForeignKey(
+        "accounting.Account",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    revenue_account = models.ForeignKey(
+        "accounting.Account",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    vat_account = models.ForeignKey(
+        "accounting.Account",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    journal_entry = models.ForeignKey(
+        "accounting.JournalEntry",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="sales_z_postings",
+    )
+    posted_by = models.ForeignKey(
+        "auth.User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="sales_z_postings",
+    )
+    posted_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self) -> str:
+        loc = self.location_id if self.location_id is not None else "?"
+        pos = self.pos_id if self.pos_id is not None else "?"
+        return f"Z {self.issued_on} (lok {loc}, POS {pos})"
+
+    class Meta:
+        verbose_name = "Z knjiženje (promet)"
+        verbose_name_plural = "Z knjiženja (promet)"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["issued_on", "location_id", "pos_id"],
+                name="uq_sales_z_posting",
+            )
+        ]
 
 
 class Representation(models.Model):

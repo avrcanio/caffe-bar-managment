@@ -10,6 +10,7 @@
 - [Stavke (JournalItem)](#stavke-journalitem)
 - [Periodi (Period)](#periodi-period)
 - [Storno (reverse)](#storno-reverse)
+- [Izvještaji](#izvjestaji)
 - [Admin (ključne akcije)](#admin-kljucne-akcije)
 - [Testovi](#testovi)
 
@@ -54,6 +55,23 @@ Statusi:
 - `JournalEntry.reverse()` kreira novu temeljnicu s obrnutim stranama (D↔P)
 - `reversed_entry` OneToOne veza sprječava dvostruko storno
 - Storno storna je blokiran
+
+## Izvještaji
+
+### Blagajnički dnevnik (Cash Ledger)
+
+Blagajnički dnevnik je standardni izvještaj nad glavnom knjigom za gotovinu.
+Tehnički, to je `account_ledger` filtriran na blagajnički konto (npr. `default_cash_account`)
+u zadanom rasponu datuma.
+
+**Pravilo evidencije:**
+Svi gotovinski događaji (naplate, isplate, polog na banku, početni polog/promjena itd.)
+moraju se evidentirati kao `JournalEntry` stavke koje zahvaćaju blagajnički konto.
+Time Blagajnički dnevnik automatski postaje jedina vjerodostojna evidencija gotovine.
+
+**Dobivanje izvještaja:**
+- input: `account = default_cash_account`, `date_from`, `date_to`
+- output: promet i saldo gotovine po knjiženim stavkama
 
 ## Admin (ključne akcije)
 - Akcija “Storniraj označene temeljnice”

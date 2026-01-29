@@ -139,6 +139,7 @@ def import_artikl_details_from_remaris(modeladmin, request, queryset):
 
 @admin.register(Artikl)
 class ArtiklAdmin(admin.ModelAdmin):
+    autocomplete_fields = ("drink_category",)
     list_display = (
         "rm_id",
         "code",
@@ -277,6 +278,7 @@ class DepositAdmin(admin.ModelAdmin):
 
 @admin.register(DrinkCategory)
 class DrinkCategoryAdmin(DraggableMPTTAdmin):
+    autocomplete_fields = ("parent",)
     list_display = ("tree_actions", "indented_title", "parent", "sort_order", "is_active")
     list_filter = ("is_active",)
     search_fields = ("name",)

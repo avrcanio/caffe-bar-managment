@@ -78,13 +78,13 @@ def reverse_entries(modeladmin, request, queryset):
 class JournalEntryAdmin(admin.ModelAdmin):
     list_display = (
         "number",
-        "date",
+        "date_display",
         "status",
         "description",
         "is_reversed",
         "reverses_link",
         "reversal_link",
-        "posted_at",
+        "posted_at_display",
         "posted_by",
     )
     list_filter = ("status", "date")
@@ -107,7 +107,8 @@ class JournalEntryAdmin(admin.ModelAdmin):
     def reversal_link(self, obj):
         if hasattr(obj, "reversal"):
             url = reverse("admin:accounting_journalentry_change", args=[obj.reversal.id])
-            return format_html("<a href=\"{}\">#{} ({})</a>", url, obj.reversal.number, obj.reversal.date)
+            date_str = obj.reversal.date.strftime("%d.%m.%Y") if obj.reversal.date else ""
+            return format_html("<a href=\"{}\">#{} ({})</a>", url, obj.reversal.number, date_str)
         return ""
 
     reversal_link.short_description = "Storno"
@@ -115,11 +116,12 @@ class JournalEntryAdmin(admin.ModelAdmin):
     def reverses_link(self, obj):
         if obj.reversed_entry_id:
             url = reverse("admin:accounting_journalentry_change", args=[obj.reversed_entry_id])
+            date_str = obj.reversed_entry.date.strftime("%d.%m.%Y") if obj.reversed_entry.date else ""
             return format_html(
                 "<a href=\"{}\">#{} ({})</a>",
                 url,
                 obj.reversed_entry.number,
-                obj.reversed_entry.date,
+                date_str,
             )
         return ""
 
@@ -127,6 +129,14 @@ class JournalEntryAdmin(admin.ModelAdmin):
 
     def is_reversed(self, obj):
         return hasattr(obj, "reversal")
+
+    @admin.display(description="datum", ordering="date")
+    def date_display(self, obj):
+        return obj.date.strftime("%d.%m.%Y") if obj.date else ""
+
+    @admin.display(description="proknjizeno", ordering="posted_at")
+    def posted_at_display(self, obj):
+        return obj.posted_at.strftime("%d.%m.%Y %H:%M") if obj.posted_at else ""
 
     is_reversed.boolean = True
     is_reversed.short_description = "Stornirano"

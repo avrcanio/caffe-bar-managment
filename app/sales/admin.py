@@ -1,8 +1,9 @@
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
+from django import forms
 from django.contrib import admin, messages
-from django.db.models import Count, Sum
+from django.db.models import Count, Exists, OuterRef, Sum
 from django.utils import timezone
 from mptt.admin import TreeRelatedFieldListFilter
 
@@ -12,8 +13,15 @@ from sales.models import (
     RepresentationReason,
     SalesInvoice,
     SalesInvoiceItem,
+    SalesZPosting,
 )
 from sales.remaris_importer import import_sales_invoices, load_import_defaults
+from sales.services import create_sales_z, get_sales_z_summary, post_sales_z_posting
+
+
+def _store_z_results(request, *, title: str, results: list[dict]):
+    request.session["z_batch_title"] = title
+    request.session["z_batch_results"] = results
 
 
 class SalesInvoiceItemInline(admin.TabularInline):
@@ -59,8 +67,73 @@ def import_sales_invoices_action(modeladmin, request, queryset):
     )
 
 
+@admin.action(description="Pripremi Z zapis (dnevno)", permissions=["change"])
+def post_sales_z_action(modeladmin, request, queryset):
+    combos = set(queryset.values_list("issued_on", "location_id", "pos_id"))
+    created = 0
+    skipped = 0
+    results: list[dict] = []
+    for issued_on, location_id, pos_id in sorted(combos):
+        summary = get_sales_z_summary(
+            issued_on=issued_on,
+            location_id=location_id,
+            pos_id=pos_id,
+        )
+        try:
+            create_sales_z(
+                issued_on=issued_on,
+                location_id=location_id,
+                pos_id=pos_id,
+            )
+            created += 1
+            status = "created"
+            note = ""
+        except Exception as exc:
+            skipped += 1
+            status = "skipped"
+            note = str(exc)
+
+        results.append(
+            {
+                "issued_on": str(summary["issued_on"]),
+                "location_id": summary["location_id"],
+                "pos_id": summary["pos_id"],
+                "net_amount": f"{summary['net_amount']:.2f}",
+                "vat_amount": f"{summary['vat_amount']:.2f}",
+                "total_amount": f"{summary['total_amount']:.2f}",
+                "status": status,
+                "note": note,
+            }
+        )
+
+    modeladmin.message_user(
+        request,
+        f"Z zapis kreiran. created={created} skipped={skipped}",
+        level=messages.SUCCESS,
+    )
+    if results:
+        _store_z_results(request, title="Rezultat Z knjiženja (akcija)", results=results)
+
+
+
 @admin.register(SalesInvoice)
 class SalesInvoiceAdmin(admin.ModelAdmin):
+    class SalesInvoiceAdminForm(forms.ModelForm):
+        issued_on = forms.DateField(
+            required=False,
+            input_formats=["%d.%m.%Y", "%Y-%m-%d"],
+            widget=forms.DateInput(format="%d.%m.%Y"),
+        )
+        issued_at = forms.DateTimeField(
+            required=False,
+            input_formats=["%d.%m.%Y %H:%M", "%d.%m.%Y %H.%M", "%Y-%m-%d %H:%M:%S"],
+            widget=forms.DateTimeInput(format="%d.%m.%Y %H:%M"),
+        )
+
+        class Meta:
+            model = SalesInvoice
+            fields = "__all__"
+
     class IssuedOnTotalFilter(admin.SimpleListFilter):
         title = "issued on"
         parameter_name = "issued_on_range"
@@ -76,14 +149,21 @@ class SalesInvoiceAdmin(admin.ModelAdmin):
             ]
             lookups = [("any", "Bilo koji datum", None, None)]
             for key, label, start, end in ranges:
-                total = (
-                    base_qs.filter(issued_on__gte=start, issued_on__lte=end)
-                    .aggregate(total=Sum("total_amount"))
-                    .get("total")
-                    or Decimal("0.00")
+                totals = base_qs.filter(issued_on__gte=start, issued_on__lte=end).aggregate(
+                    total=Sum("total_amount"),
+                    net=Sum("net_amount"),
+                    vat=Sum("vat_amount"),
                 )
-                total = total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-                lookups.append((key, f"{label} ({total:.2f})", start, end))
+                total = (totals.get("total") or Decimal("0.00")).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                net = (totals.get("net") or Decimal("0.00")).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                vat = (totals.get("vat") or Decimal("0.00")).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                lookups.append((key, f"{label} (net {net:.2f} | PDV {vat:.2f} | bruto {total:.2f})", start, end))
             return [(key, label) for key, label, _, _ in lookups]
 
         def queryset(self, request, queryset):
@@ -109,19 +189,34 @@ class SalesInvoiceAdmin(admin.ModelAdmin):
 
     list_display = (
         "rm_number",
-        "issued_on",
-        "issued_at",
+        "issued_on_display",
+        "issued_at_display",
         "location_name",
         "waiter_name",
         "buyer_name",
+        "net_amount",
+        "vat_amount",
         "total_amount",
         "currency",
+        "z_included",
+        "z_posted",
     )
-    list_filter = (IssuedOnTotalFilter, "waiter_name")
-    search_fields = ("rm_number", "location_name", "waiter_name", "buyer_name")
-    actions = [import_sales_invoices_action]
+    list_display_links = ("rm_number",)
+    readonly_fields = ("issued_on", "issued_at")
+    list_filter = (IssuedOnTotalFilter, "issued_on", "waiter_name")
+    search_fields = ("rm_number", "location_name", "waiter_name", "buyer_name", "issued_on__exact")
+    actions = [import_sales_invoices_action, post_sales_z_action]
     change_list_template = "admin/sales/salesinvoice/change_list.html"
     inlines = [SalesInvoiceItemInline]
+    form = SalesInvoiceAdminForm
+
+    @admin.display(description="issued on", ordering="issued_on")
+    def issued_on_display(self, obj):
+        return obj.issued_on.strftime("%d.%m.%Y") if obj.issued_on else ""
+
+    @admin.display(description="issued at", ordering="issued_at")
+    def issued_at_display(self, obj):
+        return obj.issued_at.strftime("%d.%m.%Y %H:%M") if obj.issued_at else ""
 
     def changelist_view(self, request, extra_context=None):
         response = super().changelist_view(request, extra_context=extra_context)
@@ -134,7 +229,29 @@ class SalesInvoiceAdmin(admin.ModelAdmin):
         total = totals.get("total") or Decimal("0.00")
         total = total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         response.context_data["grand_total_amount"] = f"{total:.2f}".replace(".", ",")
+        response.context_data["z_batch_title"] = request.session.pop("z_batch_title", None)
+        response.context_data["z_batch_results"] = request.session.pop("z_batch_results", None)
         return response
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        z_qs = SalesZPosting.objects.filter(
+            issued_on=OuterRef("issued_on"),
+            location_id=OuterRef("location_id"),
+            pos_id=OuterRef("pos_id"),
+        )
+        return qs.annotate(
+            _z_included=Exists(z_qs),
+            _z_posted=Exists(z_qs.filter(journal_entry__isnull=False)),
+        )
+
+    @admin.display(boolean=True, description="u Z", ordering="_z_included")
+    def z_included(self, obj):
+        return getattr(obj, "_z_included", False)
+
+    @admin.display(boolean=True, description="Z → journal", ordering="_z_posted")
+    def z_posted(self, obj):
+        return getattr(obj, "_z_posted", False)
 
 
 @admin.register(SalesInvoiceItem)
@@ -260,6 +377,68 @@ class SalesInvoiceItemAdmin(admin.ModelAdmin):
         response.context_data["totals_quantity"] = f"{qty:.4f}".replace(".", ",")
         response.context_data["totals_amount"] = f"{amt:.2f}".replace(".", ",")
         return response
+
+
+@admin.register(SalesZPosting)
+class SalesZPostingAdmin(admin.ModelAdmin):
+    list_display = (
+        "issued_on_display",
+        "location_id",
+        "pos_id",
+        "net_amount",
+        "vat_amount",
+        "total_amount",
+        "cash_account",
+        "revenue_account",
+        "vat_account",
+        "journal_entry",
+        "posted_at",
+        "posted_by",
+    )
+    list_filter = ("issued_on", "location_id", "pos_id")
+    search_fields = ("issued_on", "location_id", "pos_id")
+    autocomplete_fields = ("cash_account", "revenue_account", "vat_account")
+    actions = ["post_z_to_journal_action"]
+
+    @admin.action(description="Post Z u Journal", permissions=["change"])
+    def post_z_to_journal_action(self, request, queryset):
+        created = 0
+        skipped = 0
+        results: list[dict] = []
+        for posting in queryset:
+            try:
+                post_sales_z_posting(posting=posting, posted_by=request.user)
+                created += 1
+                status = "posted"
+                note = ""
+            except Exception as exc:
+                skipped += 1
+                status = "skipped"
+                note = str(exc)
+            results.append(
+                {
+                    "issued_on": str(posting.issued_on),
+                    "location_id": posting.location_id,
+                    "pos_id": posting.pos_id,
+                    "net_amount": f"{posting.net_amount:.2f}",
+                    "vat_amount": f"{posting.vat_amount:.2f}",
+                    "total_amount": f"{posting.total_amount:.2f}",
+                    "status": status,
+                    "note": note,
+                }
+            )
+
+        self.message_user(
+            request,
+            f"Post Z završeno. posted={created} skipped={skipped}",
+            level=messages.SUCCESS,
+        )
+        if results:
+            _store_z_results(request, title="Post Z rezultati", results=results)
+
+    @admin.display(description="issued on", ordering="issued_on")
+    def issued_on_display(self, obj):
+        return obj.issued_on.strftime("%d.%m.%Y") if obj.issued_on else ""
 
 
 class RepresentationItemInline(admin.TabularInline):

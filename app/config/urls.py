@@ -29,6 +29,7 @@ from mailbox_app.api_views import MailboxSyncView
 from mailbox_app.api import MailMessageDetailView, MailMessageListView
 from contacts.api import SupplierListView
 from configuration.api import PaymentTypeListView
+from accounting.api import CashLedgerView
 from orders.api import (
     PurchaseOrderDetailView,
     PurchaseOrderItemDetailView,
@@ -59,6 +60,11 @@ from stock.api import (
     InventoryListCreateView,
     WarehouseStockSyncView,
     WarehouseIdListView,
+)
+from operations.api import (
+    ShiftCashCountCreateView,
+    ShiftCashSummaryView,
+    ShiftListCreateView,
 )
 
 urlpatterns = [
@@ -98,6 +104,10 @@ urlpatterns = [
     path('api/suppliers/', SupplierListView.as_view(), name='api-supplier-list'),
     path('api/payment-types/', PaymentTypeListView.as_view(), name='api-payment-type-list'),
     path('api/suppliers/<int:supplier_id>/artikli/', SupplierArtiklListView.as_view(), name='api-supplier-artikl-list'),
+    path("api/accounting/cash-ledger/", CashLedgerView.as_view(), name="api-cash-ledger"),
+    path("api/operations/shifts/", ShiftListCreateView.as_view(), name="api-shift-list-create"),
+    path("api/operations/shifts/<int:shift_id>/cash-count/", ShiftCashCountCreateView.as_view(), name="api-shift-cash-count"),
+    path("api/operations/shifts/<int:shift_id>/cash-summary/", ShiftCashSummaryView.as_view(), name="api-shift-cash-summary"),
     path("api/mailbox/sync/", MailboxSyncView.as_view(), name="api-mailbox-sync"),
     path("api/mailbox/messages/", MailMessageListView.as_view(), name="api-mailbox-messages"),
     path("api/mailbox/messages/<int:pk>/", MailMessageDetailView.as_view(), name="api-mailbox-message-detail"),

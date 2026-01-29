@@ -138,6 +138,14 @@ class StuffAdmin(admin.ModelAdmin):
 
 @admin.register(Supplier)
 class SupplierAdmin(admin.ModelAdmin):
-    list_display = ("rm_id", "name", "orders_email", "town", "street", "tax_number")
+    list_display = (
+        "rm_id",
+        "name",
+        "orders_email",
+        "show_prices_on_order",
+        "town",
+        "street",
+        "tax_number",
+    )
     search_fields = ("rm_id", "name", "orders_email", "town", "street", "tax_number")
     actions = [import_suppliers_from_remaris]

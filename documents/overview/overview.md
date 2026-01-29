@@ -49,6 +49,12 @@ Ovaj dokument sažima računovodstvenu jezgru, robni FIFO sloj i nabavni tok koj
 - account_ledger(account, date_from, date_to)
 - trial_balance(date_from, date_to, only_postable=True, only_nonzero=True)
 
+### Blagajnički dnevnik
+
+Blagajnički dnevnik je glavna evidencija gotovine u sustavu.
+Prikazuje sva gotovinska kretanja (naplate, isplate, pologe na banku)
+i koristi se u svakodnevnoj operativi za kontrolu blagajne po danima i smjenama.
+
 ## Zalihe/FIFO (app/stock)
 
 ## Modeli
@@ -91,6 +97,7 @@ Ovaj dio je prošireni pregled sustava (izvorno objedinjena dokumentacija).
 - Nabava: Primka → Ulazni račun → Knjiženje (CASH/DEFERRED)
 - Prodaja: POS račun → FIFO OUT → COGS → Prihod
 - Plaćanja: odgoda → payment journal
+- Z dnevno (POS): SalesInvoice → SalesZPosting → JournalEntry (vidi [Prodajni tijek rada](../workflows/sales-workflow.md))
 
 ## Računovodstvena jezgra
 - Kontni plan, temeljnice, stavke, periodi, storno, zaštite

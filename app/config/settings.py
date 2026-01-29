@@ -70,6 +70,7 @@ INSTALLED_APPS = [
     'accounting',
     'purchases',
     'sales',
+    'operations',
 ]
 
 MIDDLEWARE = [
@@ -156,6 +157,7 @@ AUTH_PASSWORD_VALIDATORS = [
 # https://docs.djangoproject.com/en/5.2/topics/i18n/
 
 LANGUAGE_CODE = 'hr'
+FORMAT_MODULE_PATH = ["config.formats"]
 
 TIME_ZONE = 'UTC'
 
@@ -193,6 +195,10 @@ MEDIA_ROOT = BASE_DIR / 'media'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# Global display formats (admin/list display)
+DATE_FORMAT = "d.m.Y"
+DATETIME_FORMAT = "d.m.Y H:i"
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [

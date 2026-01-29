@@ -23,6 +23,7 @@ class Supplier(models.Model):
     street = models.CharField(max_length=255, blank=True, default="")
     tax_number = models.CharField(max_length=50, blank=True, default="")
     orders_email = models.EmailField(blank=True, default="")
+    show_prices_on_order = models.BooleanField(default=True)
     mobile_devices = models.JSONField(blank=True, default=list)
 
     def __str__(self) -> str:

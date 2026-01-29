@@ -74,6 +74,17 @@
 - paid_date
 
 ## account_ledger(account, date_from, date_to)
+Vraća promet i saldo za zadani konto glavne knjige u zadanom razdoblju.
+
+**Napomena (Cash Ledger):**
+Blagajnički dnevnik (Cash Ledger) ne predstavlja poseban servis.
+Dobiva se pozivom `account_ledger` servisa nad blagajničkim kontom
+(npr. `default_cash_account`).
+
+Na taj način svi gotovinski događaji (naplate, isplate, polog na banku,
+početni polog/promjena) ulaze u Blagajnički dnevnik isključivo putem
+`JournalEntry` stavki koje zahvaćaju blagajnički konto.
+
 - account
 - date_from
 - date_to
@@ -83,6 +94,18 @@
 - date_to
 - only_postable
 - only_nonzero
+
+
+## sales/services.py
+
+## create_sales_z(...)
+- issued_on
+- location_id
+- pos_id
+
+## post_sales_z_posting(...)
+- posting
+- posted_by
 
 
 ## stock/services.py

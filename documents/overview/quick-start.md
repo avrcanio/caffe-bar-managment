@@ -34,6 +34,13 @@ Ovaj vodič je praktičan “klik po klik” za rad u Django adminu.
 ## 1.1 Ledger
 - U adminu provjeri da postoji **točno jedan** `Ledger`.
 
+> Napomena (Blagajnički dnevnik)
+>
+> Blagajnički dnevnik nije poseban modul.
+> To je standardni `account_ledger` izvještaj nad blagajničkim kontom.
+> Svi gotovinski događaji moraju se evidentirati kroz `JournalEntry`
+> kako bi stanje blagajne bilo točno i provjerljivo.
+
 ## 1.2 Kontni plan
 - Ako konta nisu uvezena, uvezi RRiF plan i postavi `DocumentType` mapiranja.
 
@@ -117,6 +124,11 @@ Sustav:
   - financije: gotovinska prodaja (D cash / P revenue / P VAT)
   - audit: veže `sales_journal_entry` na `StockMove`
 
+## 4.3 Z dnevno (POS promet)
+Ako prodaja dolazi iz POS-a kroz `SalesInvoice`, knjiženje ide Z dnevno:
+- Admin (SalesInvoice): akcija **“Knjiži Z (dnevno)”** → kreira `SalesZPosting`
+- Admin (SalesZPosting): provjeri konta, zatim akcija **“Post Z u Journal”**
+
 ## 4.2 Auto-replenish (opcionalno)
 Ako je uključeno `auto_replenish_on_sale`:
 - kad fali robe na šanku, sustav radi transfer **Glavno → Šank** za potrebnu količinu.
@@ -147,5 +159,6 @@ Ako je uključeno `auto_replenish_on_sale`:
 - **Depozit postoji, ali nema deposit_account** → postavi `default_deposit_account` ili na računu
 - **Primka već proknjižena** → primka ima `stock_move` (ne radi duplo)
 - **Primke već vezane na račun** → sustav blokira kreiranje novog računa
+- **Paralelna evidencija gotovine** → Blagajnički dnevnik je uvijek `account_ledger` nad blagajničkim kontom; vođenje gotovine izvan glavne knjige dovodi do nepodudaranja salda i izvještaja.
 
 [← Back to index](../index.md)

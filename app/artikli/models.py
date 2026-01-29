@@ -40,7 +40,7 @@ class Artikl(models.Model):
         null=True,
         blank=True,
         related_name="artikli",
-        verbose_name="Kategorija napitaka",
+        verbose_name="Kategorija pića",
     )
     is_sellable = models.BooleanField(default=True, verbose_name="Prodajni artikl")
     is_stock_item = models.BooleanField(default=False, verbose_name="Skladisni artikl")
@@ -153,8 +153,8 @@ class DrinkCategory(MPTTModel):
         order_insertion_by = ["sort_order", "name"]
 
     class Meta:
-        verbose_name = "Kategorija napitaka"
-        verbose_name_plural = "Kategorije napitaka"
+        verbose_name = "Kategorija pića"
+        verbose_name_plural = "Kategorije pića"
         ordering = ["tree_id", "lft"]
         constraints = [
             models.UniqueConstraint(

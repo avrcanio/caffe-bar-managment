@@ -79,10 +79,12 @@ export async function apiRequest(
     signal,
   });
 
-  if (response.status === 401 && typeof window !== "undefined") {
+  if ((response.status === 401 || response.status === 403) && typeof window !== "undefined") {
     const currentPath = window.location.pathname;
-    if (currentPath !== "/login") {
-      window.location.href = "/login";
+    if (currentPath !== "/login" && currentPath !== "/download") {
+      const query = window.location.search || "";
+      const next = `${currentPath}${query}`;
+      window.location.href = `/login?next=${encodeURIComponent(next)}`;
     }
   }
 

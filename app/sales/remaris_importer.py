@@ -3,7 +3,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import date as date_cls, datetime as datetime_cls
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Iterable
@@ -49,6 +49,23 @@ def _safe_decimal(value) -> Decimal:
     if isinstance(value, Decimal):
         return value
     return Decimal(str(value))
+
+
+TWOPLACES = Decimal("0.01")
+VAT_RATE = Decimal("0.25")
+
+
+def _q2(value: Decimal) -> Decimal:
+    return value.quantize(TWOPLACES, rounding=ROUND_HALF_UP)
+
+
+def _compute_net_vat(total_amount: Decimal) -> tuple[Decimal, Decimal]:
+    if total_amount is None:
+        total_amount = Decimal("0.00")
+    net = total_amount / (Decimal("1.00") + VAT_RATE)
+    net = _q2(net)
+    vat = _q2(total_amount - net)
+    return net, vat
 
 
 def _safe_text(value) -> str:
@@ -327,12 +344,15 @@ def import_sales_invoices(
                 "location_id": location_id,
                 "pos_id": pos_id,
             }
+            net_amount, vat_amount = _compute_net_vat(invoice.total_amount)
 
             obj, was_created = SalesInvoice.objects.update_or_create(
                 rm_number=invoice.rm_number,
                 defaults={
                     **defaults,
                     "issued_on": invoice.issued_on,
+                    "net_amount": net_amount,
+                    "vat_amount": vat_amount,
                 },
             )
 

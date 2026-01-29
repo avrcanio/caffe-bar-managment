@@ -7,6 +7,7 @@ from django.core.exceptions import ValidationError
 from django.db.models import Sum, Max
 
 from accounting.models import Ledger, JournalItem, JournalEntry, Account
+from stock.models import StockAccountingConfig
 from configuration.models import DocumentType
 from orders.models import WarehouseInput, WarehouseInputItem
 
@@ -16,6 +17,39 @@ def get_single_ledger() -> Ledger:
     if not ledger:
         raise RuntimeError("Ne postoji Ledger u bazi. Kreiraj ga prvo.")
     return ledger
+
+
+def get_account_by_code(code: str, *, ledger: Ledger | None = None) -> Account:
+    ledger = ledger or get_single_ledger()
+    account = Account.objects.filter(ledger=ledger, code=code).first()
+    if not account:
+        raise ValidationError(f"Nepoznat konto {code}.")
+    return account
+
+
+def get_default_cash_account() -> Account:
+    config = StockAccountingConfig.objects.first()
+    if not config or not config.default_cash_account_id:
+        raise RuntimeError("Nije postavljen default_cash_account u StockAccountingConfig.")
+    return config.default_cash_account
+
+
+def account_balance_as_of(account: Account, as_of_date: date) -> Decimal:
+    totals = (
+        JournalItem.objects
+        .filter(
+            account=account,
+            entry__status=JournalEntry.Status.POSTED,
+            entry__date__lte=as_of_date,
+        )
+        .aggregate(
+            d=Sum("debit", default=Decimal("0.00")),
+            c=Sum("credit", default=Decimal("0.00")),
+        )
+    )
+    debit = totals["d"] or Decimal("0.00")
+    credit = totals["c"] or Decimal("0.00")
+    return debit - credit
 
 
 @dataclass
@@ -315,6 +349,66 @@ def post_sales_cash(
         )
 
     entry.post()
+    return entry
+
+
+def post_sales_cash_accounts(
+    *,
+    date: date,
+    net: Decimal,
+    vat: Decimal,
+    cash_account: Account,
+    revenue_account: Account,
+    vat_output_account: Account | None,
+    description: str = "",
+    posted_by=None,
+) -> JournalEntry:
+    if not cash_account or not cash_account.is_postable:
+        raise ValidationError("Cash konto mora biti postable.")
+    if not revenue_account or not revenue_account.is_postable:
+        raise ValidationError("Prihod konto mora biti postable.")
+    if vat != Decimal("0.00") and not vat_output_account:
+        raise ValidationError("Nedostaje konto PDV obveze.")
+
+    ledger = cash_account.ledger
+    if revenue_account.ledger_id != ledger.id:
+        raise ValidationError("Prihod konto mora biti u istom ledgeru.")
+    if vat_output_account and vat_output_account.ledger_id != ledger.id:
+        raise ValidationError("PDV konto mora biti u istom ledgeru.")
+
+    gross = net + vat
+    entry = JournalEntry.objects.create(
+        ledger=ledger,
+        number=_next_entry_number(ledger),
+        date=date,
+        description=description or "Z dnevno (gotovinska prodaja)",
+        status=JournalEntry.Status.DRAFT,
+    )
+
+    JournalItem.objects.create(
+        entry=entry,
+        account=cash_account,
+        debit=gross,
+        credit=Decimal("0.00"),
+        description="Gotovinska prodaja (blagajna)",
+    )
+    JournalItem.objects.create(
+        entry=entry,
+        account=revenue_account,
+        debit=Decimal("0.00"),
+        credit=net,
+        description="Prihod od prodaje (osnovica)",
+    )
+    if vat != Decimal("0.00"):
+        JournalItem.objects.create(
+            entry=entry,
+            account=vat_output_account,
+            debit=Decimal("0.00"),
+            credit=vat,
+            description="PDV obveza (25%)",
+        )
+
+    entry.post(user=posted_by)
     return entry
 
 

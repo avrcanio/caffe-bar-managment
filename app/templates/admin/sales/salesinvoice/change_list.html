@@ -1,7 +1,56 @@
 {% extends "admin/change_list.html" %}
 
+{% block search %}
+{{ block.super }}
+<div class="submit-row" style="margin-top: 8px;">
+    <form method="get" style="display: inline-flex; gap: 6px; align-items: center;">
+        {% for key, value in request.GET.items %}
+            {% if key != "issued_on__exact" %}
+                <input type="hidden" name="{{ key }}" value="{{ value }}">
+            {% endif %}
+        {% endfor %}
+        <label for="id_issued_on_exact">Datum:</label>
+        <input id="id_issued_on_exact" type="date" name="issued_on__exact" value="{{ request.GET.issued_on__exact }}">
+        <button type="submit">Filtriraj</button>
+    </form>
+</div>
+{% endblock %}
+
 {% block result_list %}
 {{ block.super }}
+{% if z_batch_results %}
+<div class="results">
+    <table>
+        <caption>{{ z_batch_title|default:"Z batch rezultati" }}</caption>
+        <thead>
+            <tr>
+                <th>Datum</th>
+                <th>Lokacija</th>
+                <th>POS</th>
+                <th>Net</th>
+                <th>PDV</th>
+                <th>Bruto</th>
+                <th>Status</th>
+                <th>Napomena</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in z_batch_results %}
+            <tr>
+                <td>{{ r.issued_on }}</td>
+                <td>{{ r.location_id }}</td>
+                <td>{{ r.pos_id }}</td>
+                <td>{{ r.net_amount }}</td>
+                <td>{{ r.vat_amount }}</td>
+                <td>{{ r.total_amount }}</td>
+                <td>{{ r.status }}</td>
+                <td>{{ r.note }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
 <div class="results">
     <table>
         <tbody>

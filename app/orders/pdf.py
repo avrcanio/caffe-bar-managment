@@ -15,6 +15,9 @@ def build_order_pdf(order, company):
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
+    show_prices = True
+    if getattr(order, "supplier", None) is not None:
+        show_prices = bool(getattr(order.supplier, "show_prices_on_order", True))
 
     y = height - 20 * mm
 
@@ -60,7 +63,7 @@ def build_order_pdf(order, company):
 
     y -= 10 * mm
     c.setFont(font_bold, 10)
-    y = _draw_table_header(c, y, font_bold)
+    y = _draw_table_header(c, y, font_bold, show_prices)
 
     y -= 8 * mm
     c.setFont(font_regular, 10)
@@ -75,7 +78,7 @@ def build_order_pdf(order, company):
         if y < 25 * mm:
             c.showPage()
             y = height - 20 * mm
-            y = _draw_table_header(c, y, font_bold)
+            y = _draw_table_header(c, y, font_bold, show_prices)
             y -= 8 * mm
             c.setFont(font_regular, 10)
 
@@ -86,18 +89,17 @@ def build_order_pdf(order, company):
         c.drawRightString(105 * mm, y - code_offset, _fmt_decimal(item.quantity))
         c.drawString(110 * mm, y - code_offset, item.unit_of_measure.name if item.unit_of_measure else "—")
 
-        price = item.price or Decimal("0")
-        line_net = Decimal(price) * Decimal(item.quantity or 0)
-        tax_group = item.artikl.tax_group if item.artikl else None
-        tax_rate = tax_group.rate if tax_group else Decimal("0")
-        line_gross = line_net * (Decimal("1") + Decimal(tax_rate))
-
-        c.drawRightString(145 * mm, y - code_offset, _fmt_decimal(price))
-        c.drawRightString(165 * mm, y - code_offset, _fmt_percent(tax_rate))
-        c.drawRightString(190 * mm, y - code_offset, _fmt_decimal(line_net))
+        if show_prices:
+            price = item.price or Decimal("0")
+            line_net = Decimal(price) * Decimal(item.quantity or 0)
+            tax_group = item.artikl.tax_group if item.artikl else None
+            tax_rate = tax_group.rate if tax_group else Decimal("0")
+            c.drawRightString(145 * mm, y - code_offset, _fmt_decimal(price))
+            c.drawRightString(165 * mm, y - code_offset, _fmt_percent(tax_rate))
+            c.drawRightString(190 * mm, y - code_offset, _fmt_decimal(line_net))
         y -= row_height
 
-        if tax_group:
+        if show_prices and tax_group:
             key = tax_group.pk
             if key not in tax_summary:
                 tax_summary[key] = {
@@ -107,31 +109,35 @@ def build_order_pdf(order, company):
                 }
             tax_summary[key]["tax"] += line_net * tax_rate
 
-    if y < 35 * mm:
-        c.showPage()
-        y = height - 20 * mm
+    if show_prices:
+        if y < 35 * mm:
+            c.showPage()
+            y = height - 20 * mm
 
-    c.line(120 * mm, y, 190 * mm, y)
-    y -= 6 * mm
-    c.setFont(font_regular, 10)
-    c.drawRightString(165 * mm, y, "Neto:")
-    c.drawRightString(190 * mm, y, f"{_fmt_decimal(order.total_net)} EUR")
-    for item in sorted(tax_summary.values(), key=lambda entry: (entry["rate"], entry["tax_group"].name)):
+        c.line(120 * mm, y, 190 * mm, y)
         y -= 6 * mm
-        tax = item["tax"].quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        if tax == Decimal("0"):
-            continue
-        rate_label = _fmt_percent_two(item["rate"])
-        label = f"PDV ({item['tax_group'].name} {rate_label}):"
-        c.drawRightString(165 * mm, y, label)
-        c.drawRightString(190 * mm, y, f"{_fmt_decimal(tax)} EUR")
-    y -= 6 * mm
-    c.drawRightString(165 * mm, y, "Povratna naknada:")
-    c.drawRightString(190 * mm, y, f"{_fmt_decimal(order.total_deposit)} EUR")
-    y -= 6 * mm
-    c.setFont(font_bold, 10)
-    c.drawRightString(165 * mm, y, "UKUPNO (EUR):")
-    c.drawRightString(190 * mm, y, f"{_fmt_decimal(order.total_gross)} EUR")
+        c.setFont(font_regular, 10)
+        c.drawRightString(165 * mm, y, "Neto:")
+        c.drawRightString(190 * mm, y, f"{_fmt_decimal(order.total_net)} EUR")
+        for item in sorted(
+            tax_summary.values(),
+            key=lambda entry: (entry["rate"], entry["tax_group"].name),
+        ):
+            y -= 6 * mm
+            tax = item["tax"].quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            if tax == Decimal("0"):
+                continue
+            rate_label = _fmt_percent_two(item["rate"])
+            label = f"PDV ({item['tax_group'].name} {rate_label}):"
+            c.drawRightString(165 * mm, y, label)
+            c.drawRightString(190 * mm, y, f"{_fmt_decimal(tax)} EUR")
+        y -= 6 * mm
+        c.drawRightString(165 * mm, y, "Povratna naknada:")
+        c.drawRightString(190 * mm, y, f"{_fmt_decimal(order.total_deposit)} EUR")
+        y -= 6 * mm
+        c.setFont(font_bold, 10)
+        c.drawRightString(165 * mm, y, "UKUPNO (EUR):")
+        c.drawRightString(190 * mm, y, f"{_fmt_decimal(order.total_gross)} EUR")
 
     c.showPage()
     c.save()
@@ -154,15 +160,18 @@ def _register_fonts():
     return "Helvetica", "Helvetica-Bold"
 
 
-def _draw_table_header(c, y, font_bold):
+def _draw_table_header(c, y, font_bold, show_prices):
     c.setFont(font_bold, 10)
     c.drawString(20 * mm, y, "Artikl")
     c.drawRightString(105 * mm, y, "Kolicina")
     c.drawString(110 * mm, y, "JM")
-    c.drawRightString(145 * mm, y, "Cijena")
-    c.drawRightString(165 * mm, y, "PDV")
-    c.drawRightString(190 * mm, y, "Iznos")
-    c.line(20 * mm, y - 2 * mm, 190 * mm, y - 2 * mm)
+    if show_prices:
+        c.drawRightString(145 * mm, y, "Cijena")
+        c.drawRightString(165 * mm, y, "PDV")
+        c.drawRightString(190 * mm, y, "Iznos")
+        c.line(20 * mm, y - 2 * mm, 190 * mm, y - 2 * mm)
+    else:
+        c.line(20 * mm, y - 2 * mm, 130 * mm, y - 2 * mm)
     return y
 
 
