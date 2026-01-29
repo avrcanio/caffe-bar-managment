@@ -16,8 +16,6 @@ services:
   redis:
     image: redis:7-alpine
     container_name: mozzart-redis
-    ports:
-      - "6379:6379"
     networks:
       - hetzner_net
   web:
@@ -77,21 +75,6 @@ services:
       - web
     networks:
       - hetzner_net
-  caddy:
-    image: caddy:2-alpine
-    container_name: mozzart-caddy
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./caddy/certs:/certs:ro
-      - caddy_data:/data
-    depends_on:
-      - web
-      - frontend
-    networks:
-      - hetzner_net
   tailscale:
     image: tailscale/tailscale:latest
     container_name: tailscale
@@ -112,4 +95,3 @@ volumes:
   postgis_postgis_data16:
     external: true
   tailscale_state:
-  caddy_data:

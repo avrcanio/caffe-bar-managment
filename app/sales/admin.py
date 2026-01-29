@@ -16,6 +16,30 @@ from sales.models import (
 from sales.remaris_importer import import_sales_invoices, load_import_defaults
 
 
+class SalesInvoiceItemInline(admin.TabularInline):
+    model = SalesInvoiceItem
+    extra = 0
+    max_num = 0
+    can_delete = False
+    readonly_fields = (
+        "product_name",
+        "artikl",
+        "quantity",
+        "amount",
+        "discount_value",
+        "discount_percent",
+    )
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
 @admin.action(description="Import promet (Remaris)", permissions=["change"])
 def import_sales_invoices_action(modeladmin, request, queryset):
     date_from = timezone.localdate()
@@ -97,6 +121,7 @@ class SalesInvoiceAdmin(admin.ModelAdmin):
     search_fields = ("rm_number", "location_name", "waiter_name", "buyer_name")
     actions = [import_sales_invoices_action]
     change_list_template = "admin/sales/salesinvoice/change_list.html"
+    inlines = [SalesInvoiceItemInline]
 
     def changelist_view(self, request, extra_context=None):
         response = super().changelist_view(request, extra_context=extra_context)

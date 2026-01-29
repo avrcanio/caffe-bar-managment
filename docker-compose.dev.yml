@@ -44,7 +44,21 @@ services:
     command: sh -lc "npm install && npm run dev -- -p 3000"
     ports:
       - "3002:3000"
+  caddy:
+    image: caddy:2-alpine
+    container_name: mozzart-caddy-dev
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/certs:/certs:ro
+      - caddy_data:/data
+    depends_on:
+      - web
+      - frontend
   redis:
     container_name: mozzart-redis-dev
-    ports:
-      - "6380:6379"
+
+volumes:
+  caddy_data:
