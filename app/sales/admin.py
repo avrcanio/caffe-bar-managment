@@ -3,10 +3,16 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from django import forms
 from django.contrib import admin, messages
-from django.db.models import Count, Exists, OuterRef, Sum
+from django.db.models import Count, Exists, OuterRef, Q, Subquery, Sum
+from django.db.models import CharField, Value
+from django.db.models.functions import Cast, Concat
+from django.urls import reverse
+from django.utils.html import format_html
+from stock.models import StockMove, StockMoveLine, WarehouseTransfer, WarehouseTransferItem, WarehouseId
 from django.utils import timezone
 from mptt.admin import TreeRelatedFieldListFilter
 
+from artikli.models import NormativItem
 from sales.models import (
     Representation,
     RepresentationItem,
@@ -16,7 +22,7 @@ from sales.models import (
     SalesZPosting,
 )
 from sales.remaris_importer import import_sales_invoices, load_import_defaults
-from sales.services import create_sales_z, get_sales_z_summary, post_sales_z_posting
+from sales.services import create_sales_z, get_sales_z_summary, post_sales_items_stock_out, post_sales_z_posting
 
 
 def _store_z_results(request, *, title: str, results: list[dict]):
@@ -69,20 +75,22 @@ def import_sales_invoices_action(modeladmin, request, queryset):
 
 @admin.action(description="Pripremi Z zapis (dnevno)", permissions=["change"])
 def post_sales_z_action(modeladmin, request, queryset):
-    combos = set(queryset.values_list("issued_on", "location_id", "pos_id"))
+    from stock.models import WarehouseId
+    from pos.models import Pos
+    combos = set(queryset.values_list("issued_on", "warehouse_id", "pos_id"))
     created = 0
     skipped = 0
     results: list[dict] = []
-    for issued_on, location_id, pos_id in sorted(combos):
+    for issued_on, warehouse_id, pos_id in sorted(combos):
         summary = get_sales_z_summary(
             issued_on=issued_on,
-            location_id=location_id,
+            warehouse_id=warehouse_id,
             pos_id=pos_id,
         )
         try:
             create_sales_z(
                 issued_on=issued_on,
-                location_id=location_id,
+                warehouse_id=warehouse_id,
                 pos_id=pos_id,
             )
             created += 1
@@ -93,13 +101,16 @@ def post_sales_z_action(modeladmin, request, queryset):
             status = "skipped"
             note = str(exc)
 
+        warehouse_label = WarehouseId.objects.filter(id=warehouse_id).values_list("name", flat=True).first() or str(warehouse_id or "")
+        pos_label = Pos.objects.filter(id=pos_id).values_list("name", flat=True).first() or str(pos_id or "")
         results.append(
             {
                 "issued_on": str(summary["issued_on"]),
-                "location_id": summary["location_id"],
-                "pos_id": summary["pos_id"],
+                "warehouse": warehouse_label,
+                "pos": pos_label,
                 "net_amount": f"{summary['net_amount']:.2f}",
                 "vat_amount": f"{summary['vat_amount']:.2f}",
+                "pnp_amount": f"{summary.get('pnp_amount', 0):.2f}",
                 "total_amount": f"{summary['total_amount']:.2f}",
                 "status": status,
                 "note": note,
@@ -113,7 +124,6 @@ def post_sales_z_action(modeladmin, request, queryset):
     )
     if results:
         _store_z_results(request, title="Rezultat Z knjiženja (akcija)", results=results)
-
 
 
 @admin.register(SalesInvoice)
@@ -200,6 +210,7 @@ class SalesInvoiceAdmin(admin.ModelAdmin):
         "currency",
         "z_included",
         "z_posted",
+        "stock_out_done",
     )
     list_display_links = ("rm_number",)
     readonly_fields = ("issued_on", "issued_at")
@@ -207,6 +218,35 @@ class SalesInvoiceAdmin(admin.ModelAdmin):
     search_fields = ("rm_number", "location_name", "waiter_name", "buyer_name", "issued_on__exact")
     actions = [import_sales_invoices_action, post_sales_z_action]
     change_list_template = "admin/sales/salesinvoice/change_list.html"
+
+    def lookup_allowed(self, lookup, value):
+        if lookup in ("issued_at__gte", "issued_at__lte"):
+            return True
+        return super().lookup_allowed(lookup, value)
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        from django.utils import timezone
+        from django.utils.dateparse import parse_datetime
+
+        issued_from_raw = request.GET.get("issued_at__gte")
+        issued_to_raw = request.GET.get("issued_at__lte")
+
+        if issued_from_raw:
+            issued_from = parse_datetime(issued_from_raw)
+            if issued_from and timezone.is_naive(issued_from):
+                issued_from = timezone.make_aware(issued_from)
+            if issued_from:
+                qs = qs.filter(issued_at__gte=issued_from)
+
+        if issued_to_raw:
+            issued_to = parse_datetime(issued_to_raw)
+            if issued_to and timezone.is_naive(issued_to):
+                issued_to = timezone.make_aware(issued_to)
+            if issued_to:
+                qs = qs.filter(issued_at__lte=issued_to)
+
+        return qs
     inlines = [SalesInvoiceItemInline]
     form = SalesInvoiceAdminForm
 
@@ -237,12 +277,18 @@ class SalesInvoiceAdmin(admin.ModelAdmin):
         qs = super().get_queryset(request)
         z_qs = SalesZPosting.objects.filter(
             issued_on=OuterRef("issued_on"),
-            location_id=OuterRef("location_id"),
+            warehouse_id=OuterRef("warehouse_id"),
             pos_id=OuterRef("pos_id"),
+            ledger_id=OuterRef("ledger_id"),
+        )
+        move_qs = StockMove.objects.filter(
+            move_type=StockMove.MoveType.OUT,
+            reference=Concat(Value("POS racun "), Cast(OuterRef("rm_number"), output_field=CharField())),
         )
         return qs.annotate(
             _z_included=Exists(z_qs),
             _z_posted=Exists(z_qs.filter(journal_entry__isnull=False)),
+            _stock_out_done=Exists(move_qs),
         )
 
     @admin.display(boolean=True, description="u Z", ordering="_z_included")
@@ -253,10 +299,14 @@ class SalesInvoiceAdmin(admin.ModelAdmin):
     def z_posted(self, obj):
         return getattr(obj, "_z_posted", False)
 
+    @admin.display(boolean=True, description="robno", ordering="_stock_out_done")
+    def stock_out_done(self, obj):
+        return getattr(obj, "_stock_out_done", False)
+
 
 @admin.register(SalesInvoiceItem)
 class SalesInvoiceItemAdmin(admin.ModelAdmin):
-    list_display = ("invoice", "product_name", "artikl", "quantity", "amount")
+    list_display = ("invoice", "product_name", "artikl", "quantity", "amount", "stock_out_done", "stock_move_link")
     class DrinkCategoryTreeCountFilter(TreeRelatedFieldListFilter):
         title = "kategorija napitaka"
 
@@ -352,10 +402,113 @@ class SalesInvoiceItemAdmin(admin.ModelAdmin):
                 return queryset.filter(artikl_id=self.value())
             return queryset
 
-    list_filter = (("artikl__drink_category", DrinkCategoryTreeCountFilter), ArtiklInSalesFilter, "invoice__issued_on")
+    class StockOutDoneFilter(admin.SimpleListFilter):
+        title = "robno"
+        parameter_name = "stock_out_done"
+
+        def lookups(self, request, model_admin):
+            return (("1", "Da"), ("0", "Ne"))
+
+        def queryset(self, request, queryset):
+            value = self.value()
+            if value == "1":
+                return queryset.filter(
+                    models.Q(stock_out_posted_at__isnull=False) | models.Q(_stock_out_done=True)
+                )
+            if value == "0":
+                return queryset.filter(
+                    stock_out_posted_at__isnull=True
+                ).exclude(_stock_out_done=True)
+            return queryset
+
+    list_filter = (
+        "invoice__issued_on",
+        ("artikl__drink_category", DrinkCategoryTreeCountFilter),
+        ArtiklInSalesFilter,
+        StockOutDoneFilter,
+    )
     search_fields = ("product_name", "invoice__rm_number", "artikl__name", "artikl__code")
     autocomplete_fields = ("artikl",)
     change_list_template = "admin/sales/salesinvoiceitem/change_list.html"
+    actions = ["post_sales_items_stock_out_action"]
+
+    def lookup_allowed(self, lookup, value):
+        if lookup in ("invoice__issued_at__gte", "invoice__issued_at__lte"):
+            return True
+        return super().lookup_allowed(lookup, value)
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        from django.utils import timezone
+        from django.utils.dateparse import parse_datetime
+
+        issued_from_raw = request.GET.get("invoice__issued_at__gte")
+        issued_to_raw = request.GET.get("invoice__issued_at__lte")
+
+        if issued_from_raw:
+            issued_from = parse_datetime(issued_from_raw)
+            if issued_from and timezone.is_naive(issued_from):
+                issued_from = timezone.make_aware(issued_from)
+            if issued_from:
+                qs = qs.filter(invoice__issued_at__gte=issued_from)
+
+        if issued_to_raw:
+            issued_to = parse_datetime(issued_to_raw)
+            if issued_to and timezone.is_naive(issued_to):
+                issued_to = timezone.make_aware(issued_to)
+            if issued_to:
+                qs = qs.filter(invoice__issued_at__lte=issued_to)
+
+        return qs
+
+    @admin.action(description="Robno razduži (stavke)", permissions=["change"])
+    def post_sales_items_stock_out_action(self, request, queryset):
+        created = 0
+        skipped = 0
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        items_by_invoice = {}
+        for item in queryset.select_related("invoice", "invoice__warehouse", "artikl"):
+            if item.stock_out_posted_at:
+                skipped += 1
+                warnings.append(f"Stavka {item.id} već je razdužena.")
+                continue
+            if not item.invoice_id:
+                skipped += 1
+                errors.append(f"Stavka {item.id}: nema racun.")
+                continue
+            items_by_invoice.setdefault(item.invoice_id, {"invoice": item.invoice, "items": []})
+            items_by_invoice[item.invoice_id]["items"].append(item)
+
+        for data in items_by_invoice.values():
+            invoice = data["invoice"]
+            items = data["items"]
+            try:
+                move, skipped_items = post_sales_items_stock_out(
+                    invoice=invoice,
+                    items=items,
+                    user=request.user,
+                )
+                created += 1
+                SalesInvoiceItem.objects.filter(id__in=[i.id for i in items]).update(
+                    stock_out_posted_at=timezone.now()
+                )
+                for msg in skipped_items:
+                    warnings.append(f"Racun {invoice.rm_number}: {msg}")
+            except Exception as exc:
+                skipped += 1
+                errors.append(f"Racun {invoice.rm_number}: {exc}")
+
+        self.message_user(
+            request,
+            f"Razduzenje gotovo. created={created} skipped={skipped}",
+            level=messages.SUCCESS,
+        )
+        for msg in warnings[:20]:
+            self.message_user(request, msg, level=messages.WARNING)
+        for msg in errors[:20]:
+            self.message_user(request, msg, level=messages.ERROR)
 
     def changelist_view(self, request, extra_context=None):
         response = super().changelist_view(request, extra_context=extra_context)
@@ -378,26 +531,72 @@ class SalesInvoiceItemAdmin(admin.ModelAdmin):
         response.context_data["totals_amount"] = f"{amt:.2f}".replace(".", ",")
         return response
 
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        move_qs = StockMove.objects.filter(
+            move_type=StockMove.MoveType.OUT,
+            purpose=StockMove.Purpose.SALE,
+            reference=Concat(
+                Value("POS racun "),
+                Cast(OuterRef("invoice__rm_number"), output_field=CharField()),
+            ),
+        ).values("id")[:1]
+        ingredient_rm_ids = NormativItem.objects.filter(
+            normativ__product_id=OuterRef("artikl_id"),
+            normativ__is_active=True,
+        ).values("ingredient__rm_id")
+        move_line_qs = StockMoveLine.objects.filter(
+            move__move_type=StockMove.MoveType.OUT,
+            move__purpose=StockMove.Purpose.SALE,
+            move__reference=Concat(
+                Value("POS racun "),
+                Cast(OuterRef("invoice__rm_number"), output_field=CharField()),
+            ),
+            warehouse_id=OuterRef("invoice__warehouse__rm_id"),
+        ).filter(
+            Q(artikl_id=OuterRef("artikl__rm_id")) | Q(artikl_id__in=Subquery(ingredient_rm_ids))
+        )
+        return qs.annotate(
+            _stock_out_done=Exists(move_line_qs),
+            _stock_move_id=Subquery(move_qs),
+        )
+
+    @admin.display(boolean=True, description="robno", ordering="_stock_out_done")
+    def stock_out_done(self, obj):
+        if getattr(obj, "stock_out_posted_at", None):
+            return True
+        return getattr(obj, "_stock_out_done", False)
+
+    @admin.display(description="stock move", ordering="_stock_move_id")
+    def stock_move_link(self, obj):
+        move_id = getattr(obj, "_stock_move_id", None)
+        if not move_id:
+            return "-"
+        url = reverse("admin:stock_stockmove_change", args=[move_id])
+        return format_html('<a href="{}">#{}</a>', url, move_id)
+
 
 @admin.register(SalesZPosting)
 class SalesZPostingAdmin(admin.ModelAdmin):
     list_display = (
         "issued_on_display",
-        "location_id",
-        "pos_id",
+        "warehouse",
+        "pos",
         "net_amount",
         "vat_amount",
+        "pnp_amount",
         "total_amount",
         "cash_account",
         "revenue_account",
         "vat_account",
+        "pnp_account",
         "journal_entry",
         "posted_at",
         "posted_by",
     )
-    list_filter = ("issued_on", "location_id", "pos_id")
-    search_fields = ("issued_on", "location_id", "pos_id")
-    autocomplete_fields = ("cash_account", "revenue_account", "vat_account")
+    list_filter = ("issued_on", "warehouse", "pos")
+    search_fields = ("issued_on", "warehouse__name", "pos__name")
+    autocomplete_fields = ("cash_account", "revenue_account", "vat_account", "pnp_account")
     actions = ["post_z_to_journal_action"]
 
     @admin.action(description="Post Z u Journal", permissions=["change"])
@@ -418,10 +617,11 @@ class SalesZPostingAdmin(admin.ModelAdmin):
             results.append(
                 {
                     "issued_on": str(posting.issued_on),
-                    "location_id": posting.location_id,
-                    "pos_id": posting.pos_id,
+                    "warehouse": posting.warehouse.name if posting.warehouse_id else "",
+                    "pos": posting.pos.name if posting.pos_id else "",
                     "net_amount": f"{posting.net_amount:.2f}",
                     "vat_amount": f"{posting.vat_amount:.2f}",
+                    "pnp_amount": f"{posting.pnp_amount:.2f}",
                     "total_amount": f"{posting.total_amount:.2f}",
                     "status": status,
                     "note": note,
@@ -473,6 +673,112 @@ class RepresentationAdmin(admin.ModelAdmin):
         if qty is None:
             return "0,0000"
         return f"{qty:.4f}".replace(".", ",")
+
+
+@admin.register(RepresentationItem)
+class RepresentationItemAdmin(admin.ModelAdmin):
+    list_display = ("representation", "artikl", "quantity", "price", "transfer_done")
+    list_filter = ("representation__warehouse", "representation__occurred_at")
+    search_fields = ("artikl__name", "artikl__code", "representation__note")
+    actions = ["create_transfer_to_rep_warehouse"]
+
+    @admin.action(description="Međuskladišnica za reprezentaciju → skladište Pomoćno (rm_id=8)", permissions=["change"])
+    def create_transfer_to_rep_warehouse(self, request, queryset):
+        created = 0
+        skipped = 0
+        errors: list[str] = []
+
+        target_warehouse = WarehouseId.objects.filter(rm_id=8).first()
+        if not target_warehouse:
+            self.message_user(request, "Ne postoji WarehouseId rm_id=8 (Pomoćno).", level=messages.ERROR)
+            return
+
+        by_rep = {}
+        for item in queryset.select_related("representation", "representation__warehouse", "artikl"):
+            if item.transfer_posted_at:
+                skipped += 1
+                errors.append(f"Stavka {item.id} već je prebačena.")
+                continue
+            if not item.representation_id:
+                skipped += 1
+                errors.append(f"Stavka {item.id}: nema reprezentacije.")
+                continue
+            by_rep.setdefault(item.representation_id, {"rep": item.representation, "items": []})
+            by_rep[item.representation_id]["items"].append(item)
+
+        for data in by_rep.values():
+            rep = data["rep"]
+            items = data["items"]
+            if not rep.warehouse_id:
+                skipped += 1
+                errors.append(f"Reprezentacija {rep.id}: nema skladište.")
+                continue
+            payload = {}
+            for item in items:
+                if not item.artikl_id:
+                    continue
+                if item.quantity <= 0:
+                    continue
+                normativ = getattr(item.artikl, "normativ", None)
+                if normativ and normativ.items.exists():
+                    for norm_item in normativ.items.select_related("ingredient"):
+                        if not norm_item.ingredient_id:
+                            continue
+                        qty = norm_item.qty * item.quantity
+                        if qty <= 0:
+                            continue
+                        entry = payload.setdefault(norm_item.ingredient_id, {"artikl": norm_item.ingredient, "quantity": 0})
+                        entry["quantity"] += qty
+                else:
+                    entry = payload.setdefault(item.artikl_id, {"artikl": item.artikl, "quantity": 0})
+                    entry["quantity"] += item.quantity
+            if not payload:
+                skipped += 1
+                errors.append(f"Reprezentacija {rep.id}: nema stavki za transfer.")
+                continue
+
+            transfer = WarehouseTransfer.objects.create(
+                from_warehouse=rep.warehouse,
+                to_warehouse=target_warehouse,
+                date=rep.occurred_at,
+                dont_change_inventory_quantity=False,
+                status=WarehouseTransfer.Status.DRAFT,
+                created_by=request.user,
+                note=f"Reprezentacija {rep.id} (FIFO)",
+            )
+            created_items = 0
+            for entry in payload.values():
+                artikl = entry["artikl"]
+                quantity = entry["quantity"]
+                if quantity <= 0:
+                    continue
+                WarehouseTransferItem.objects.create(
+                    transfer=transfer,
+                    artikl=artikl,
+                    quantity=quantity,
+                    unit=getattr(getattr(artikl, "detail", None), "unit_of_measure", None),
+                )
+                created_items += 1
+            for item in items:
+                item.transfer_posted_at = timezone.now()
+                item.save(update_fields=["transfer_posted_at"])
+            created += 1
+            self.message_user(
+                request,
+                f"Reprezentacija {rep.id}: kreirano {created_items} stavki (normativno prošireno).",
+                level=messages.INFO,
+            )
+
+        if created:
+            self.message_user(request, f"Kreirano međuskladišnica: {created}", level=messages.SUCCESS)
+        if skipped:
+            self.message_user(request, f"Preskočeno: {skipped}", level=messages.WARNING)
+        for msg in errors[:20]:
+            self.message_user(request, msg, level=messages.ERROR)
+
+    @admin.display(boolean=True, description="transfer", ordering="transfer_posted_at")
+    def transfer_done(self, obj):
+        return bool(obj.transfer_posted_at)
 
     def save_model(self, request, obj, form, change):
         if not obj.user_id:

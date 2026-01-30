@@ -21,6 +21,7 @@ from stock.models import (
     ReplenishRequestLine,
     StockAllocation,
     StockAccountingConfig,
+    StockCostSnapshot,
     StockLot,
     StockMove,
     StockMoveLine,
@@ -420,7 +421,8 @@ def send_warehouse_transfer_to_remaris(modeladmin, request, queryset):
                 transfer.remaris_id = response.get("warehouseTransferId")
                 transfer.last_error = ""
                 transfer.last_synced_at = timezone.now()
-                transfer.status = WarehouseTransfer.Status.SENT
+                if transfer.status != WarehouseTransfer.Status.POSTED_INTERNAL:
+                    transfer.status = WarehouseTransfer.Status.SENT
                 transfer.save(
                     update_fields=["remaris_id", "last_error", "last_synced_at", "status"]
                 )
@@ -739,6 +741,18 @@ def create_transfer_for_inventory_shortage(modeladmin, request, queryset):
 
 @admin.register(WarehouseStock)
 class WarehouseStockAdmin(admin.ModelAdmin):
+    @admin.display(description="latest cost")
+    def latest_cost(self, obj):
+        snapshot = (
+            StockCostSnapshot.objects.filter(warehouse=obj.warehouse_id, artikl=obj.product)
+            .order_by("-as_of_date")
+            .only("avg_cost", "as_of_date")
+            .first()
+        )
+        if not snapshot:
+            return "—"
+        return f"{snapshot.avg_cost:.4f} ({snapshot.as_of_date:%Y-%m-%d})"
+
     list_display = (
         "warehouse_id",
         "wh_id",
@@ -750,6 +764,7 @@ class WarehouseStockAdmin(admin.ModelAdmin):
         "internal_quantity",
         "internal_avg_cost",
         "internal_updated_at",
+        "latest_cost",
         "base_group_name",
         "active",
     )
@@ -817,6 +832,13 @@ class WarehouseIdAdmin(admin.ModelAdmin):
         func = self.get_actions(request)["import_warehouse_ids"][0]
         func(self, request, WarehouseId.objects.all())
         return HttpResponseRedirect(reverse("admin:stock_warehouseid_changelist"))
+
+
+@admin.register(StockCostSnapshot)
+class StockCostSnapshotAdmin(admin.ModelAdmin):
+    list_display = ("as_of_date", "warehouse", "artikl", "qty_on_hand", "avg_cost", "total_value", "calculated_at")
+    list_filter = ("as_of_date", "warehouse")
+    search_fields = ("artikl__name", "artikl__code", "warehouse__name")
 
     def response_action(self, request, queryset):
         action = request.POST.get("action")
@@ -923,7 +945,7 @@ class WarehouseTransferAdmin(admin.ModelAdmin):
 
         transfers = queryset.select_related("from_warehouse", "to_warehouse").prefetch_related("items__artikl")
         for transfer in transfers:
-            if transfer.status == WarehouseTransfer.Status.SENT:
+            if transfer.status == WarehouseTransfer.Status.POSTED_INTERNAL:
                 skipped += 1
                 continue
             if transfer.dont_change_inventory_quantity:
@@ -1011,7 +1033,7 @@ class WarehouseTransferAdmin(admin.ModelAdmin):
                         reference=f"Transfer #{transfer.id}",
                         note=transfer.note or "",
                     )
-                transfer.status = WarehouseTransfer.Status.SENT
+                transfer.status = WarehouseTransfer.Status.POSTED_INTERNAL
                 transfer.last_error = ""
                 transfer.last_synced_at = timezone.now()
                 transfer.save(update_fields=["status", "last_error", "last_synced_at"])

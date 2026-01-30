@@ -3,6 +3,41 @@
 {% block extrastyle %}
 {{ block.super }}
 <style>
+  .salesinvoiceitem-date-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0 0 12px;
+    padding: 6px 8px;
+    border: 1px solid var(--hairline-color);
+    border-radius: 4px;
+    background: var(--body-bg);
+  }
+  .salesinvoiceitem-date-filter input[type="date"] {
+    min-width: 160px;
+    padding: 4px 6px;
+    border: 1px solid var(--hairline-color);
+    border-radius: 4px;
+    background: var(--body-bg);
+    color: var(--body-fg);
+  }
+  .salesinvoiceitem-date-filter label {
+    color: var(--body-quiet-color);
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+  .salesinvoiceitem-date-filter button {
+    padding: 4px 10px;
+    border: 1px solid var(--hairline-color);
+    border-radius: 4px;
+    background: var(--button-bg);
+    color: var(--button-fg);
+  }
+  .salesinvoiceitem-date-filter button:hover {
+    filter: brightness(0.98);
+  }
   #changelist-filter {
     width: auto;
     max-width: none;
@@ -11,6 +46,22 @@
     white-space: nowrap;
   }
 </style>
+{% endblock %}
+
+{% block search %}
+{{ block.super }}
+<form method="get" class="salesinvoiceitem-date-filter">
+  {% for key, value in cl.params.items %}
+    {% if key != "invoice__issued_on__exact" and key != "invoice__issued_at__gte" and key != "invoice__issued_at__lte" and key != "p" %}
+      <input type="hidden" name="{{ key }}" value="{{ value }}">
+    {% endif %}
+  {% endfor %}
+  <label for="issued_at_from">Vrijeme od</label>
+  <input id="issued_at_from" type="datetime-local" name="invoice__issued_at__gte" value="{{ request.GET.invoice__issued_at__gte|default_if_none:'' }}">
+  <label for="issued_at_to">do</label>
+  <input id="issued_at_to" type="datetime-local" name="invoice__issued_at__lte" value="{{ request.GET.invoice__issued_at__lte|default_if_none:'' }}">
+  <button type="submit">Filtriraj</button>
+</form>
 {% endblock %}
 
 {% block result_list %}

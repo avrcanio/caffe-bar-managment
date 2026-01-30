@@ -1,64 +1,58 @@
 {% extends "admin/change_list.html" %}
 
-{% block search %}
+{% block extrastyle %}
 {{ block.super }}
-<div class="submit-row" style="margin-top: 8px;">
-    <form method="get" style="display: inline-flex; gap: 6px; align-items: center;">
-        {% for key, value in request.GET.items %}
-            {% if key != "issued_on__exact" %}
-                <input type="hidden" name="{{ key }}" value="{{ value }}">
-            {% endif %}
-        {% endfor %}
-        <label for="id_issued_on_exact">Datum:</label>
-        <input id="id_issued_on_exact" type="date" name="issued_on__exact" value="{{ request.GET.issued_on__exact }}">
-        <button type="submit">Filtriraj</button>
-    </form>
-</div>
+<style>
+  .salesinvoice-date-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0 0 12px;
+    padding: 6px 8px;
+    border: 1px solid var(--hairline-color);
+    border-radius: 4px;
+    background: var(--body-bg);
+  }
+  .salesinvoice-date-filter input[type="date"] {
+    min-width: 150px;
+    padding: 4px 6px;
+    border: 1px solid var(--hairline-color);
+    border-radius: 4px;
+    background: var(--body-bg);
+    color: var(--body-fg);
+  }
+  .salesinvoice-date-filter label {
+    color: var(--body-quiet-color);
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+  .salesinvoice-date-filter button {
+    padding: 4px 10px;
+    border: 1px solid var(--hairline-color);
+    border-radius: 4px;
+    background: var(--button-bg);
+    color: var(--button-fg);
+  }
+  .salesinvoice-date-filter button:hover {
+    filter: brightness(0.98);
+  }
+</style>
 {% endblock %}
 
-{% block result_list %}
+{% block search %}
 {{ block.super }}
-{% if z_batch_results %}
-<div class="results">
-    <table>
-        <caption>{{ z_batch_title|default:"Z batch rezultati" }}</caption>
-        <thead>
-            <tr>
-                <th>Datum</th>
-                <th>Lokacija</th>
-                <th>POS</th>
-                <th>Net</th>
-                <th>PDV</th>
-                <th>Bruto</th>
-                <th>Status</th>
-                <th>Napomena</th>
-            </tr>
-        </thead>
-        <tbody>
-            {% for r in z_batch_results %}
-            <tr>
-                <td>{{ r.issued_on }}</td>
-                <td>{{ r.location_id }}</td>
-                <td>{{ r.pos_id }}</td>
-                <td>{{ r.net_amount }}</td>
-                <td>{{ r.vat_amount }}</td>
-                <td>{{ r.total_amount }}</td>
-                <td>{{ r.status }}</td>
-                <td>{{ r.note }}</td>
-            </tr>
-            {% endfor %}
-        </tbody>
-    </table>
-</div>
-{% endif %}
-<div class="results">
-    <table>
-        <tbody>
-            <tr>
-                <th scope="row">Grand total amount (filtered)</th>
-                <td>{{ grand_total_amount }}</td>
-            </tr>
-        </tbody>
-    </table>
-</div>
+<form method="get" class="salesinvoice-date-filter">
+  {% for key, value in cl.params.items %}
+    {% if key != "issued_on__exact" and key != "issued_at__gte" and key != "issued_at__lte" and key != "p" %}
+      <input type="hidden" name="{{ key }}" value="{{ value }}">
+    {% endif %}
+  {% endfor %}
+  <label for="issued_at_from">Vrijeme od</label>
+  <input id="issued_at_from" type="datetime-local" name="issued_at__gte" value="{{ request.GET.issued_at__gte|default_if_none:'' }}">
+  <label for="issued_at_to">do</label>
+  <input id="issued_at_to" type="datetime-local" name="issued_at__lte" value="{{ request.GET.issued_at__lte|default_if_none:'' }}">
+  <button type="submit">Filtriraj</button>
+</form>
 {% endblock %}

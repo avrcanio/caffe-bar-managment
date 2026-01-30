@@ -10,6 +10,7 @@
 - [StockMove](#stockmove)
 - [StockMoveLine](#stockmoveline)
 - [StockAllocation](#stockallocation)
+- [Nabavna cijena (snapshot)](#nabavna-cijena-snapshot)
 - [Servisi](#servisi)
 - [IN: Primka → lotovi](#in-primka-→-lotovi)
 - [OUT: FIFO alokacija](#out-fifo-alokacija)
@@ -56,6 +57,25 @@ Veza OUT → lot:
 - `lot`
 - `qty`
 - `unit_cost`
+
+## Nabavna cijena (snapshot)
+Za dnevni pregled nabavne cijene po skladištu koristi se `StockCostSnapshot`:
+- `warehouse`, `artikl`, `as_of_date`
+- `qty_on_hand`, `avg_cost`, `total_value`
+
+Snapshot se računa komandno:
+```
+python manage.py recalc_stock_costs --date=YYYY-MM-DD --warehouse=<rm_id>
+```
+
+Pravila:
+- računa se **po skladištu**
+- uključuje **samo artikle koji imaju izlaz (OUT) taj dan**
+- koristi FIFO lotove do `as_of_date`
+
+UI:
+- u `WarehouseStock` listi se prikazuje “latest cost” (zadnji snapshot)
+- snapshoti su dostupni u adminu (`StockCostSnapshot`)
 
 ## Servisi
 

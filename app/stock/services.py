@@ -186,6 +186,7 @@ def post_stock_out(
     auto_cogs: bool = True,
     cogs_account=None,
     inventory_account=None,
+    posted_by=None,
 ) -> StockMove:
     if not warehouse:
         raise ValidationError("Skladiste je obavezno.")
@@ -294,6 +295,7 @@ def post_stock_out(
             move=move,
             cogs_account=cogs_account,
             inventory_account=inventory_account,
+            posted_by=posted_by,
         )
 
     return move
@@ -536,7 +538,7 @@ def reverse_stock_move(*, move: StockMove, move_date=None, reference: str = "", 
 
 
 @transaction.atomic
-def post_cogs_for_stock_move(*, move: StockMove, cogs_account, inventory_account) -> JournalEntry:
+def post_cogs_for_stock_move(*, move: StockMove, cogs_account, inventory_account, posted_by=None) -> JournalEntry:
     if move.move_type != StockMove.MoveType.OUT:
         raise ValidationError("Financijsko knjizenje COGS moguce je samo za OUT kretanja.")
     if move.journal_entry_id:
@@ -566,11 +568,12 @@ def post_cogs_for_stock_move(*, move: StockMove, cogs_account, inventory_account
         raise ValidationError("Ukupni FIFO trosak mora biti > 0.")
 
     ledger = get_single_ledger()
+    description = f"COGS {move.reference}".strip() if move.reference else f"COGS izlaz #{move.id}"
     entry = JournalEntry.objects.create(
         ledger=ledger,
         number=_next_entry_number(ledger),
         date=move.date.date(),
-        description=f"COGS izlaz #{move.id}",
+        description=description,
         status=JournalEntry.Status.DRAFT,
     )
 
@@ -589,7 +592,7 @@ def post_cogs_for_stock_move(*, move: StockMove, cogs_account, inventory_account
         description="Zaliha robe",
     )
 
-    entry.post()
+    entry.post(user=posted_by)
     move.journal_entry = entry
     move.save(update_fields=["journal_entry"])
     return entry
@@ -672,10 +675,19 @@ def refresh_internal_warehouse_stock(*, warehouse_ids: list[int] | None = None, 
         value = row["value"] or Decimal("0.0000")
         avg_cost = (value / qty) if qty else Decimal("0.0000")
 
-        stock_row = WarehouseStock.objects.filter(
-            warehouse_id_id=wh_id,
-            product_id=artikl_id,
-        ).first()
+        stock_row = (
+            WarehouseStock.objects
+            .filter(warehouse_id_id=wh_id, product_id=artikl_id, wh_id__isnull=False)
+            .first()
+        )
+        fallback_row = None
+        if not stock_row:
+            fallback_row = WarehouseStock.objects.filter(
+                warehouse_id_id=wh_id,
+                product_id=artikl_id,
+                wh_id__isnull=True,
+            ).first()
+            stock_row = fallback_row
         if not stock_row:
             artikl = Artikl.objects.filter(rm_id=artikl_id).first()
             stock_row = WarehouseStock.objects.create(
@@ -693,6 +705,8 @@ def refresh_internal_warehouse_stock(*, warehouse_ids: list[int] | None = None, 
         stock_row.internal_avg_cost = avg_cost
         stock_row.internal_updated_at = now
         stock_row.save(update_fields=["internal_quantity", "internal_avg_cost", "internal_updated_at"])
+        if stock_row.wh_id and fallback_row and fallback_row.id != stock_row.id:
+            fallback_row.delete()
 
 
 @transaction.atomic

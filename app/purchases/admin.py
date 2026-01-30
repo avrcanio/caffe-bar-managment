@@ -115,6 +115,7 @@ class SupplierInvoiceAdmin(admin.ModelAdmin):
                             amount=delta,
                             payment_account=obj.payment_account,
                             paid_date=paid_date,
+                            posted_by=request.user,
                         )
                     except ValidationError as exc:
                         messages.error(request, f"Plaćanje nije evidentirano: {exc}")
@@ -262,6 +263,7 @@ class SupplierInvoiceAdmin(admin.ModelAdmin):
                         cash_account=invoice.cash_account,
                         include_cash_payment=include_cash,
                         description=f"Ulazni racun {invoice.invoice_number}",
+                        posted_by=request.user,
                     )
                     if include_cash:
                         invoice.paid_cash = True
@@ -288,6 +290,7 @@ class SupplierInvoiceAdmin(admin.ModelAdmin):
                         deposit_account=invoice.deposit_account,
                         link_inputs=False,
                         description=f"Ulazni racun {invoice.invoice_number}",
+                        posted_by=request.user,
                     )
                     invoice.paid_cash = True
                     invoice.paid_at = invoice.paid_at or timezone.localdate()
@@ -305,6 +308,7 @@ class SupplierInvoiceAdmin(admin.ModelAdmin):
                         ap_account=invoice.ap_account,
                         deposit_account=invoice.deposit_account,
                         description=f"Ulazni racun {invoice.invoice_number} (odgoda)",
+                        posted_by=request.user,
                     )
                     invoice.payment_status = invoice.PaymentStatus.UNPAID
                     self.message_user(
@@ -414,6 +418,7 @@ class SupplierInvoiceAdmin(admin.ModelAdmin):
                     amount=amount,
                     payment_account=invoice.payment_account,
                     paid_date=paid_date,
+                    posted_by=request.user,
                 )
             except ValidationError as exc:
                 failed += 1

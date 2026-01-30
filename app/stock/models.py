@@ -50,6 +50,56 @@ class WarehouseStock(models.Model):
         verbose_name = "Stanje skladišta"
         verbose_name_plural = "Stanja skladišta"
 
+
+class StockCostSnapshot(models.Model):
+    warehouse = models.ForeignKey(
+        "stock.WarehouseId",
+        to_field="rm_id",
+        on_delete=models.PROTECT,
+        related_name="cost_snapshots",
+        verbose_name="Skladiste",
+    )
+    artikl = models.ForeignKey(
+        "artikli.Artikl",
+        to_field="rm_id",
+        on_delete=models.PROTECT,
+        related_name="cost_snapshots",
+        verbose_name="Artikl",
+    )
+    as_of_date = models.DateField(verbose_name="Datum")
+    qty_on_hand = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=0,
+        verbose_name="Kolicina",
+    )
+    avg_cost = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=0,
+        verbose_name="Prosjecna cijena",
+    )
+    total_value = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=0,
+        verbose_name="Vrijednost",
+    )
+    calculated_at = models.DateTimeField(auto_now=True, verbose_name="Izracunato")
+
+    def __str__(self) -> str:
+        return f"{self.warehouse} {self.artikl} ({self.as_of_date})"
+
+    class Meta:
+        verbose_name = "Snapshot nabavne cijene"
+        verbose_name_plural = "Snapshoti nabavnih cijena"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["warehouse", "artikl", "as_of_date"],
+                name="uniq_stock_cost_snapshot",
+            )
+        ]
+
 class ProductStockDS(models.Model):
     rm_id = models.IntegerField(unique=True)
     product = models.CharField(max_length=255)
@@ -70,6 +120,7 @@ class ProductStockDS(models.Model):
 class WarehouseId(models.Model):
     rm_id = models.IntegerField(unique=True)
     name = models.CharField(max_length=255)
+    external_location_id = models.IntegerField(null=True, blank=True, unique=True)
     hidden = models.BooleanField(default=False)
     ordinal = models.DecimalField(max_digits=20, decimal_places=12, null=True, blank=True)
 
@@ -163,6 +214,10 @@ class InventoryItem(models.Model):
             raise ValidationError({"artikl": "Artikl je obavezan."})
 
     def save(self, *args, **kwargs):
+        if not self.unit_id and self.artikl_id:
+            detail = getattr(self.artikl, "detail", None)
+            if detail and detail.unit_of_measure_id:
+                self.unit = detail.unit_of_measure
         super().save(*args, **kwargs)
         if self.inventory_id:
             self.inventory.update_status_from_items()
@@ -182,6 +237,7 @@ class WarehouseTransfer(models.Model):
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"
         SENT = "sent", "Sent"
+        POSTED_INTERNAL = "posted_internal", "Posted internal"
         FAILED = "failed", "Failed"
 
     from_warehouse = models.ForeignKey(
@@ -256,6 +312,13 @@ class WarehouseTransferItem(models.Model):
         on_delete=models.SET_NULL,
         related_name="warehouse_transfer_item_units",
     )
+
+    def save(self, *args, **kwargs):
+        if not self.unit_id and self.artikl_id and hasattr(self.artikl, "detail"):
+            detail = self.artikl.detail
+            if detail and detail.unit_of_measure_id:
+                self.unit_id = detail.unit_of_measure_id
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         name = self.artikl.name if self.artikl else "Artikl ?"

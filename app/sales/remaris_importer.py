@@ -14,6 +14,9 @@ from django.utils import timezone
 
 from artikli.remaris_connector import RemarisConnector
 from sales.models import SalesInvoice, SalesInvoiceItem
+from accounting.models import Ledger
+from stock.models import WarehouseId
+from pos.models import Pos
 from artikli.models import Artikl
 
 
@@ -333,6 +336,16 @@ def import_sales_invoices(
             if timezone.is_naive(issued_at):
                 issued_at = timezone.make_aware(issued_at, tz)
 
+            ledger = Ledger.objects.filter(external_organization_id=organization_id).first() or Ledger.objects.first()
+            warehouse = WarehouseId.objects.filter(external_location_id=location_id).first()
+            pos = Pos.objects.filter(external_pos_id=pos_id).first()
+            if not ledger:
+                raise ValueError(f"Nema Ledger mapiranja za organization_id={organization_id}.")
+            if not warehouse:
+                raise ValueError(f"Nema WarehouseId mapiranja za location_id={location_id}.")
+            if not pos:
+                raise ValueError(f"Nema POS mapiranja za pos_id={pos_id}.")
+
             defaults = {
                 "issued_at": issued_at,
                 "location_name": invoice.location_name,
@@ -340,9 +353,9 @@ def import_sales_invoices(
                 "waiter_name": invoice.waiter_name,
                 "total_amount": invoice.total_amount,
                 "currency": currency,
-                "organization_id": organization_id,
-                "location_id": location_id,
-                "pos_id": pos_id,
+                "ledger": ledger,
+                "warehouse": warehouse,
+                "pos": pos,
             }
             net_amount, vat_amount = _compute_net_vat(invoice.total_amount)
 

@@ -13,6 +13,7 @@
 - [5) Prodaja (robno + financijsko)](#5-prodaja-robno-+-financijsko)
 - [6) Transfer između skladišta](#6-transfer-izmedu-skladista)
 - [7) Storno](#7-storno)
+- [8) Reprezentacija (interno)](#8-reprezentacija-interno)
 
 
 Ovo su praktični koraci koje koristiš svaki dan u adminu.
@@ -80,5 +81,17 @@ Ovo su praktični koraci koje koristiš svaki dan u adminu.
 ## 7) Storno
 - Accounting: `JournalEntry.reverse()`.
 - Stock: `reverse_stock_move(...)` (ovisno o tipu).
+
+## 8) Reprezentacija (interno)
+Reprezentacija se vodi kao **interni transfer** u Pomoćno skladište.
+
+1. U `RepresentationItem` listi označi stavke.
+2. Pokreni akciju **“Međuskladišnica za reprezentaciju → skladište Pomoćno (rm_id=8)”**.
+3. Sustav:
+   - radi **normativ expansion** (prodajni artikl → ingredient artikli)
+   - spaja iste ingredient artikle u jednu stavku
+   - kreira `WarehouseTransfer` u statusu DRAFT
+
+Napomena: razduženje s Pomoćnog skladišta se razvija kasnije.
 
 [← Back to index](../index.md)

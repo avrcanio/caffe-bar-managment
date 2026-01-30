@@ -65,6 +65,7 @@ i koristi se u svakodnevnoj operativi za kontrolu blagajne po danima i smjenama.
 - StockAllocation (OUT → lot)
 - StockReservation
 - StockAccountingConfig (singleton)
+- StockCostSnapshot (dnevni snapshot nabavne cijene)
 
 ## Servisi
 - post_warehouse_input_to_stock
@@ -128,6 +129,8 @@ Ovaj dio je prošireni pregled sustava (izvorno objedinjena dokumentacija).
 
 ## Admin iskustvo
 - Admin akcije i UX poboljšanja
+- Date picker filteri u prodaji (SalesInvoice / SalesInvoiceItem)
+- “Latest cost” u WarehouseStock listi
 
 ## Testiranje i performanse
 - Testovi i optimizacije

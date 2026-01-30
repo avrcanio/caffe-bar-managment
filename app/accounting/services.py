@@ -256,7 +256,15 @@ def _next_entry_number(ledger: Ledger) -> int:
     return (last or 0) + 1
 
 
-def post_sales_invoice(*, document_type: DocumentType, date: date, net: Decimal, vat: Decimal, description: str = "") -> JournalEntry:
+def post_sales_invoice(
+    *,
+    document_type: DocumentType,
+    date: date,
+    net: Decimal,
+    vat: Decimal,
+    description: str = "",
+    posted_by=None,
+) -> JournalEntry:
     if not document_type.ar_account_id:
         raise ValidationError("DocumentType nema postavljen AR konto (kupci).")
     if not document_type.revenue_account_id:
@@ -296,7 +304,7 @@ def post_sales_invoice(*, document_type: DocumentType, date: date, net: Decimal,
             credit=vat,
         )
 
-    entry.post()
+    entry.post(user=posted_by)
     return entry
 
 
@@ -308,6 +316,7 @@ def post_sales_cash(
     vat: Decimal,
     cash_account: Account,
     description: str = "",
+    posted_by=None,
 ) -> JournalEntry:
     if not cash_account:
         raise ValidationError("Nedostaje cash konto.")
@@ -348,7 +357,7 @@ def post_sales_cash(
             credit=vat,
         )
 
-    entry.post()
+    entry.post(user=posted_by)
     return entry
 
 
@@ -360,6 +369,8 @@ def post_sales_cash_accounts(
     cash_account: Account,
     revenue_account: Account,
     vat_output_account: Account | None,
+    pnp_amount: Decimal = Decimal("0.00"),
+    pnp_account: Account | None = None,
     description: str = "",
     posted_by=None,
 ) -> JournalEntry:
@@ -377,6 +388,14 @@ def post_sales_cash_accounts(
         raise ValidationError("PDV konto mora biti u istom ledgeru.")
 
     gross = net + vat
+    if pnp_amount and pnp_amount > Decimal("0.00"):
+        if not pnp_account or not pnp_account.is_postable:
+            raise ValidationError("Nedostaje konto PnP obveze.")
+        if pnp_account.ledger_id != ledger.id:
+            raise ValidationError("PnP konto mora biti u istom ledgeru.")
+    revenue_credit = net - (pnp_amount or Decimal("0.00"))
+    if revenue_credit < Decimal("0.00"):
+        raise ValidationError("Prihod ne može biti negativan nakon PnP.")
     entry = JournalEntry.objects.create(
         ledger=ledger,
         number=_next_entry_number(ledger),
@@ -396,9 +415,17 @@ def post_sales_cash_accounts(
         entry=entry,
         account=revenue_account,
         debit=Decimal("0.00"),
-        credit=net,
+        credit=revenue_credit,
         description="Prihod od prodaje (osnovica)",
     )
+    if pnp_amount and pnp_amount > Decimal("0.00"):
+        JournalItem.objects.create(
+            entry=entry,
+            account=pnp_account,
+            debit=Decimal("0.00"),
+            credit=pnp_amount,
+            description="PnP obveza",
+        )
     if vat != Decimal("0.00"):
         JournalItem.objects.create(
             entry=entry,
@@ -421,6 +448,7 @@ def post_purchase_invoice_cash_from_items(
     deposit_total: Decimal | None = None,
     deposit_account: Account | None = None,
     description: str = "",
+    posted_by=None,
 ) -> JournalEntry:
     if not document_type.expense_account_id:
         raise ValidationError("DocumentType nema postavljen expense_account (trošak/nabava).")
@@ -485,7 +513,7 @@ def post_purchase_invoice_cash_from_items(
         description="Plaćeno gotovinom",
     )
 
-    entry.post()
+    entry.post(user=posted_by)
     return entry
 
 
@@ -498,6 +526,7 @@ def post_purchase_invoice_deferred_from_items(
     deposit_total: Decimal | None = None,
     deposit_account: Account | None = None,
     description: str = "",
+    posted_by=None,
 ) -> JournalEntry:
     if not document_type.expense_account_id:
         raise ValidationError("DocumentType nema postavljen expense_account (trošak/nabava).")
@@ -561,7 +590,7 @@ def post_purchase_invoice_deferred_from_items(
         description="Dobavljac (odgoda)",
     )
 
-    entry.post()
+    entry.post(user=posted_by)
     return entry
 
 
@@ -571,6 +600,7 @@ def post_supplier_invoice_payment(
     amount: Decimal,
     payment_account: Account,
     paid_date: date,
+    posted_by=None,
 ) -> JournalEntry:
     if invoice.payment_terms != invoice.PaymentTerms.DEFERRED:
         raise ValidationError("Placanje je dozvoljeno samo za odgođene racune.")
@@ -607,7 +637,7 @@ def post_supplier_invoice_payment(
         description="Placanje",
     )
 
-    entry.post()
+    entry.post(user=posted_by)
     return entry
 
 
@@ -620,6 +650,7 @@ def post_purchase_invoice_cash_from_inputs(
     deposit_account: Account | None = None,
     link_inputs: bool = True,
     description: str = "",
+    posted_by=None,
 ) -> JournalEntry:
     items = flatten_input_items(inputs)
     inputs_list = list(inputs)
@@ -632,6 +663,7 @@ def post_purchase_invoice_cash_from_inputs(
         cash_account=cash_account,
         deposit_account=deposit_account,
         description=description or "Ulazni račun (gotovina) - više primki",
+        posted_by=posted_by,
     )
     if link_inputs:
         for wi in inputs_list:
@@ -650,6 +682,7 @@ def post_purchase_invoice_close_receipt(
     cash_account: Account | None = None,
     include_cash_payment: bool = False,
     description: str = "",
+    posted_by=None,
 ) -> JournalEntry:
     if not document_type.counterpart_account_id:
         raise ValidationError("DocumentType nema postavljen konto protustavke.")
@@ -729,7 +762,7 @@ def post_purchase_invoice_close_receipt(
             description="Dobavljac",
         )
 
-    entry.post()
+    entry.post(user=posted_by)
     return entry
 
 

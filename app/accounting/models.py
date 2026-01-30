@@ -16,6 +16,7 @@ class Ledger(models.Model):
     """
     name = models.CharField(max_length=200)
     oib = models.CharField(max_length=11, blank=True, default="")
+    external_organization_id = models.IntegerField(null=True, blank=True, unique=True)
     company_profile = models.OneToOneField(
         "configuration.CompanyProfile",
         null=True,

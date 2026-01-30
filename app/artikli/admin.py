@@ -1,4 +1,5 @@
 import time
+from decimal import Decimal
 
 from django.contrib import admin, messages
 from django.http import HttpResponseRedirect
@@ -19,6 +20,8 @@ from .models import (
     SalesGroupData,
     UnitOfMeasureData,
 )
+from sales.models import SalesInvoiceItem
+from stock.models import StockCostSnapshot, StockLot, WarehouseId
 from .remaris_parser import parse_bool, parse_decimal, parse_hidden_inputs, parse_int
 from .remaris_connector import RemarisConnector
 
@@ -150,12 +153,13 @@ class ArtiklAdmin(admin.ModelAdmin):
         "drink_category",
         "is_sellable",
         "is_stock_item",
+        "normativ_cost_fifo",
         "image_preview",
     )
     search_fields = ("rm_id", "code", "name")
     actions = [import_artikli_from_remaris, import_artikl_details_from_remaris]
     inlines = []
-    readonly_fields = ("image_preview", "normativ_link")
+    readonly_fields = ("image_preview", "normativ_link", "normativ_cost_fifo_readonly")
     list_filter = (("drink_category", TreeRelatedFieldListFilter), "is_sellable", "is_stock_item")
     fields = (
         "rm_id",
@@ -170,6 +174,7 @@ class ArtiklAdmin(admin.ModelAdmin):
         "image",
         "image_preview",
         "normativ_link",
+        "normativ_cost_fifo_readonly",
         "note",
     )
 
@@ -183,8 +188,9 @@ class ArtiklAdmin(admin.ModelAdmin):
     def normativ_link(self, obj):
         if not obj or not obj.pk:
             return "—"
-        if hasattr(obj, "normativ") and obj.normativ_id:
-            url = reverse("admin:artikli_normativ_change", args=[obj.normativ_id])
+        normativ = getattr(obj, "normativ", None)
+        if normativ:
+            url = reverse("admin:artikli_normativ_change", args=[normativ.id])
             return format_html('<a href="{}" class="button">Uredi normativ</a>', url)
         url = reverse("admin:artikli_normativ_add")
         return format_html(
@@ -194,6 +200,61 @@ class ArtiklAdmin(admin.ModelAdmin):
         )
 
     normativ_link.short_description = "Normativ"
+
+    def _normativ_cost_fifo_for_warehouse(self, obj, warehouse):
+        total = Decimal("0.0000")
+        for item in obj.normativ.items.select_related("ingredient"):
+            if not item.ingredient_id or item.qty <= 0:
+                continue
+            remaining = item.qty
+            lots = (
+                StockLot.objects.filter(warehouse=warehouse, artikl=item.ingredient, qty_remaining__gt=0)
+                .order_by("received_at", "id")
+                .only("qty_remaining", "unit_cost")
+            )
+            for lot in lots:
+                if remaining <= 0:
+                    break
+                take = remaining if remaining <= lot.qty_remaining else lot.qty_remaining
+                total += take * lot.unit_cost
+                remaining -= take
+        return total
+
+    def _normativ_costs_by_warehouse(self, obj):
+        if not obj or not getattr(obj, "normativ", None):
+            return None
+        warehouse_ids = (
+            SalesInvoiceItem.objects.filter(artikl=obj, invoice__warehouse__isnull=False)
+            .values_list("invoice__warehouse__rm_id", flat=True)
+            .distinct()
+        )
+        warehouses = list(WarehouseId.objects.filter(rm_id__in=warehouse_ids).order_by("rm_id"))
+        if not warehouses:
+            return None
+        results = []
+        for warehouse in warehouses:
+            total = self._normativ_cost_fifo_for_warehouse(obj, warehouse)
+            results.append((warehouse, total))
+        return results
+
+    @admin.display(description="Normativ FIFO")
+    def normativ_cost_fifo(self, obj):
+        results = self._normativ_costs_by_warehouse(obj)
+        if not results:
+            return "—"
+        return "; ".join(
+            f"WH {warehouse.rm_id}: {total:.4f}" for warehouse, total in results
+        )
+
+    @admin.display(description="Normativ FIFO")
+    def normativ_cost_fifo_readonly(self, obj):
+        results = self._normativ_costs_by_warehouse(obj)
+        if not results:
+            return "—"
+        return "\n".join(
+            f"WH {warehouse.rm_id} ({warehouse.name}): {total:.4f}"
+            for warehouse, total in results
+        )
 
 
 class ArtiklDetailInline(admin.StackedInline):
@@ -249,7 +310,17 @@ class NormativInline(admin.StackedInline):
     show_change_link = True
 
 
-ArtiklAdmin.inlines = [NormativInline, ArtiklDetailInline]
+class StockCostSnapshotInline(admin.TabularInline):
+    model = StockCostSnapshot
+    extra = 0
+    can_delete = False
+    fk_name = "artikl"
+    fields = ("as_of_date", "warehouse", "qty_on_hand", "avg_cost", "total_value", "calculated_at")
+    readonly_fields = fields
+    ordering = ("-as_of_date",)
+
+
+ArtiklAdmin.inlines = [ArtiklDetailInline]
 
 
 class NormativItemInline(admin.TabularInline):

@@ -37,6 +37,12 @@ Standardno konta:
 - cash: **10220** (Novac u blagajni)
 - revenue: **7603** (Prihodi od prodaje robe na malo)
 - vat: **2400** (Obveze za PDV)
+- pnp: **2481** (Obveza za porez na potrošnju u ugostiteljstvu)
+
+PnP (porez na potrošnju):
+- računa se po artiklima s `pnp_category`
+- stopa dolazi iz `CompanyProfile.lgu.pnp_rate`
+- iznos ulazi u `SalesZPosting.pnp_amount` i knjiži se na `pnp_account`
 
 ## Orkestracija prodaje
 `post_sale(...)`:
@@ -44,6 +50,10 @@ Standardno konta:
 2) COGS: automatski kroz config
 3) financije: `post_sales_cash(...)`
 4) audit: veže `StockMove.sales_journal_entry` na sales journal
+
+Operativno (admin):
+- `SalesInvoiceItem` ima akciju **"Robno razduži (stavke)"**
+- akcija kreira FIFO OUT i označava stavke kao razdužene
 
 ## Auto-replenish
 Ako prodaja ide sa šanka, a fali robe:

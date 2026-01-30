@@ -26,9 +26,30 @@ class SalesInvoice(models.Model):
         default=Decimal("0.00"),
     )
     currency = models.CharField(max_length=10, blank=True, default="")
-    organization_id = models.IntegerField(null=True, blank=True)
-    location_id = models.IntegerField(null=True, blank=True)
-    pos_id = models.IntegerField(null=True, blank=True)
+    ledger = models.ForeignKey(
+        "accounting.Ledger",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="sales_invoices",
+        db_column="organization_id",
+    )
+    warehouse = models.ForeignKey(
+        "stock.WarehouseId",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="sales_invoices",
+        db_column="location_id",
+    )
+    pos = models.ForeignKey(
+        "pos.Pos",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="sales_invoices",
+        db_column="pos_id",
+    )
 
     def __str__(self) -> str:
         return f"Racun {self.rm_number} ({self.issued_on:%Y-%m-%d})"
@@ -67,6 +88,8 @@ class SalesInvoiceItem(models.Model):
         null=True,
         blank=True,
     )
+    stock_out_posted_at = models.DateTimeField(null=True, blank=True)
+    stock_out_posted_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self) -> str:
         return f"{self.product_name} x {self.quantity}"
@@ -78,10 +101,31 @@ class SalesInvoiceItem(models.Model):
 
 class SalesZPosting(models.Model):
     issued_on = models.DateField()
-    location_id = models.IntegerField(null=True, blank=True)
-    pos_id = models.IntegerField(null=True, blank=True)
+    ledger = models.ForeignKey(
+        "accounting.Ledger",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="sales_z_postings",
+    )
+    warehouse = models.ForeignKey(
+        "stock.WarehouseId",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="sales_z_postings",
+        db_column="location_id",
+    )
+    pos = models.ForeignKey(
+        "pos.Pos",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="sales_z_postings",
+    )
     net_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     vat_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    pnp_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     cash_account = models.ForeignKey(
         "accounting.Account",
@@ -98,6 +142,13 @@ class SalesZPosting(models.Model):
         related_name="+",
     )
     vat_account = models.ForeignKey(
+        "accounting.Account",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    pnp_account = models.ForeignKey(
         "accounting.Account",
         null=True,
         blank=True,
@@ -121,8 +172,8 @@ class SalesZPosting(models.Model):
     posted_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self) -> str:
-        loc = self.location_id if self.location_id is not None else "?"
-        pos = self.pos_id if self.pos_id is not None else "?"
+        loc = self.warehouse.name if self.warehouse_id else "?"
+        pos = self.pos.name if self.pos_id else "?"
         return f"Z {self.issued_on} (lok {loc}, POS {pos})"
 
     class Meta:
@@ -130,7 +181,7 @@ class SalesZPosting(models.Model):
         verbose_name_plural = "Z knjiženja (promet)"
         constraints = [
             models.UniqueConstraint(
-                fields=["issued_on", "location_id", "pos_id"],
+                fields=["issued_on", "ledger", "warehouse", "pos"],
                 name="uq_sales_z_posting",
             )
         ]
@@ -204,6 +255,7 @@ class RepresentationItem(models.Model):
         default=Decimal("0.00"),
         verbose_name="Cijena",
     )
+    transfer_posted_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self) -> str:
         return f"{self.artikl} x {self.quantity}"

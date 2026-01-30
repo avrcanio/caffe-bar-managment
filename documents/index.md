@@ -49,6 +49,7 @@ Glavni ulaz u dokumentaciju.
 - [Migracije i testovi](technical/migrations-and-tests.md)
 - [Testiranje](technical/testing.md)
 - [Katalog servisa](technical/services-catalog.md)
+- [POS PIN autentikacija](technical/pos-pin.md)
 - [IMAP sinkronizacija](technical/imap-sync.md)
 - [Pravilo za rad s ChatGPT-om](technical/chatgpt-rules.md)
 

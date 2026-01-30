@@ -61,6 +61,7 @@ from stock.api import (
     WarehouseStockSyncView,
     WarehouseIdListView,
 )
+from pos.api import PosPinVerifyView
 from operations.api import (
     ShiftCashCountCreateView,
     ShiftCashSummaryView,
@@ -108,6 +109,7 @@ urlpatterns = [
     path("api/operations/shifts/", ShiftListCreateView.as_view(), name="api-shift-list-create"),
     path("api/operations/shifts/<int:shift_id>/cash-count/", ShiftCashCountCreateView.as_view(), name="api-shift-cash-count"),
     path("api/operations/shifts/<int:shift_id>/cash-summary/", ShiftCashSummaryView.as_view(), name="api-shift-cash-summary"),
+    path("api/pos/pin/verify/", PosPinVerifyView.as_view(), name="api-pos-pin-verify"),
     path("api/mailbox/sync/", MailboxSyncView.as_view(), name="api-mailbox-sync"),
     path("api/mailbox/messages/", MailMessageListView.as_view(), name="api-mailbox-messages"),
     path("api/mailbox/messages/<int:pk>/", MailMessageDetailView.as_view(), name="api-mailbox-message-detail"),

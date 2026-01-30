@@ -26,6 +26,8 @@ Ovaj dio opisuje admin akcije i UI poboljšanja.
 - Admin akcije:
   - “Proknjiži primku u skladište”
   - “Replenish Glavno → Šank”
+- `WarehouseStock` lista prikazuje “latest cost” (zadnji `StockCostSnapshot`)
+- `StockCostSnapshot` admin prikaz (dnevni snapshoti po skladištu)
 
 ## Admin — nabava
 - Kreiraj `SupplierInvoice` iz primki
@@ -40,5 +42,12 @@ Ovaj dio opisuje admin akcije i UI poboljšanja.
 - Reset polja samo na add formi
 - Pomoćne poruke i badge ADD/EDIT
 - Boje help_text ovisno o tipu
+
+## Admin — prodaja
+- `SalesInvoice` i `SalesInvoiceItem` imaju date-picker filtere (issued_at)
+- `SalesInvoiceItem`:
+  - akcija “Robno razduži (stavke)”
+  - True/False filter za “robno”
+  - link na `StockMove`
 
 [← Back to index](../index.md)
