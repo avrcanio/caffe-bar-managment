@@ -110,6 +110,12 @@ export default function Home() {
             ) : null}
           </div>
           <div className="flex flex-wrap items-center gap-3">
+            <Link
+              href="/ai"
+              className="rounded-full border border-black/20 px-5 py-2 text-xs uppercase tracking-[0.2em] text-black/70"
+            >
+              AI chat
+            </Link>
             <button
               onClick={async () => {
                 if (syncing) {

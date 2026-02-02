@@ -1,6 +1,7 @@
 from decimal import Decimal, ROUND_HALF_UP
 import secrets
 
+from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
@@ -74,6 +75,14 @@ class PurchaseOrder(models.Model):
         blank=True,
         related_name="purchase_orders",
         verbose_name="tip placanja",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="purchase_orders_created",
+        verbose_name="korisnik",
     )
     primka_created = models.BooleanField(default=False, verbose_name="primka kreirana")
 

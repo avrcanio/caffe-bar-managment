@@ -126,7 +126,7 @@ class SupplierInvoiceAdmin(admin.ModelAdmin):
                     )
 
                     obj.paid_at = paid_date
-                    total_payable = (obj.total_gross or Decimal("0.00")) + (obj.deposit_total or Decimal("0.00"))
+                    total_payable = obj.total_gross or Decimal("0.00")
                     if total_payable > Decimal("0.00") and new_paid >= total_payable:
                         obj.payment_status = obj.PaymentStatus.PAID
                         messages.success(request, "Račun je u potpunosti plaćen (PAID).")
@@ -390,7 +390,7 @@ class SupplierInvoiceAdmin(admin.ModelAdmin):
                 )
                 continue
 
-            total_payable = invoice.total_gross + invoice.deposit_total
+            total_payable = invoice.total_gross
             already_paid = invoice.paid_amount or Decimal("0.00")
             remaining = total_payable - already_paid
             amount = Decimal(amount_input) if amount_input else remaining

@@ -97,6 +97,7 @@ INSTALLED_APPS = [
     'sales',
     'operations',
     'pos',
+    'ai',
 ]
 
 MIDDLEWARE = [
@@ -201,15 +202,15 @@ USE_TZ = True
 # Celery
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0")
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
-CELERY_TIMEZONE = TIME_ZONE
+CELERY_TIMEZONE = os.getenv("CELERY_TIMEZONE", "Europe/Zagreb")
 CELERY_BEAT_SCHEDULE = {
     "imap-sync-every-minute": {
         "task": "mailbox_app.tasks.sync_imap_mailbox",
         "schedule": crontab(minute="*"),
     },
     "import-sales-invoices-daily": {
-        "task": "sales.tasks.import_sales_invoices_today",
-        "schedule": crontab(hour=23, minute=59),
+        "task": "sales.tasks.import_sales_invoices_previous_day",
+        "schedule": crontab(hour=6, minute=0),
     },
 }
 
@@ -246,4 +247,23 @@ REST_FRAMEWORK = {
 SPECTACULAR_SETTINGS = {
     "TITLE": "Mozzart API",
     "VERSION": "1.0.0",
+    "SERVE_AUTHENTICATION": [
+        "rest_framework.authentication.TokenAuthentication",
+    ],
+    "SERVE_PERMISSIONS": [
+        "rest_framework.permissions.AllowAny",
+    ],
+    "SECURITY": [
+        {"TokenAuth": []},
+    ],
+    "COMPONENTS": {
+        "securitySchemes": {
+            "TokenAuth": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "Authorization",
+                "description": "Token auth, format: Token <token>",
+            }
+        }
+    },
 }

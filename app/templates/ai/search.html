@@ -1,0 +1,61 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+  <div class="content">
+    <h1>AI pretraga artikala</h1>
+    <form method="get" style="margin: 16px 0;">
+      <label for="q">Upit</label>
+      <input
+        id="q"
+        name="q"
+        type="text"
+        value="{{ raw_query|default:'' }}"
+        placeholder="npr. pronadi mi artikl pelinkovac"
+        style="width: 420px; max-width: 100%; margin-left: 8px;"
+      />
+      <button type="submit" class="button" style="margin-left: 8px;">Trazi</button>
+    </form>
+
+    {% if query %}
+      <p>Pretraga: <strong>{{ query }}</strong> ({{ result_count }} rezultata)</p>
+      {% if results %}
+        <table class="listing" style="width: 100%; border-collapse: collapse;">
+          <thead>
+            <tr>
+              <th style="text-align: left;">ID</th>
+              <th style="text-align: left;">RM ID</th>
+              <th style="text-align: left;">Sifra</th>
+              <th style="text-align: left;">Naziv</th>
+              <th style="text-align: left;">Prodajni</th>
+              <th style="text-align: left;">Skladisni</th>
+              <th style="text-align: left;">Normativ</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in results %}
+              <tr>
+                <td>{{ item.id }}</td>
+                <td>{{ item.rm_id }}</td>
+                <td>{{ item.code }}</td>
+                <td>{{ item.name }}</td>
+                <td>{{ item.is_sellable|yesno:"da,ne" }}</td>
+                <td>{{ item.is_stock_item|yesno:"da,ne" }}</td>
+                <td>
+                  {% if item.normativ and item.normativ.items.all %}
+                    {% for ni in item.normativ.items.all %}
+                      {{ ni.ingredient.name }}{% if not forloop.last %}, {% endif %}
+                    {% endfor %}
+                  {% else %}
+                    -
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p>Nema rezultata.</p>
+      {% endif %}
+    {% endif %}
+  </div>
+{% endblock %}

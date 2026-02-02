@@ -7,6 +7,7 @@ from rest_framework.response import Response
 from rest_framework import serializers
 from drf_spectacular.utils import extend_schema
 from rest_framework.views import APIView
+from rest_framework.authtoken.views import ObtainAuthToken
 from django.shortcuts import get_object_or_404
 
 
@@ -103,3 +104,16 @@ class UserDetailView(APIView):
                 "is_superuser": user.is_superuser,
             }
         )
+
+
+class TokenView(ObtainAuthToken):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    class InputSerializer(serializers.Serializer):
+        username = serializers.CharField()
+        password = serializers.CharField()
+
+    @extend_schema(request=InputSerializer, responses={200: serializers.Serializer})
+    def post(self, request, *args, **kwargs):
+        return super().post(request, *args, **kwargs)

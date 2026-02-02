@@ -44,6 +44,15 @@ PnP (porez na potrošnju):
 - stopa dolazi iz `CompanyProfile.lgu.pnp_rate`
 - iznos ulazi u `SalesZPosting.pnp_amount` i knjiži se na `pnp_account`
 
+## POS račun (cash)
+Novi POS modul koristi `PosReceipt` i `PosReceiptItem`:
+- račun je **gotovina** (za sada)
+- PDV stopa je po stavci (`vat_rate`)
+- totals (net/vat/gross) se računaju iz stavki
+
+API:
+`POST /api/pos/receipts/` kreira POS račun iz stavki.
+
 ## Orkestracija prodaje
 `post_sale(...)`:
 1) robno: `post_stock_out(... purpose=SALE, auto_cogs=True)`

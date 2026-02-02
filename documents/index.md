@@ -50,6 +50,7 @@ Glavni ulaz u dokumentaciju.
 - [Testiranje](technical/testing.md)
 - [Katalog servisa](technical/services-catalog.md)
 - [POS PIN autentikacija](technical/pos-pin.md)
+- [Fiskalizacija (EDUC MVP)](technical/fiscalization.md)
 - [IMAP sinkronizacija](technical/imap-sync.md)
 - [Pravilo za rad s ChatGPT-om](technical/chatgpt-rules.md)
 

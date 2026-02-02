@@ -1,7 +1,15 @@
-from rest_framework import generics, serializers
+from datetime import date
+
+from django.utils import timezone
+from rest_framework import generics, serializers, status
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from artikli.models import Artikl
-from sales.models import Representation, RepresentationItem, RepresentationReason
+from sales.models import Representation, RepresentationItem, RepresentationReason, SalesInvoice
+from sales.remaris_importer import import_sales_invoices, load_import_defaults
+from sales.services import resolve_waiter_user
 
 
 class RepresentationItemSerializer(serializers.ModelSerializer):
@@ -91,3 +99,44 @@ class RepresentationReasonListView(generics.ListCreateAPIView):
 class RepresentationReasonDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = RepresentationReason.objects.all()
     serializer_class = RepresentationReasonSerializer
+
+
+class RemarisImportView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    class InputSerializer(serializers.Serializer):
+        date_from = serializers.DateField(required=False)
+        date_to = serializers.DateField(required=False)
+
+    def post(self, request):
+        serializer = self.InputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        date_from = serializer.validated_data.get("date_from") or timezone.localdate()
+        date_to = serializer.validated_data.get("date_to") or date_from
+
+        defaults = load_import_defaults()
+        created, updated, skipped = import_sales_invoices(
+            date_from=date_from,
+            date_to=date_to,
+            **defaults,
+        )
+
+        mapped = 0
+        for invoice in SalesInvoice.objects.filter(issued_on__gte=date_from, issued_on__lte=date_to, user__isnull=True):
+            user = resolve_waiter_user(invoice.waiter_name)
+            if user:
+                invoice.user = user
+                invoice.save(update_fields=["user"])
+                mapped += 1
+
+        return Response(
+            {
+                "date_from": date_from.isoformat(),
+                "date_to": date_to.isoformat(),
+                "created": created,
+                "updated": updated,
+                "skipped": skipped,
+                "mapped": mapped,
+            },
+            status=status.HTTP_200_OK,
+        )

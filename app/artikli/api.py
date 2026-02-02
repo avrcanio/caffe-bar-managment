@@ -116,7 +116,7 @@ class ArtiklDetailSerializer(serializers.ModelSerializer):
             {
                 "warehouse_id": row.warehouse_id.rm_id if row.warehouse_id else None,
                 "warehouse_name": row.warehouse_id.name if row.warehouse_id else None,
-                "quantity": row.quantity,
+                "quantity": row.internal_quantity,
             }
             for row in rows
         ]

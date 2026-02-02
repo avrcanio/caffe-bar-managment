@@ -1,12 +1,15 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+import logging
 from decimal import Decimal, ROUND_HALF_UP
 
 from django import forms
 from django.contrib import admin, messages
+from django.contrib.admin.views.main import ChangeList
 from django.db.models import Count, Exists, OuterRef, Q, Subquery, Sum
 from django.db.models import CharField, Value
 from django.db.models.functions import Cast, Concat
 from django.urls import reverse
+from django.utils.dateparse import parse_datetime
 from django.utils.html import format_html
 from stock.models import StockMove, StockMoveLine, WarehouseTransfer, WarehouseTransferItem, WarehouseId
 from django.utils import timezone
@@ -14,20 +17,96 @@ from mptt.admin import TreeRelatedFieldListFilter
 
 from artikli.models import NormativItem
 from sales.models import (
+    FiscalReceipt,
     Representation,
     RepresentationItem,
     RepresentationReason,
     SalesInvoice,
     SalesInvoiceItem,
+    SalesPriceItem,
+    SalesPriceList,
+    SalesPriceRule,
+    SalesPriceRuleItem,
+    ShiftTurnover,
+    ShiftTurnoverClose,
+    ShiftTurnoverExpense,
+    ShiftCashHandover,
     SalesZPosting,
 )
+from sales.fiscal import fiscalize_sales_invoice
 from sales.remaris_importer import import_sales_invoices, load_import_defaults
-from sales.services import create_sales_z, get_sales_z_summary, post_sales_items_stock_out, post_sales_z_posting
+from sales.remaris_pricelist import sync_sales_pricelist_to_remaris, transfer_sales_prices_to_pos
+from sales.services import create_sales_z, get_sales_z_summary, post_sales_items_stock_out, post_sales_z_posting, resolve_waiter_user, build_stock_in_lines_for_items
+from stock.services import post_stock_in
+
+logger = logging.getLogger(__name__)
 
 
 def _store_z_results(request, *, title: str, results: list[dict]):
     request.session["z_batch_title"] = title
     request.session["z_batch_results"] = results
+
+
+def _parse_datetime_local(value: str):
+    if not value:
+        return None
+    parsed = parse_datetime(value)
+    if parsed:
+        return parsed
+    for fmt in (
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%d.%m.%Y %H:%M",
+        "%d.%m.%Y %H.%M",
+    ):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+class _IgnoreIssuedAtParamsChangeList(ChangeList):
+    def get_filters_params(self, params=None):
+        params = super().get_filters_params(params)
+        for key in (
+            "issued_at__gte",
+            "issued_at__lte",
+            "invoice__issued_at__gte",
+            "invoice__issued_at__lte",
+        ):
+            params.pop(key, None)
+        return params
+
+
+@admin.action(description="Fiskaliziraj odabrane racune", permissions=["change"])
+def fiscalize_sales_invoices_action(modeladmin, request, queryset):
+    created = 0
+    updated = 0
+    skipped = 0
+    errors: list[str] = []
+
+    for invoice in queryset:
+        try:
+            receipt, was_created = FiscalReceipt.objects.get_or_create(invoice=invoice)
+            if receipt.status == FiscalReceipt.Status.SUCCESS:
+                skipped += 1
+                continue
+            fiscalize_sales_invoice(invoice, user=request.user)
+            if was_created:
+                created += 1
+            else:
+                updated += 1
+        except Exception as exc:
+            errors.append(f"Racun {invoice.rm_number}: {exc}")
+
+    modeladmin.message_user(
+        request,
+        f"Fiskalizacija: created={created} updated={updated} skipped={skipped}",
+        level=messages.SUCCESS,
+    )
+    for msg in errors[:20]:
+        modeladmin.message_user(request, msg, level=messages.ERROR)
 
 
 class SalesInvoiceItemInline(admin.TabularInline):
@@ -65,10 +144,17 @@ def import_sales_invoices_action(modeladmin, request, queryset):
         date_to=date_to,
         **defaults,
     )
+    mapped = 0
+    for invoice in SalesInvoice.objects.filter(issued_on__gte=date_from, issued_on__lte=date_to, user__isnull=True):
+        user = resolve_waiter_user(invoice.waiter_name)
+        if user:
+            invoice.user = user
+            invoice.save(update_fields=["user"])
+            mapped += 1
 
     modeladmin.message_user(
         request,
-        f"Import complete. created={created} updated={updated} skipped={skipped}",
+        f"Import complete. created={created} updated={updated} skipped={skipped} mapped={mapped}",
         level=messages.SUCCESS,
     )
 
@@ -124,6 +210,77 @@ def post_sales_z_action(modeladmin, request, queryset):
     )
     if results:
         _store_z_results(request, title="Rezultat Z knjiženja (akcija)", results=results)
+
+
+@admin.action(description="Kreiraj promet smjene", permissions=["change"])
+def create_shift_turnover_action(modeladmin, request, queryset):
+    created = 0
+    skipped = 0
+    results: list[str] = []
+    groups = {}
+    for invoice in queryset:
+        key = (invoice.issued_on, invoice.user_id, invoice.warehouse_id, invoice.pos_id)
+        groups.setdefault(key, []).append(invoice)
+
+    for (issued_on, user_id, warehouse_id, pos_id), invoices in groups.items():
+        if ShiftTurnover.objects.filter(
+            issued_on=issued_on,
+            user_id=user_id,
+            warehouse_id=warehouse_id,
+            pos_id=pos_id,
+        ).exists():
+            skipped += 1
+            continue
+        cash_invoices = [inv for inv in invoices if not getattr(inv, "is_card", False)]
+        total = sum((inv.total_amount or Decimal("0.00")) for inv in cash_invoices)
+        ShiftTurnover.objects.create(
+            issued_on=issued_on,
+            user_id=user_id,
+            warehouse_id=warehouse_id,
+            pos_id=pos_id,
+            total_amount=total,
+            invoice_count=len(cash_invoices),
+            invoice_ids=[inv.id for inv in cash_invoices],
+        )
+        created += 1
+        results.append(f"{issued_on} user={user_id} wh={warehouse_id} pos={pos_id}")
+
+    modeladmin.message_user(
+        request,
+        f"Promet smjene: created={created} skipped={skipped}",
+        level=messages.SUCCESS,
+    )
+
+@admin.action(description="Mapiraj konobara (waiter_name -> user)", permissions=["change"])
+def map_waiter_user_action(modeladmin, request, queryset):
+    updated = 0
+    skipped = 0
+    for invoice in queryset:
+        if invoice.user_id:
+            skipped += 1
+            continue
+        user = resolve_waiter_user(invoice.waiter_name)
+        if not user:
+            skipped += 1
+            continue
+        invoice.user = user
+        invoice.save(update_fields=["user"])
+        updated += 1
+    modeladmin.message_user(
+        request,
+        f"Mapiranje konobara gotovo. updated={updated} skipped={skipped}",
+        level=messages.SUCCESS,
+    )
+
+
+@admin.action(description="Označi kao kartica", permissions=["change"])
+def mark_invoices_as_card_action(modeladmin, request, queryset):
+    updated = queryset.exclude(is_card=True).update(is_card=True)
+    modeladmin.message_user(
+        request,
+        f"Oznaceno kao kartica: {updated}",
+        level=messages.SUCCESS,
+    )
 
 
 @admin.register(SalesInvoice)
@@ -199,25 +356,39 @@ class SalesInvoiceAdmin(admin.ModelAdmin):
 
     list_display = (
         "rm_number",
+        "report_from_display",
         "issued_on_display",
         "issued_at_display",
         "location_name",
         "waiter_name",
+        "user",
         "buyer_name",
         "net_amount",
         "vat_amount",
         "total_amount",
         "currency",
+        "is_card",
         "z_included",
         "z_posted",
         "stock_out_done",
     )
     list_display_links = ("rm_number",)
-    readonly_fields = ("issued_on", "issued_at")
-    list_filter = (IssuedOnTotalFilter, "issued_on", "waiter_name")
-    search_fields = ("rm_number", "location_name", "waiter_name", "buyer_name", "issued_on__exact")
-    actions = [import_sales_invoices_action, post_sales_z_action]
+    readonly_fields = ("report_from", "issued_on", "issued_at")
+    list_filter = (IssuedOnTotalFilter, "report_from", "issued_on", "waiter_name", "user")
+    search_fields = ("rm_number", "location_name", "waiter_name", "buyer_name", "issued_on__exact", "user__username")
+    inlines = [SalesInvoiceItemInline]
+    actions = [
+        import_sales_invoices_action,
+        post_sales_z_action,
+        fiscalize_sales_invoices_action,
+        map_waiter_user_action,
+        mark_invoices_as_card_action,
+        create_shift_turnover_action,
+    ]
     change_list_template = "admin/sales/salesinvoice/change_list.html"
+
+    def get_changelist(self, request, **kwargs):
+        return _IgnoreIssuedAtParamsChangeList
 
     def lookup_allowed(self, lookup, value):
         if lookup in ("issued_at__gte", "issued_at__lte"):
@@ -227,54 +398,24 @@ class SalesInvoiceAdmin(admin.ModelAdmin):
     def get_queryset(self, request):
         qs = super().get_queryset(request)
         from django.utils import timezone
-        from django.utils.dateparse import parse_datetime
 
         issued_from_raw = request.GET.get("issued_at__gte")
         issued_to_raw = request.GET.get("issued_at__lte")
 
         if issued_from_raw:
-            issued_from = parse_datetime(issued_from_raw)
+            issued_from = _parse_datetime_local(issued_from_raw)
             if issued_from and timezone.is_naive(issued_from):
                 issued_from = timezone.make_aware(issued_from)
             if issued_from:
                 qs = qs.filter(issued_at__gte=issued_from)
 
         if issued_to_raw:
-            issued_to = parse_datetime(issued_to_raw)
+            issued_to = _parse_datetime_local(issued_to_raw)
             if issued_to and timezone.is_naive(issued_to):
                 issued_to = timezone.make_aware(issued_to)
             if issued_to:
                 qs = qs.filter(issued_at__lte=issued_to)
 
-        return qs
-    inlines = [SalesInvoiceItemInline]
-    form = SalesInvoiceAdminForm
-
-    @admin.display(description="issued on", ordering="issued_on")
-    def issued_on_display(self, obj):
-        return obj.issued_on.strftime("%d.%m.%Y") if obj.issued_on else ""
-
-    @admin.display(description="issued at", ordering="issued_at")
-    def issued_at_display(self, obj):
-        return obj.issued_at.strftime("%d.%m.%Y %H:%M") if obj.issued_at else ""
-
-    def changelist_view(self, request, extra_context=None):
-        response = super().changelist_view(request, extra_context=extra_context)
-        try:
-            cl = response.context_data["cl"]
-        except (AttributeError, KeyError):
-            return response
-
-        totals = cl.queryset.aggregate(total=Sum("total_amount"))
-        total = totals.get("total") or Decimal("0.00")
-        total = total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        response.context_data["grand_total_amount"] = f"{total:.2f}".replace(".", ",")
-        response.context_data["z_batch_title"] = request.session.pop("z_batch_title", None)
-        response.context_data["z_batch_results"] = request.session.pop("z_batch_results", None)
-        return response
-
-    def get_queryset(self, request):
-        qs = super().get_queryset(request)
         z_qs = SalesZPosting.objects.filter(
             issued_on=OuterRef("issued_on"),
             warehouse_id=OuterRef("warehouse_id"),
@@ -291,6 +432,18 @@ class SalesInvoiceAdmin(admin.ModelAdmin):
             _stock_out_done=Exists(move_qs),
         )
 
+    @admin.display(description="report from", ordering="report_from")
+    def report_from_display(self, obj):
+        return obj.report_from.strftime("%d.%m.%Y") if obj.report_from else ""
+
+    @admin.display(description="issued on", ordering="issued_on")
+    def issued_on_display(self, obj):
+        return obj.issued_on.strftime("%d.%m.%Y") if obj.issued_on else ""
+
+    @admin.display(description="issued at", ordering="issued_at")
+    def issued_at_display(self, obj):
+        return obj.issued_at.strftime("%d.%m.%Y %H:%M") if obj.issued_at else ""
+
     @admin.display(boolean=True, description="u Z", ordering="_z_included")
     def z_included(self, obj):
         return getattr(obj, "_z_included", False)
@@ -302,6 +455,63 @@ class SalesInvoiceAdmin(admin.ModelAdmin):
     @admin.display(boolean=True, description="robno", ordering="_stock_out_done")
     def stock_out_done(self, obj):
         return getattr(obj, "_stock_out_done", False)
+
+
+@admin.register(ShiftTurnover)
+class ShiftTurnoverAdmin(admin.ModelAdmin):
+    list_display = (
+        "issued_on",
+        "user",
+        "warehouse",
+        "pos",
+        "invoice_count",
+        "total_amount",
+        "created_at",
+    )
+    list_filter = ("issued_on", "warehouse", "pos", "user")
+    search_fields = ("user__username",)
+    readonly_fields = ("created_at",)
+
+
+@admin.register(ShiftTurnoverClose)
+class ShiftTurnoverCloseAdmin(admin.ModelAdmin):
+    list_display = ("turnover", "cash_counted", "card_total", "created_by", "created_at")
+    list_filter = ("created_at",)
+    search_fields = ("turnover__user__username",)
+    readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(ShiftTurnoverExpense)
+class ShiftTurnoverExpenseAdmin(admin.ModelAdmin):
+    list_display = ("close", "amount", "note", "created_by", "created_at")
+    list_filter = ("created_at",)
+    search_fields = ("note", "close__turnover__user__username")
+    readonly_fields = ("created_at",)
+
+
+@admin.register(ShiftCashHandover)
+class ShiftCashHandoverAdmin(admin.ModelAdmin):
+    list_display = (
+        "turnover",
+        "kind",
+        "expected_amount",
+        "counted_amount",
+        "difference_amount",
+        "journal_entry_link",
+        "created_by",
+        "created_at",
+    )
+    list_filter = ("kind", "created_by", "created_at")
+    search_fields = ("note", "turnover__user__username")
+    readonly_fields = ("created_at", "difference_amount", "expected_amount")
+
+    def journal_entry_link(self, obj):
+        if not obj.journal_entry_id:
+            return "-"
+        url = reverse("admin:accounting_journalentry_change", args=[obj.journal_entry_id])
+        return format_html('<a href="{}">#{}</a>', url, obj.journal_entry_id)
+
+    journal_entry_link.short_description = "Temeljnica"
 
 
 @admin.register(SalesInvoiceItem)
@@ -413,7 +623,7 @@ class SalesInvoiceItemAdmin(admin.ModelAdmin):
             value = self.value()
             if value == "1":
                 return queryset.filter(
-                    models.Q(stock_out_posted_at__isnull=False) | models.Q(_stock_out_done=True)
+                    Q(stock_out_posted_at__isnull=False) | Q(_stock_out_done=True)
                 )
             if value == "0":
                 return queryset.filter(
@@ -430,36 +640,15 @@ class SalesInvoiceItemAdmin(admin.ModelAdmin):
     search_fields = ("product_name", "invoice__rm_number", "artikl__name", "artikl__code")
     autocomplete_fields = ("artikl",)
     change_list_template = "admin/sales/salesinvoiceitem/change_list.html"
-    actions = ["post_sales_items_stock_out_action"]
+    actions = ["post_sales_items_stock_out_action", "post_sales_items_stock_in_storno_action"]
+
+    def get_changelist(self, request, **kwargs):
+        return _IgnoreIssuedAtParamsChangeList
 
     def lookup_allowed(self, lookup, value):
         if lookup in ("invoice__issued_at__gte", "invoice__issued_at__lte"):
             return True
         return super().lookup_allowed(lookup, value)
-
-    def get_queryset(self, request):
-        qs = super().get_queryset(request)
-        from django.utils import timezone
-        from django.utils.dateparse import parse_datetime
-
-        issued_from_raw = request.GET.get("invoice__issued_at__gte")
-        issued_to_raw = request.GET.get("invoice__issued_at__lte")
-
-        if issued_from_raw:
-            issued_from = parse_datetime(issued_from_raw)
-            if issued_from and timezone.is_naive(issued_from):
-                issued_from = timezone.make_aware(issued_from)
-            if issued_from:
-                qs = qs.filter(invoice__issued_at__gte=issued_from)
-
-        if issued_to_raw:
-            issued_to = parse_datetime(issued_to_raw)
-            if issued_to and timezone.is_naive(issued_to):
-                issued_to = timezone.make_aware(issued_to)
-            if issued_to:
-                qs = qs.filter(invoice__issued_at__lte=issued_to)
-
-        return qs
 
     @admin.action(description="Robno razduži (stavke)", permissions=["change"])
     def post_sales_items_stock_out_action(self, request, queryset):
@@ -510,6 +699,65 @@ class SalesInvoiceItemAdmin(admin.ModelAdmin):
         for msg in errors[:20]:
             self.message_user(request, msg, level=messages.ERROR)
 
+    @admin.action(description="Storno razduži (stavke)", permissions=["change"])
+    def post_sales_items_stock_in_storno_action(self, request, queryset):
+        created = 0
+        skipped = 0
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        items_by_invoice = {}
+        for item in queryset.select_related("invoice", "invoice__warehouse", "artikl"):
+            if item.stock_out_posted_at:
+                skipped += 1
+                warnings.append(f"Stavka {item.id} već je razdužena.")
+                continue
+            if not item.invoice_id:
+                skipped += 1
+                errors.append(f"Stavka {item.id}: nema racun.")
+                continue
+            items_by_invoice.setdefault(item.invoice_id, {"invoice": item.invoice, "items": []})
+            items_by_invoice[item.invoice_id]["items"].append(item)
+
+        for data in items_by_invoice.values():
+            invoice = data["invoice"]
+            items = data["items"]
+            if not invoice.warehouse:
+                skipped += 1
+                errors.append(f"Racun {invoice.rm_number}: Racun nema vezano skladiste (warehouse).")
+                continue
+            try:
+                lines, skipped_items = build_stock_in_lines_for_items(items)
+                for msg in skipped_items:
+                    warnings.append(f"Racun {invoice.rm_number}: {msg}")
+                if not lines:
+                    skipped += 1
+                    continue
+                post_stock_in(
+                    warehouse=invoice.warehouse,
+                    items=lines,
+                    move_date=invoice.issued_at,
+                    reference=f"Storno racun {invoice.rm_number}",
+                    note="Storno razduzenje",
+                )
+                created += 1
+                SalesInvoiceItem.objects.filter(id__in=[i.id for i in items]).update(
+                    stock_out_posted_at=timezone.now()
+                )
+            except Exception as exc:
+                skipped += 1
+                errors.append(f"Racun {invoice.rm_number}: {exc}")
+
+        self.message_user(
+            request,
+            f"Storno razduzenje gotovo. created={created} skipped={skipped}",
+            level=messages.SUCCESS,
+        )
+        for msg in warnings[:20]:
+            self.message_user(request, msg, level=messages.WARNING)
+        for msg in errors[:20]:
+            self.message_user(request, msg, level=messages.ERROR)
+
     def changelist_view(self, request, extra_context=None):
         response = super().changelist_view(request, extra_context=extra_context)
         try:
@@ -533,6 +781,25 @@ class SalesInvoiceItemAdmin(admin.ModelAdmin):
 
     def get_queryset(self, request):
         qs = super().get_queryset(request)
+        from django.utils import timezone
+
+        issued_from_raw = request.GET.get("invoice__issued_at__gte")
+        issued_to_raw = request.GET.get("invoice__issued_at__lte")
+
+        if issued_from_raw:
+            issued_from = _parse_datetime_local(issued_from_raw)
+            if issued_from and timezone.is_naive(issued_from):
+                issued_from = timezone.make_aware(issued_from)
+            if issued_from:
+                qs = qs.filter(invoice__issued_at__gte=issued_from)
+
+        if issued_to_raw:
+            issued_to = _parse_datetime_local(issued_to_raw)
+            if issued_to and timezone.is_naive(issued_to):
+                issued_to = timezone.make_aware(issued_to)
+            if issued_to:
+                qs = qs.filter(invoice__issued_at__lte=issued_to)
+
         move_qs = StockMove.objects.filter(
             move_type=StockMove.MoveType.OUT,
             purpose=StockMove.Purpose.SALE,
@@ -639,6 +906,14 @@ class SalesZPostingAdmin(admin.ModelAdmin):
     @admin.display(description="issued on", ordering="issued_on")
     def issued_on_display(self, obj):
         return obj.issued_on.strftime("%d.%m.%Y") if obj.issued_on else ""
+
+
+@admin.register(FiscalReceipt)
+class FiscalReceiptAdmin(admin.ModelAdmin):
+    list_display = ("invoice", "status", "zki", "jir", "payment_type", "sent_at", "updated_at")
+    list_filter = ("status", "payment_type")
+    search_fields = ("invoice__rm_number", "zki", "jir")
+    readonly_fields = ("created_at", "updated_at", "sent_at", "xml_request", "xml_response", "qr_payload", "error_message")
 
 
 class RepresentationItemInline(admin.TabularInline):
@@ -791,3 +1066,183 @@ class RepresentationReasonAdmin(admin.ModelAdmin):
     list_display = ("name", "code", "is_active", "sort_order")
     list_filter = ("is_active",)
     search_fields = ("name", "code")
+
+
+class SalesPriceItemInline(admin.TabularInline):
+    class SalesPriceItemInlineForm(forms.ModelForm):
+        unit_price_gross = forms.DecimalField(
+            required=True,
+            max_digits=12,
+            decimal_places=2,
+            localize=True,
+        )
+
+        class Meta:
+            model = SalesPriceItem
+            fields = "__all__"
+
+        def clean_unit_price_gross(self):
+            raw = self.data.get(self.add_prefix("unit_price_gross"), "")
+            raw = raw.replace(",", ".").strip()
+            if raw == "":
+                return self.cleaned_data.get("unit_price_gross")
+            try:
+                value = Decimal(raw)
+            except Exception:
+                return self.cleaned_data.get("unit_price_gross")
+            return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    model = SalesPriceItem
+    extra = 0
+    autocomplete_fields = ("artikl",)
+    form = SalesPriceItemInlineForm
+
+
+@admin.action(description="Sync price list items to Remaris", permissions=["change"])
+def sync_sales_pricelist_to_remaris_action(modeladmin, request, queryset):
+    if queryset.count() != 1:
+        modeladmin.message_user(
+            request,
+            "Odaberi tocno jedan cjenik.",
+            level=messages.ERROR,
+        )
+        return
+
+    price_list = queryset.first()
+    def _write_line(msg: str) -> None:
+        level = messages.INFO
+        if msg.startswith("ERROR"):
+            level = messages.ERROR
+        elif msg.startswith("SKIP"):
+            level = messages.WARNING
+        modeladmin.message_user(request, msg, level=level)
+
+    try:
+        sent, skipped, errors = sync_sales_pricelist_to_remaris(
+            price_list=price_list,
+            remaris_price_list_id=None,
+            include_inactive=False,
+            dry_run=False,
+            write_line=_write_line,
+        )
+    except Exception as exc:
+        modeladmin.message_user(
+            request,
+            f"Remaris sync nije uspio: {exc}",
+            level=messages.ERROR,
+        )
+        return
+
+    modeladmin.message_user(
+        request,
+        f"Remaris sync: sent={sent} skipped={skipped} errors={errors}",
+        level=messages.SUCCESS if errors == 0 else messages.WARNING,
+    )
+
+
+@admin.action(description="Transfer prices to POS (Remaris)", permissions=["change"])
+def transfer_sales_prices_to_pos_action(modeladmin, request, queryset):
+    if queryset.count() != 1:
+        modeladmin.message_user(
+            request,
+            "Odaberi tocno jedan cjenik.",
+            level=messages.ERROR,
+        )
+        return
+
+    try:
+        response = transfer_sales_prices_to_pos()
+    except Exception as exc:
+        modeladmin.message_user(
+            request,
+            f"Remaris transfer nije uspio: {exc}",
+            level=messages.ERROR,
+        )
+        return
+
+    modeladmin.message_user(
+        request,
+        f"Remaris transfer OK: {response}",
+        level=messages.SUCCESS,
+    )
+
+
+@admin.register(SalesPriceList)
+class SalesPriceListAdmin(admin.ModelAdmin):
+    class SalesPriceListAdminForm(forms.ModelForm):
+        valid_from = forms.DateTimeField(
+            required=True,
+            input_formats=[
+                "%d.%m.%Y",
+                "%d.%m.%Y %H:%M",
+                "%d.%m.%Y %H.%M",
+                "%Y-%m-%dT%H:%M",
+                "%Y-%m-%d %H:%M:%S",
+            ],
+            widget=forms.DateTimeInput(format="%d.%m.%Y %H:%M"),
+        )
+        valid_to = forms.DateTimeField(
+            required=False,
+            input_formats=[
+                "%d.%m.%Y",
+                "%d.%m.%Y %H:%M",
+                "%d.%m.%Y %H.%M",
+                "%Y-%m-%dT%H:%M",
+                "%Y-%m-%d %H:%M:%S",
+            ],
+            widget=forms.DateTimeInput(format="%d.%m.%Y %H:%M"),
+        )
+
+        class Meta:
+            model = SalesPriceList
+            fields = "__all__"
+
+    form = SalesPriceListAdminForm
+    list_display = ("name", "is_active", "is_default", "valid_from", "valid_to", "warehouse", "pos")
+    list_filter = ("is_active", "is_default", "warehouse", "pos")
+    search_fields = ("name",)
+    inlines = [SalesPriceItemInline]
+    actions = [sync_sales_pricelist_to_remaris_action, transfer_sales_prices_to_pos_action]
+
+
+class SalesPriceRuleItemInline(admin.TabularInline):
+    model = SalesPriceRuleItem
+    extra = 0
+    autocomplete_fields = ("artikl",)
+
+
+@admin.register(SalesPriceRule)
+class SalesPriceRuleAdmin(admin.ModelAdmin):
+    class SalesPriceRuleAdminForm(forms.ModelForm):
+        valid_from = forms.DateTimeField(
+            required=True,
+            input_formats=[
+                "%d.%m.%Y",
+                "%d.%m.%Y %H:%M",
+                "%d.%m.%Y %H.%M",
+                "%Y-%m-%dT%H:%M",
+                "%Y-%m-%d %H:%M:%S",
+            ],
+            widget=forms.DateTimeInput(format="%d.%m.%Y %H:%M"),
+        )
+        valid_to = forms.DateTimeField(
+            required=False,
+            input_formats=[
+                "%d.%m.%Y",
+                "%d.%m.%Y %H:%M",
+                "%d.%m.%Y %H.%M",
+                "%Y-%m-%dT%H:%M",
+                "%Y-%m-%d %H:%M:%S",
+            ],
+            widget=forms.DateTimeInput(format="%d.%m.%Y %H:%M"),
+        )
+
+        class Meta:
+            model = SalesPriceRule
+            fields = "__all__"
+
+    form = SalesPriceRuleAdminForm
+    list_display = ("name", "price_list", "rule_type", "adjust_type", "value", "valid_from", "valid_to", "is_active", "priority")
+    list_filter = ("rule_type", "adjust_type", "is_active", "price_list")
+    search_fields = ("name",)
+    inlines = [SalesPriceRuleItemInline]

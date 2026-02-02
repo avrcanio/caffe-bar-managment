@@ -347,6 +347,7 @@ def import_sales_invoices(
                 raise ValueError(f"Nema POS mapiranja za pos_id={pos_id}.")
 
             defaults = {
+                "report_from": date_from,
                 "issued_at": issued_at,
                 "location_name": invoice.location_name,
                 "buyer_name": invoice.buyer_name,

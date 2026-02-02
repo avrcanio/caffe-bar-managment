@@ -1,5 +1,6 @@
 from decimal import Decimal, ROUND_HALF_UP
 
+from django.contrib.auth import get_user_model
 from django.db import transaction
 from django.db.models import Sum
 
@@ -17,6 +18,26 @@ CASH_ACCOUNT_CODE = "10220"
 REVENUE_ACCOUNT_CODE = "7603"
 VAT_ACCOUNT_CODE = "2400"
 PNP_ACCOUNT_CODE = "2481"
+
+
+def resolve_waiter_user(waiter_name: str | None):
+    if not waiter_name:
+        return None
+    raw = " ".join(waiter_name.strip().split())
+    if not raw:
+        return None
+    User = get_user_model()
+    user = User.objects.filter(username__iexact=raw).first()
+    if user:
+        return user
+    parts = raw.split(" ")
+    if len(parts) >= 2:
+        first = parts[0]
+        last = " ".join(parts[1:])
+        user = User.objects.filter(first_name__iexact=first, last_name__iexact=last).first()
+        if user:
+            return user
+    return User.objects.filter(first_name__iexact=raw).first()
 
 
 def _get_pnp_rate(ledger: Ledger | None) -> Decimal | None:
@@ -217,6 +238,54 @@ def build_stock_out_lines_for_items(items) -> tuple[list[dict], list[str]]:
             skipped.append(f"Artikl {artikl} ima kolicinu {qty}.")
             continue
 
+        if artikl.is_stock_item:
+            key = artikl.id
+            line = lines_by_artikl.get(key)
+            if not line:
+                line = {"artikl": artikl, "quantity": Decimal("0.00")}
+                lines_by_artikl[key] = line
+            line["quantity"] += qty
+            continue
+
+        normativ = Normativ.objects.filter(product=artikl, is_active=True).first()
+        if normativ:
+            for nitem in normativ.items.select_related("ingredient").all():
+                ing = nitem.ingredient
+                ing_qty = Decimal(str(nitem.qty)) * qty
+                if ing_qty <= 0:
+                    continue
+                key = ing.id
+                line = lines_by_artikl.get(key)
+                if not line:
+                    line = {"artikl": ing, "quantity": Decimal("0.00")}
+                    lines_by_artikl[key] = line
+                line["quantity"] += ing_qty
+        else:
+            skipped.append(f"Artikl {artikl} nije skladisni i nema normativ.")
+
+    return list(lines_by_artikl.values()), skipped
+
+
+def build_stock_in_lines_for_items(items) -> tuple[list[dict], list[str]]:
+    """
+    Build stock-in lines for storno items (negative qty).
+    Uses same rules as stock-out, but qty is absolute value for negative items.
+    """
+    lines_by_artikl: dict[int, dict] = {}
+    skipped: list[str] = []
+
+    for item in items:
+        artikl = item.artikl
+        if not artikl:
+            skipped.append(f"Stavka '{item.product_name}' nema artikl.")
+            continue
+
+        qty = Decimal(str(item.quantity))
+        if qty >= 0:
+            skipped.append(f"Artikl {artikl} nema negativnu kolicinu.")
+            continue
+
+        qty = abs(qty)
         if artikl.is_stock_item:
             key = artikl.id
             line = lines_by_artikl.get(key)

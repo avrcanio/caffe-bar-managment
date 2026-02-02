@@ -52,6 +52,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     payment_type_name = serializers.CharField(
         source="payment_type.name", read_only=True
     )
+    created_by = serializers.CharField(source="created_by.username", read_only=True)
     status_display = serializers.CharField(
         source="get_status_display", read_only=True
     )
@@ -68,6 +69,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             "status_display",
             "payment_type",
             "payment_type_name",
+            "created_by",
             "primka_created",
             "total_net",
             "total_gross",
@@ -78,6 +80,9 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     @transaction.atomic
     def create(self, validated_data):
         items_data = validated_data.pop("items", [])
+        request = self.context.get("request")
+        if request and request.user and not validated_data.get("created_by"):
+            validated_data["created_by"] = request.user
         if not validated_data.get("ordered_at"):
             validated_data["ordered_at"] = timezone.now()
         order = PurchaseOrder.objects.create(**validated_data)
@@ -110,7 +115,7 @@ class PurchaseOrderPagination(PageNumberPagination):
 
 class PurchaseOrderListCreateView(generics.ListCreateAPIView):
     queryset = (
-        PurchaseOrder.objects.select_related("supplier", "payment_type")
+        PurchaseOrder.objects.select_related("supplier", "payment_type", "created_by")
         .prefetch_related("items__artikl__detail__base_group")
         .order_by("-ordered_at")
     )
@@ -186,7 +191,7 @@ class PurchaseOrderListCreateView(generics.ListCreateAPIView):
 
 class PurchaseOrderDetailView(generics.RetrieveUpdateAPIView):
     queryset = (
-        PurchaseOrder.objects.select_related("supplier", "payment_type")
+        PurchaseOrder.objects.select_related("supplier", "payment_type", "created_by")
         .prefetch_related("items__artikl__detail__base_group")
     )
     serializer_class = PurchaseOrderSerializer
@@ -372,7 +377,7 @@ class SupplierArtiklListView(APIView):
                         "warehouse_name": row.warehouse_id.name
                         if row.warehouse_id
                         else "Skladiste",
-                        "quantity": row.quantity,
+                        "quantity": row.internal_quantity,
                     }
                 )
 

@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounting.services import account_ledger, get_default_cash_account
+from accounting.models import Account
 
 
 class CashLedgerView(APIView):
@@ -21,10 +22,16 @@ class CashLedgerView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        try:
-            cash_account = get_default_cash_account()
-        except RuntimeError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        account_code = request.query_params.get("account_code")
+        if account_code:
+            cash_account = Account.objects.filter(code=str(account_code).strip()).first()
+            if not cash_account:
+                return Response({"detail": "Konto nije pronađen."}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            try:
+                cash_account = get_default_cash_account()
+            except RuntimeError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         result = account_ledger(cash_account, date_from, date_to)
 
         rows = [

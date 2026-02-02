@@ -29,7 +29,7 @@ const steps = [
     primaryHref: "/download/Blagajna.appinstaller",
     secondaryLabel: "Preuzmi MSIX",
     secondaryHref:
-      "https://mozart.sibenik1983.hr/download/Blagajna_1.0.0.0_x64.msix",
+      "https://mozart.sibenik1983.hr/download/Blagajna_1.0.3.0_x64.msix",
     note: "",
     details: [
       "Ako nemas App Installer, preuzmi ga iz Microsoft Store.",

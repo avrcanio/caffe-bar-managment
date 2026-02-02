@@ -302,6 +302,68 @@ def post_stock_out(
 
 
 @transaction.atomic
+def post_stock_in(
+    *,
+    warehouse,
+    items,
+    move_date=None,
+    reference: str = "",
+    note: str = "",
+) -> StockMove:
+    if not warehouse:
+        raise ValidationError("Skladiste je obavezno.")
+    if not items:
+        raise ValidationError("Nema stavki za ulaz.")
+
+    move_date = move_date or timezone.now()
+    move = StockMove.objects.create(
+        move_type=StockMove.MoveType.IN,
+        date=_as_aware_datetime(move_date),
+        reference=reference or "Ulaz u skladiste",
+        note=note,
+        to_warehouse=warehouse,
+    )
+
+    for item in items:
+        artikl = item.get("artikl")
+        qty_raw = item.get("quantity")
+        unit_cost = item.get("unit_cost")
+        if not artikl or qty_raw is None:
+            raise ValidationError("Stavka mora imati artikl i kolicinu.")
+
+        qty = Decimal(str(qty_raw))
+        if qty <= 0:
+            raise ValidationError("Kolicina mora biti > 0.")
+
+        if unit_cost is None:
+            last_lot = (
+                StockLot.objects
+                .filter(warehouse=warehouse, artikl=artikl)
+                .order_by("-received_at", "-id")
+                .first()
+            )
+            unit_cost = last_lot.unit_cost if last_lot else Decimal("0.0000")
+
+        StockMoveLine.objects.create(
+            move=move,
+            warehouse=warehouse,
+            artikl=artikl,
+            quantity=qty,
+            unit_cost=unit_cost,
+        )
+        StockLot.objects.create(
+            warehouse=warehouse,
+            artikl=artikl,
+            received_at=_as_aware_datetime(move_date),
+            unit_cost=unit_cost,
+            qty_in=qty,
+            qty_remaining=qty,
+        )
+
+    return move
+
+
+@transaction.atomic
 def post_stock_transfer(
     *,
     from_warehouse,

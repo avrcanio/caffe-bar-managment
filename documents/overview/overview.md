@@ -36,6 +36,7 @@ Ovaj dokument sažima računovodstvenu jezgru, robni FIFO sloj i nabavni tok koj
 - Period (zaključivi obračunski periodi).
 - JournalEntry (DRAFT/POSTED/VOID) s pravilima zaključavanja.
 - JournalItem (debit/credit stavke, jedna strana, postable-only konto).
+- POS: `PosReceipt` i `PosReceiptItem` (cash, PDV po stavci)
 
 ## Pravila
 - POSTED i VOID ne mogu mijenjati status/datum nakon save.

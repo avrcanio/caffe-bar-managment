@@ -21,10 +21,9 @@ from django.contrib.admin.views.decorators import staff_member_required
 from django.contrib.staticfiles.urls import staticfiles_urlpatterns
 from django.urls import include, path, re_path
 from django.views.static import serve
-from rest_framework.authtoken.views import obtain_auth_token
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 
-from .api_views import CsrfView, LoginView, LogoutView, MeView, UserDetailView
+from .api_views import CsrfView, LoginView, LogoutView, MeView, UserDetailView, TokenView
 from mailbox_app.api_views import MailboxSyncView
 from mailbox_app.api import MailMessageDetailView, MailMessageListView
 from contacts.api import SupplierListView
@@ -52,6 +51,7 @@ from sales.api import (
     RepresentationListView,
     RepresentationReasonDetailView,
     RepresentationReasonListView,
+    RemarisImportView,
 )
 from stock.api import (
     InventoryDetailView,
@@ -61,7 +61,25 @@ from stock.api import (
     WarehouseStockSyncView,
     WarehouseIdListView,
 )
-from pos.api import PosPinVerifyView
+from pos.api import (
+    PosPinVerifyView,
+    PosPinLoginView,
+    PosFiscalizeInvoiceView,
+    PosListCreateView,
+    PosDetailView,
+    PosReceiptCreateView,
+    PosReceiptFiscalizeView,
+    PosReceiptPrintView,
+    PosReceiptStornoView,
+    PosShiftCloseView,
+    PosShiftExpenseView,
+    PosShiftTurnoverView,
+    PosInvoicePaymentFlagView,
+    PosShiftCashExpectedView,
+    PosShiftCashHandoverView,
+)
+from ai.api import AIQueryView
+from ai.views import AiSearchView
 from operations.api import (
     ShiftCashCountCreateView,
     ShiftCashSummaryView,
@@ -77,7 +95,7 @@ urlpatterns = [
     path("api/csrf/", CsrfView.as_view(), name="api-csrf"),
     path("api/login/", LoginView.as_view(), name="api-login"),
     path("api/logout/", LogoutView.as_view(), name="api-logout"),
-    path('api/token/', obtain_auth_token, name='api-token'),
+    path('api/token/', TokenView.as_view(), name='api-token'),
     path('api/me/', MeView.as_view(), name='api-me'),
     path('api/users/<int:user_id>/', UserDetailView.as_view(), name='api-user-detail'),
     path('api/artikli/', ArtiklListView.as_view(), name='api-artikl-list'),
@@ -90,6 +108,7 @@ urlpatterns = [
     path('api/representations/<int:pk>/', RepresentationDetailView.as_view(), name='api-representation-detail'),
     path('api/representation-reasons/', RepresentationReasonListView.as_view(), name='api-representation-reason-list'),
     path('api/representation-reasons/<int:pk>/', RepresentationReasonDetailView.as_view(), name='api-representation-reason-detail'),
+    path('api/sales/import-remaris/', RemarisImportView.as_view(), name='api-sales-import-remaris'),
     path('api/units/', UnitOfMeasureListView.as_view(), name='api-unit-list'),
     path('api/inventories/', InventoryListCreateView.as_view(), name='api-inventory-list'),
     path('api/inventories/<int:pk>/', InventoryDetailView.as_view(), name='api-inventory-detail'),
@@ -110,6 +129,22 @@ urlpatterns = [
     path("api/operations/shifts/<int:shift_id>/cash-count/", ShiftCashCountCreateView.as_view(), name="api-shift-cash-count"),
     path("api/operations/shifts/<int:shift_id>/cash-summary/", ShiftCashSummaryView.as_view(), name="api-shift-cash-summary"),
     path("api/pos/pin/verify/", PosPinVerifyView.as_view(), name="api-pos-pin-verify"),
+    path("api/pos/pin/login/", PosPinLoginView.as_view(), name="api-pos-pin-login"),
+    path("api/pos/fiscalize-invoice/", PosFiscalizeInvoiceView.as_view(), name="api-pos-fiscalize-invoice"),
+    path("api/pos/receipts/", PosReceiptCreateView.as_view(), name="api-pos-receipt-create"),
+    path("api/pos/receipts/<int:receipt_id>/fiscalize/", PosReceiptFiscalizeView.as_view(), name="api-pos-receipt-fiscalize"),
+    path("api/pos/receipts/<int:receipt_id>/storno/", PosReceiptStornoView.as_view(), name="api-pos-receipt-storno"),
+    path("api/pos/receipts/<int:receipt_id>/print/", PosReceiptPrintView.as_view(), name="api-pos-receipt-print"),
+    path("api/pos/devices/", PosListCreateView.as_view(), name="api-pos-list"),
+    path("api/pos/devices/<int:pos_id>/", PosDetailView.as_view(), name="api-pos-detail"),
+    path("api/pos/shift/turnover/", PosShiftTurnoverView.as_view(), name="api-pos-shift-turnover"),
+    path("api/pos/shift/close/", PosShiftCloseView.as_view(), name="api-pos-shift-close"),
+    path("api/pos/shift/expense/", PosShiftExpenseView.as_view(), name="api-pos-shift-expense"),
+    path("api/pos/shift/cash-expected/", PosShiftCashExpectedView.as_view(), name="api-pos-shift-cash-expected"),
+    path("api/pos/shift/cash-handover/", PosShiftCashHandoverView.as_view(), name="api-pos-shift-cash-handover"),
+    path("api/pos/invoices/payment-flags/", PosInvoicePaymentFlagView.as_view(), name="api-pos-invoices-payment-flags"),
+    path("api/ai/query/", AIQueryView.as_view(), name="api-ai-query"),
+    path("ai/", AiSearchView.as_view(), name="ai-search"),
     path("api/mailbox/sync/", MailboxSyncView.as_view(), name="api-mailbox-sync"),
     path("api/mailbox/messages/", MailMessageListView.as_view(), name="api-mailbox-messages"),
     path("api/mailbox/messages/<int:pk>/", MailMessageDetailView.as_view(), name="api-mailbox-message-detail"),

@@ -1,9 +1,10 @@
 import datetime
 import json
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 import requests
 
+from django import forms
 from django.contrib import admin, messages
 from django.db import transaction
 from django.db.models import DecimalField, F, Sum
@@ -883,14 +884,59 @@ class InventoryAdmin(admin.ModelAdmin):
 
 
 class WarehouseTransferItemInline(admin.TabularInline):
+    class WarehouseTransferItemInlineForm(forms.ModelForm):
+        quantity = forms.DecimalField(
+            required=True,
+            max_digits=12,
+            decimal_places=4,
+            localize=True,
+        )
+
+        class Meta:
+            model = WarehouseTransferItem
+            fields = "__all__"
+
+        def clean_quantity(self):
+            raw = self.data.get(self.add_prefix("quantity"), "")
+            raw = raw.replace(",", ".").strip()
+            if raw == "":
+                return self.cleaned_data.get("quantity")
+            try:
+                value = Decimal(raw)
+            except Exception:
+                return self.cleaned_data.get("quantity")
+            return value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+
     model = WarehouseTransferItem
     extra = 0
     fields = ("artikl", "quantity", "unit")
     autocomplete_fields = ("artikl",)
+    form = WarehouseTransferItemInlineForm
 
 
 @admin.register(WarehouseTransfer)
 class WarehouseTransferAdmin(admin.ModelAdmin):
+    class WarehouseTransferAdminForm(forms.ModelForm):
+        date = forms.DateTimeField(
+            required=True,
+            input_formats=[
+                "%d.%m.%Y",
+                "%d.%m.%Y %H:%M",
+                "%d.%m.%Y %H.%M",
+                "%Y-%m-%dT%H:%M",
+                "%Y-%m-%d %H:%M:%S",
+            ],
+            widget=forms.DateTimeInput(
+                format="%d.%m.%Y %H:%M",
+                attrs={"class": "js-flatpickr-datetime"},
+            ),
+        )
+
+        class Meta:
+            model = WarehouseTransfer
+            fields = "__all__"
+
+    form = WarehouseTransferAdminForm
     list_display = (
         "id",
         "from_warehouse",

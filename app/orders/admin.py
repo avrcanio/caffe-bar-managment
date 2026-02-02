@@ -312,6 +312,14 @@ def _validate_warehouse_input(warehouse_input):
     return errors
 
 
+def _get_latest_supplier_pricelist(supplier):
+    return (
+        SupplierPriceList.objects.filter(supplier=supplier)
+        .order_by("-valid_from", "-created_at", "-id")
+        .first()
+    )
+
+
 @admin.register(WarehouseInput)
 class WarehouseInputAdmin(admin.ModelAdmin):
     list_display = ("id", "order", "supplier", "warehouse", "date", "document_type", "total", "is_canceled")
@@ -323,6 +331,7 @@ class WarehouseInputAdmin(admin.ModelAdmin):
         "send_warehouse_input_to_remaris",
         "post_warehouse_input_to_stock_action",
         "create_supplier_invoice_from_inputs",
+        "create_supplier_pricelist_from_input",
     ]
 
     @admin.action(description="Send to Remaris", permissions=["change"])
@@ -456,6 +465,95 @@ class WarehouseInputAdmin(admin.ModelAdmin):
             self.message_user(request, f"Preskoceno primki: {skipped}", level=messages.WARNING)
         if failed:
             self.message_user(request, f"Greske: {failed}", level=messages.ERROR)
+
+    @admin.action(description="Kreiraj novi cjenik iz primke (samo razlike)", permissions=["change"])
+    def create_supplier_pricelist_from_input(self, request, queryset):
+        created_lists = 0
+        created_items = 0
+        skipped = 0
+
+        for warehouse_input in queryset.select_related("supplier"):
+            supplier = warehouse_input.supplier
+            if not supplier:
+                skipped += 1
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id} nema dobavljaca.",
+                    level=messages.WARNING,
+                )
+                continue
+            if not warehouse_input.date:
+                skipped += 1
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id} nema datum.",
+                    level=messages.WARNING,
+                )
+                continue
+
+            latest_list = _get_latest_supplier_pricelist(supplier)
+            latest_items = {}
+            if latest_list:
+                latest_items = {
+                    item.artikl_id: item
+                    for item in latest_list.items.all()
+                }
+
+            items_to_create = []
+            for item in warehouse_input.items.select_related("artikl", "unit_of_measure"):
+                if item.price is None:
+                    continue
+                prev_item = latest_items.get(item.artikl_id)
+                if prev_item is None or prev_item.price != item.price:
+                    items_to_create.append(item)
+
+            if not items_to_create:
+                skipped += 1
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id}: nema razlika u cijenama.",
+                    level=messages.INFO,
+                )
+                continue
+
+            with transaction.atomic():
+                new_list = SupplierPriceList.objects.create(
+                    supplier=supplier,
+                    valid_from=warehouse_input.date,
+                    valid_to=None,
+                    is_active=True,
+                )
+                SupplierPriceItem.objects.bulk_create(
+                    [
+                        SupplierPriceItem(
+                            price_list=new_list,
+                            artikl=wi_item.artikl,
+                            unit_of_measure=wi_item.unit_of_measure,
+                            price=wi_item.price,
+                        )
+                        for wi_item in items_to_create
+                    ]
+                )
+            created_lists += 1
+            created_items += len(items_to_create)
+            self.message_user(
+                request,
+                f"Primka {warehouse_input.id}: kreiran cjenik {new_list.id} sa {len(items_to_create)} stavki.",
+                level=messages.SUCCESS,
+            )
+
+        if created_lists:
+            self.message_user(
+                request,
+                f"Kreirano cjenika: {created_lists}, stavki: {created_items}. Preskoceno: {skipped}.",
+                level=messages.SUCCESS,
+            )
+        elif skipped:
+            self.message_user(
+                request,
+                "Nista nije kreirano. Sve primke su preskocene.",
+                level=messages.WARNING,
+            )
 
     @admin.action(description="Kreiraj ulazni racun iz primki", permissions=["change"])
     def create_supplier_invoice_from_inputs(self, request, queryset):
@@ -733,6 +831,7 @@ def copy_purchase_order(modeladmin, request, queryset):
                 ordered_at=timezone.now(),
                 status=PurchaseOrder.STATUS_CREATED,
                 payment_type=order.payment_type,
+                created_by=request.user,
                 primka_created=False,
                 confirmation_token=None,
                 confirmation_sent_at=None,
@@ -770,9 +869,9 @@ def copy_purchase_order(modeladmin, request, queryset):
 
 @admin.register(PurchaseOrder)
 class PurchaseOrderAdmin(admin.ModelAdmin):
-    list_display = ("id", "supplier", "ordered_at", "status_badge", "total_net", "total_gross", "payment_type", "primka_created")
-    list_filter = ("supplier", "ordered_at", "status", "payment_type", "primka_created")
-    search_fields = ("id", "supplier__name")
+    list_display = ("id", "supplier", "ordered_at", "status_badge", "total_net", "total_gross", "payment_type", "primka_created", "created_by")
+    list_filter = ("supplier", "ordered_at", "status", "payment_type", "primka_created", "created_by")
+    search_fields = ("id", "supplier__name", "created_by__username")
     autocomplete_fields = ("supplier",)
     inlines = [PurchaseOrderItemInline]
     actions = [send_order_email, create_warehouse_input, copy_purchase_order]
@@ -781,6 +880,7 @@ class PurchaseOrderAdmin(admin.ModelAdmin):
         "ordered_at",
         "status",
         "payment_type",
+        "created_by",
         "primka_created",
         "confirmation_token",
         "confirmation_sent_at",
@@ -791,6 +891,7 @@ class PurchaseOrderAdmin(admin.ModelAdmin):
         "total_gross",
     )
     readonly_fields = (
+        "created_by",
         "primka_created",
         "confirmation_token",
         "confirmation_sent_at",
@@ -806,6 +907,19 @@ class PurchaseOrderAdmin(admin.ModelAdmin):
             "all": ("orders/css/purchase_order_status.css",),
         }
         js = ("orders/js/purchase_order_status.js",)
+
+    def save_model(self, request, obj, form, change):
+        if change:
+            if obj.created_by_id:
+                obj.created_by_id = PurchaseOrder.objects.values_list(
+                    "created_by_id",
+                    flat=True,
+                ).get(pk=obj.pk)
+            else:
+                obj.created_by = request.user
+        else:
+            obj.created_by = request.user
+        super().save_model(request, obj, form, change)
 
     def status_badge(self, obj):
         label = obj.get_status_display()

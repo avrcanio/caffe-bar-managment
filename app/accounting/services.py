@@ -224,11 +224,11 @@ def compute_purchase_totals_from_items(
         vat_total += q2(base * percent / Decimal("100.00"))
     vat_total = q2(vat_total)
 
-    gross_total = q2(net_total + vat_total)
     if deposit_total is None:
         deposit_total = computed_deposit
     deposit_total = q2(deposit_total or Decimal("0.00"))
-    payable_total = q2(gross_total + deposit_total)
+    gross_total = q2(net_total + vat_total + deposit_total)
+    payable_total = gross_total
 
     return PurchaseTotals(
         net_by_rate=net_by_rate,
