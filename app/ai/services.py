@@ -81,6 +81,7 @@ def _extract_time_filter(normalized_question: str, today: date):
         .replace("š", "s")
         .replace("đ", "dj")
     )
+    q_ascii = q_ascii.replace("porsli", "prosli").replace("por sli", "prosli")
     if "danas" in q_ascii:
         return {"label": "danas", "start": today, "end": today}
     if "jucer" in q_ascii:
@@ -1331,10 +1332,14 @@ def handle_ai_query(question: str):
         supplier_query = None
         if supplier_match:
             supplier_query = supplier_match.group(1).strip()
-            supplier_query = re.sub(r"(pro(s|š)li\s+mjesec|pro(s|š)li\s+tjedan|danas|ju(č|c)er|prekjucer|prekjučer|prije\s+\d+\s+dana|prije\s+[a-zčćžšđ]+\s+dana)$", "", supplier_query, flags=re.IGNORECASE).strip()
+            supplier_query = re.sub(r"(por(s|š)li\s+mjesec|pro(s|š)li\s+mjesec|por(s|š)li\s+tjedan|pro(s|š)li\s+tjedan|danas|ju(č|c)er|prekjucer|prekjučer|prije\s+\d+\s+dana|prije\s+[a-zčćžšđ]+\s+dana)$", "", supplier_query, flags=re.IGNORECASE).strip()
             supplier_query_norm = supplier_query.lower().strip()
             if supplier_query_norm in {"koktel", "koktela", "koktelu"}:
                 supplier_query = "koktel"
+            if supplier_query_norm in {"fructus", "fructusa", "fructusu", "ftuktus", "fruktusu", "fruktusa"}:
+                supplier_query = "fructus"
+            if supplier_query_norm in {"julius", "juliusa", "juliusu"}:
+                supplier_query = "Junus Meinl Bonfenti d.o.o."
         if supplier_query:
             result = tool_get_supplier_inputs(
                 supplier_query=supplier_query,
