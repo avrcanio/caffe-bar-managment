@@ -8,19 +8,23 @@ import json
 from django import forms
 from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
+from django.http import HttpResponseRedirect
+from django.template.response import TemplateResponse
 from email.utils import formataddr, parseaddr
 from django.db import models, transaction
+from django.db.models import Sum
 from django.core.mail import EmailMessage
 from django.utils import timezone
 from django.utils.html import format_html
 from django.conf import settings
-from django.urls import reverse
+from django.urls import reverse, path
 import requests
 
 from configuration.models import CompanyProfile, OrderEmailTemplate
 from accounting.services import compute_purchase_totals_from_items, post_warehouse_input_to_journal
 from artikli.remaris_connector import RemarisConnector
 from purchases.models import SupplierInvoice
+from stock.models import WarehouseId, WarehouseTransfer, WarehouseTransferItem
 from stock.services import get_stock_accounting_config
 from stock.services import post_warehouse_input_to_stock
 
@@ -151,9 +155,14 @@ class WarehouseInputItemInline(admin.TabularInline):
     model = WarehouseInputItem
     extra = 0
     autocomplete_fields = ("artikl", "unit_of_measure")
+    exclude = ("product_id", "product_name", "unit_name", "buying_price")
     formfield_overrides = {
         models.DecimalField: {"localize": True},
     }
+    class Media:
+        css = {
+            "all": ("orders/css/warehouse_input_item_inline.css",),
+        }
 
 
 def _warehouse_input_payload(warehouse_input):
@@ -322,17 +331,148 @@ def _get_latest_supplier_pricelist(supplier):
 
 @admin.register(WarehouseInput)
 class WarehouseInputAdmin(admin.ModelAdmin):
-    list_display = ("id", "order", "supplier", "warehouse", "date", "document_type", "total", "is_canceled")
+    class WarehouseInputAdminForm(forms.ModelForm):
+        date = forms.DateField(
+            required=True,
+            input_formats=[
+                "%d.%m.%Y",
+                "%Y-%m-%d",
+            ],
+            widget=forms.DateInput(
+                format="%d.%m.%Y",
+                attrs={"class": "js-flatpickr-date"},
+            ),
+        )
+        date_modified = forms.DateTimeField(
+            required=False,
+            input_formats=[
+                "%d.%m.%Y",
+                "%d.%m.%Y %H:%M",
+                "%d.%m.%Y %H.%M",
+                "%Y-%m-%dT%H:%M",
+                "%Y-%m-%d %H:%M:%S",
+            ],
+            widget=forms.DateTimeInput(
+                format="%d.%m.%Y %H:%M",
+                attrs={"class": "js-flatpickr-datetime"},
+            ),
+        )
+
+        class Meta:
+            model = WarehouseInput
+            fields = "__all__"
+
+    form = WarehouseInputAdminForm
+    list_display = (
+        "id",
+        "order",
+        "supplier",
+        "warehouse",
+        "date",
+        "document_type",
+        "total",
+        "is_canceled",
+        "posted",
+        "has_supplier_invoice",
+    )
     list_filter = ("document_type", "is_canceled", "supplier", "warehouse", "supplier_invoices")
     search_fields = ("id", "invoice_code", "delivery_note", "purchase_order__id")
     autocomplete_fields = ("order", "purchase_order", "supplier", "payment_type", "warehouse", "document_type")
     inlines = [WarehouseInputItemInline]
+
+    def save_related(self, request, form, formsets, change):
+        super().save_related(request, form, formsets, change)
+        warehouse_input = form.instance
+        warehouse_input.recalculate_total(persist=True)
     actions = [
         "send_warehouse_input_to_remaris",
         "post_warehouse_input_to_stock_action",
         "create_supplier_invoice_from_inputs",
         "create_supplier_pricelist_from_input",
+        "create_warehouse_transfer_from_inputs",
     ]
+
+    @admin.display(boolean=True, description="proknjizeno", ordering="stock_move")
+    def posted(self, obj):
+        return bool(obj.stock_move_id)
+
+    @admin.display(boolean=True, description="ulazni racun", ordering="supplier_invoices")
+    def has_supplier_invoice(self, obj):
+        return obj.supplier_invoices.exists()
+
+    @admin.action(description="Kreiraj međuskladišnicu iz primki", permissions=["change"])
+    def create_warehouse_transfer_from_inputs(self, request, queryset):
+        created = 0
+        skipped = 0
+        errors = 0
+
+        for warehouse_input in queryset.select_related("warehouse").prefetch_related("items__artikl", "items__unit_of_measure"):
+            if not warehouse_input.warehouse_id:
+                skipped += 1
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id} nema skladište.",
+                    level=messages.WARNING,
+                )
+                continue
+            warehouse = (
+                WarehouseId.objects.filter(rm_id=warehouse_input.warehouse_id).first()
+                or WarehouseId.objects.filter(id=warehouse_input.warehouse_id).first()
+            )
+            if not warehouse:
+                skipped += 1
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id} ima nepostojeće skladište (id/rm_id={warehouse_input.warehouse_id}).",
+                    level=messages.WARNING,
+                )
+                continue
+
+            items = list(warehouse_input.items.all())
+            if not items:
+                skipped += 1
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id} nema stavki.",
+                    level=messages.WARNING,
+                )
+                continue
+
+            try:
+                with transaction.atomic():
+                    transfer = WarehouseTransfer.objects.create(
+                        from_warehouse_id=warehouse.rm_id,
+                        to_warehouse_id=None,
+                        date=warehouse_input.date,
+                        note=f"Primka {warehouse_input.id}",
+                        created_by=request.user,
+                    )
+                    WarehouseTransferItem.objects.bulk_create(
+                        [
+                            WarehouseTransferItem(
+                                transfer=transfer,
+                                artikl=item.artikl,
+                                quantity=item.quantity,
+                                unit=item.unit_of_measure,
+                            )
+                            for item in items
+                        ]
+                    )
+                created += 1
+            except Exception as exc:
+                errors += 1
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id} greška: {exc}",
+                    level=messages.ERROR,
+                )
+
+        if created:
+            self.message_user(request, f"Kreirano međuskladišnica: {created}", level=messages.SUCCESS)
+        if skipped:
+            self.message_user(request, f"Preskočeno: {skipped}", level=messages.WARNING)
+        if errors:
+            self.message_user(request, f"Greške: {errors}", level=messages.ERROR)
 
     @admin.action(description="Send to Remaris", permissions=["change"])
     def send_warehouse_input_to_remaris(self, request, queryset):
@@ -429,7 +569,7 @@ class WarehouseInputAdmin(admin.ModelAdmin):
         already_posted = queryset.filter(stock_move__isnull=False).count()
         queryset = queryset.filter(stock_move__isnull=True)
 
-        for warehouse_input in queryset.select_related("warehouse", "document_type"):
+        for warehouse_input in queryset.select_related("warehouse", "document_type", "supplier"):
             try:
                 with transaction.atomic():
                     post_warehouse_input_to_stock(warehouse_input=warehouse_input)
@@ -437,6 +577,31 @@ class WarehouseInputAdmin(admin.ModelAdmin):
                         warehouse_input=warehouse_input,
                         user=request.user,
                     )
+                    # If supplier has no pricelist yet, create one from this input.
+                    if warehouse_input.supplier and not SupplierPriceList.objects.filter(supplier=warehouse_input.supplier).exists():
+                        items_with_price = [
+                            item
+                            for item in warehouse_input.items.select_related("artikl", "unit_of_measure")
+                            if item.price is not None
+                        ]
+                        if items_with_price:
+                            new_list = SupplierPriceList.objects.create(
+                                supplier=warehouse_input.supplier,
+                                valid_from=warehouse_input.date,
+                                valid_to=None,
+                                is_active=True,
+                            )
+                            SupplierPriceItem.objects.bulk_create(
+                                [
+                                    SupplierPriceItem(
+                                        price_list=new_list,
+                                        artikl=wi_item.artikl,
+                                        unit_of_measure=wi_item.unit_of_measure,
+                                        price=wi_item.price,
+                                    )
+                                    for wi_item in items_with_price
+                                ]
+                            )
                 posted += 1
             except ValidationError as exc:
                 skipped += 1
@@ -610,7 +775,17 @@ class WarehouseInputAdmin(admin.ModelAdmin):
         items = []
         for inp in inputs:
             items.extend(list(inp.items.all()))
-        totals = compute_purchase_totals_from_items(items, deposit_total=None)
+        try:
+            totals = compute_purchase_totals_from_items(items, deposit_total=None)
+        except ValidationError as e:
+            # Avoid 500 in admin: show actionable message and stop.
+            self.message_user(
+                request,
+                f"Ne mogu izračunati iznose za ulazni račun: {e}. "
+                "Provjeri da sve stavke imaju total i PDV (tax_group ili tax_rate).",
+                level=messages.ERROR,
+            )
+            return
 
         cfg = None
         try:
@@ -745,6 +920,18 @@ def create_warehouse_input(modeladmin, request, queryset):
 
     with transaction.atomic():
         for order in orders:
+            # If a primka was already created for this order, this bulk action
+            # must not create another one. Use the split-primke flow instead.
+            if order.primka_created or order.warehouse_inputs.exists():
+                skipped += 1
+                existing_ids = list(order.warehouse_inputs.values_list("id", flat=True)[:5])
+                suffix = f" (postojeće primke: {existing_ids})" if existing_ids else ""
+                modeladmin.message_user(
+                    request,
+                    f"Narudžba {order.id} je preskočena: primka je već kreirana.{suffix}",
+                    level=messages.WARNING,
+                )
+                continue
             if not order.items.exists():
                 skipped += 1
                 continue
@@ -793,9 +980,10 @@ def create_warehouse_input(modeladmin, request, queryset):
             for wi_item in items:
                 wi_item.id = None
             WarehouseInputItem.objects.bulk_create(items)
+            warehouse_input.recalculate_total(persist=True)
             if not order.primka_created:
                 order.primka_created = True
-                order.status = PurchaseOrder.STATUS_RECEIVED
+                order.status = PurchaseOrder.STATUS_RECEIVED_ALL
                 order.save(update_fields=["primka_created", "status"])
             created += 1
 
@@ -867,14 +1055,241 @@ def copy_purchase_order(modeladmin, request, queryset):
         )
 
 
+def _po_received_by_artikl(order: PurchaseOrder) -> dict[int, Decimal]:
+    rows = (
+        WarehouseInputItem.objects.filter(warehouse_input__purchase_order_id=order.id)
+        .values("artikl_id")
+        .annotate(q=Sum("quantity"))
+    )
+    return {r["artikl_id"]: (r["q"] or Decimal("0")) for r in rows if r["artikl_id"]}
+
+
+def _po_item_remaining_map(
+    items: list[PurchaseOrderItem], received_by_artikl: dict[int, Decimal]
+) -> dict[int, dict[str, Decimal]]:
+    """
+    Greedy allocation of already-received qty per artikl across PO lines.
+    This avoids over/under-counting when the same artikl appears multiple times.
+    """
+    received_left = {k: Decimal(v) for k, v in received_by_artikl.items()}
+    out: dict[int, dict[str, Decimal]] = {}
+    for it in items:
+        ordered = it.quantity or Decimal("0")
+        a_id = it.artikl_id
+        left = received_left.get(a_id, Decimal("0"))
+        received_line = min(ordered, left) if ordered > 0 and left > 0 else Decimal("0")
+        remaining = ordered - received_line
+        if a_id:
+            received_left[a_id] = max(left - received_line, Decimal("0"))
+        out[it.id] = {
+            "ordered": ordered,
+            "received": received_line,
+            "remaining": max(remaining, Decimal("0")),
+        }
+    return out
+
+
+class CreateWarehouseInputFromPoSelectionForm(forms.Form):
+    date = forms.DateField(required=True, initial=timezone.localdate)
+    invoice_code = forms.CharField(required=False, label="Broj računa")
+    delivery_note = forms.CharField(required=False, label="Broj otpremnice")
+
+    def __init__(self, *args, order: PurchaseOrder, items: list[PurchaseOrderItem], **kwargs):
+        super().__init__(*args, **kwargs)
+        self.order = order
+        self.items = items
+        # item_id -> new ordered quantity (when user receives more than ordered)
+        self.bump_order_qty_by_item_id: dict[int, Decimal] = {}
+
+        received_by_artikl = _po_received_by_artikl(order)
+        self.qty_info_by_item_id = _po_item_remaining_map(items, received_by_artikl)
+
+        for it in items:
+            info = self.qty_info_by_item_id[it.id]
+            self.fields[f"sel_{it.id}"] = forms.BooleanField(required=False)
+            self.fields[f"qty_{it.id}"] = forms.DecimalField(
+                required=False,
+                min_value=Decimal("0"),
+                decimal_places=4,
+                max_digits=12,
+                initial=info["remaining"],
+                localize=True,
+            )
+
+    def clean(self):
+        cleaned = super().clean()
+        any_selected = False
+        self.bump_order_qty_by_item_id = {}
+
+        for it in self.items:
+            sel = bool(cleaned.get(f"sel_{it.id}"))
+            qty = cleaned.get(f"qty_{it.id}") or Decimal("0")
+            info = self.qty_info_by_item_id[it.id]
+            max_qty = info["remaining"]
+
+            if not sel:
+                continue
+            any_selected = True
+            if qty <= 0:
+                self.add_error(None, f"Stavka '{it.artikl}': odabrana je, ali količina je 0.")
+                continue
+            if qty > max_qty:
+                # If user enters more than remaining, bump the PO line's ordered
+                # quantity so the received qty becomes valid.
+                received = info.get("received") or Decimal("0")
+                new_ordered = (received + qty).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+                self.bump_order_qty_by_item_id[it.id] = new_ordered
+
+        if any_selected:
+            inv = (cleaned.get("invoice_code") or "").strip()
+            dn = (cleaned.get("delivery_note") or "").strip()
+            if not inv and not dn:
+                self.add_error(None, "Unesi broj računa ili broj otpremnice (bar jedno).")
+        else:
+            self.add_error(None, "Odaberi barem jednu stavku za primku.")
+
+        return cleaned
+
+    def create_input(self) -> WarehouseInput | None:
+        try:
+            cfg = get_stock_accounting_config()
+        except Exception:
+            cfg = None
+        default_wh = getattr(cfg, "default_purchase_warehouse", None) if cfg else None
+        fallback_wh = WarehouseId.objects.order_by("id").first()
+        warehouse_id = getattr(default_wh, "id", None) or (fallback_wh.id if fallback_wh else None)
+
+        lines: list[WarehouseInputItem] = []
+        ordinal = 0
+
+        # Apply any "over-received" quantities by increasing PO item quantities.
+        # This keeps business rules consistent: you cannot receive more than ordered
+        # unless the order line is updated to match.
+        if self.bump_order_qty_by_item_id:
+            changed = False
+            for it in self.items:
+                new_qty = self.bump_order_qty_by_item_id.get(it.id)
+                if new_qty is None:
+                    continue
+                if it.quantity is None or Decimal(it.quantity) != new_qty:
+                    PurchaseOrderItem.objects.filter(pk=it.id).update(quantity=new_qty)
+                    it.quantity = new_qty
+                    changed = True
+            if changed:
+                self.order.recalculate_totals()
+
+        for it in self.items:
+            if not self.cleaned_data.get(f"sel_{it.id}"):
+                continue
+            qty = self.cleaned_data.get(f"qty_{it.id}") or Decimal("0")
+            if qty <= 0:
+                continue
+            ordinal += 1
+            price = it.price or Decimal("0")
+            line_total = (price * Decimal(qty)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            tax_rate = (
+                it.artikl.tax_group.rate
+                if it.artikl and getattr(it.artikl, "tax_group", None)
+                else Decimal("0")
+            )
+            gross = (line_total * (Decimal("1") + Decimal(tax_rate))).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            lines.append(
+                WarehouseInputItem(
+                    artikl=it.artikl,
+                    product_id=it.artikl.rm_id if it.artikl else None,
+                    product_name=it.artikl.name if it.artikl else "",
+                    unit_of_measure=it.unit_of_measure,
+                    unit_name=it.unit_of_measure.name if it.unit_of_measure else "",
+                    quantity=qty,
+                    price=price,
+                    total=line_total,
+                    buying_price=price,
+                    gross_price=gross,
+                    tax_rate=tax_rate,
+                    calculate_tax=True,
+                    ordinal=ordinal,
+                )
+            )
+
+        if not lines:
+            return None
+
+        wi = WarehouseInput.objects.create(
+            order=self.order,
+            supplier=self.order.supplier,
+            payment_type=self.order.payment_type,
+            date=self.cleaned_data["date"],
+            total=Decimal("0.00"),
+            purchase_order=self.order,
+            document_type_id=1,
+            warehouse_id=warehouse_id,
+            invoice_code=(self.cleaned_data.get("invoice_code") or "").strip(),
+            delivery_note=(self.cleaned_data.get("delivery_note") or "").strip(),
+        )
+        for li in lines:
+            li.warehouse_input = wi
+        WarehouseInputItem.objects.bulk_create(lines)
+        wi.recalculate_total(persist=True)
+        return wi
+
+
+@admin.action(description="Rastavi narudžbu u više primki", permissions=["change"])
+def split_purchase_order_into_three_inputs(modeladmin, request, queryset):
+    if queryset.count() != 1:
+        modeladmin.message_user(
+            request,
+            "Odaberi točno jednu narudžbu za rastavljanje u primke.",
+            level=messages.ERROR,
+        )
+        return
+    order = queryset.first()
+    if order.status == PurchaseOrder.STATUS_RECEIVED_ALL:
+        modeladmin.message_user(
+            request,
+            "Sve stavke s narudžbe su zaprimljene i ne može se raditi nova primka.",
+            level=messages.ERROR,
+        )
+        return
+    url = reverse("admin:orders_purchaseorder_split_primke", args=[order.id])
+    return HttpResponseRedirect(url)
+
+
 @admin.register(PurchaseOrder)
 class PurchaseOrderAdmin(admin.ModelAdmin):
+    class PurchaseOrderAdminForm(forms.ModelForm):
+        ordered_at = forms.DateTimeField(
+            required=True,
+            input_formats=[
+                "%d.%m.%Y",
+                "%d.%m.%Y %H:%M",
+                "%d.%m.%Y %H.%M",
+                "%Y-%m-%dT%H:%M",
+                "%Y-%m-%d %H:%M:%S",
+            ],
+            widget=forms.DateTimeInput(
+                format="%d.%m.%Y %H:%M",
+                attrs={"class": "js-flatpickr-datetime"},
+            ),
+        )
+
+        class Meta:
+            model = PurchaseOrder
+            fields = "__all__"
+
+    form = PurchaseOrderAdminForm
     list_display = ("id", "supplier", "ordered_at", "status_badge", "total_net", "total_gross", "payment_type", "primka_created", "created_by")
     list_filter = ("supplier", "ordered_at", "status", "payment_type", "primka_created", "created_by")
     search_fields = ("id", "supplier__name", "created_by__username")
     autocomplete_fields = ("supplier",)
     inlines = [PurchaseOrderItemInline]
-    actions = [send_order_email, create_warehouse_input, copy_purchase_order]
+    actions = [
+        send_order_email,
+        create_warehouse_input,
+        split_purchase_order_into_three_inputs,
+        copy_purchase_order,
+    ]
     fields = (
         "supplier",
         "ordered_at",
@@ -902,6 +1317,128 @@ class PurchaseOrderAdmin(admin.ModelAdmin):
         "total_gross",
     )
 
+    def has_delete_permission(self, request, obj=None):
+        if obj and obj.status in (PurchaseOrder.STATUS_RECEIVED, PurchaseOrder.STATUS_RECEIVED_ALL):
+            return False
+        return super().has_delete_permission(request, obj)
+
+    def has_change_permission(self, request, obj=None):
+        # Use Django's built-in "view-only" change form (no save buttons, no inline edits)
+        # by denying change permission for received orders.
+        if obj and obj.status in (PurchaseOrder.STATUS_RECEIVED, PurchaseOrder.STATUS_RECEIVED_ALL):
+            return False
+        return super().has_change_permission(request, obj)
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom = [
+            path(
+                "<path:object_id>/split-primke/",
+                self.admin_site.admin_view(self.split_primke_view),
+                name="orders_purchaseorder_split_primke",
+            ),
+        ]
+        return custom + urls
+
+    def split_primke_view(self, request, object_id):
+        order = self.get_object(request, object_id)
+        if not order:
+            self.message_user(request, "Narudžba ne postoji.", level=messages.ERROR)
+            return HttpResponseRedirect(reverse("admin:orders_purchaseorder_changelist"))
+        if order.status == PurchaseOrder.STATUS_RECEIVED_ALL:
+            self.message_user(
+                request,
+                "Sve stavke s narudžbe su zaprimljene i ne može se raditi nova primka.",
+                level=messages.ERROR,
+            )
+            return HttpResponseRedirect(reverse("admin:orders_purchaseorder_change", args=[order.id]))
+
+        items = list(
+            order.items.select_related("artikl__tax_group", "unit_of_measure").order_by("id")
+        )
+        if not items:
+            self.message_user(request, "Narudžba nema stavke.", level=messages.ERROR)
+            return HttpResponseRedirect(reverse("admin:orders_purchaseorder_change", args=[order.id]))
+
+        form = CreateWarehouseInputFromPoSelectionForm(
+            data=request.POST or None,
+            order=order,
+            items=items,
+        )
+        if request.method == "POST" and form.is_valid():
+            with transaction.atomic():
+                wi = form.create_input()
+                if wi and form.bump_order_qty_by_item_id:
+                    changed_lines = []
+                    for it in items:
+                        new_qty = form.bump_order_qty_by_item_id.get(it.id)
+                        if new_qty is None:
+                            continue
+                        changed_lines.append(f"{it.artikl}: {new_qty}")
+                    if changed_lines:
+                        self.message_user(
+                            request,
+                            "Količine na narudžbi su povećane zbog većih zaprimljenih količina: "
+                            + "; ".join(changed_lines[:10]),
+                            level=messages.INFO,
+                        )
+                if wi and not order.primka_created:
+                    order.primka_created = True
+                    order.save(update_fields=["primka_created"])
+
+                # Mark as received only if everything is received (after this primka).
+                if wi:
+                    received_by_artikl = _po_received_by_artikl(order)
+                    remaining_map = _po_item_remaining_map(items, received_by_artikl)
+                    if all(v["remaining"] == Decimal("0") for v in remaining_map.values()):
+                        order.status = PurchaseOrder.STATUS_RECEIVED_ALL
+                        order.save(update_fields=["status"])
+                    elif order.status not in (PurchaseOrder.STATUS_RECEIVED, PurchaseOrder.STATUS_RECEIVED_ALL):
+                        # Partial deliveries: keep order editable locked via STATUS_RECEIVED, but still
+                        # allow creating additional primke until fully received.
+                        order.status = PurchaseOrder.STATUS_RECEIVED
+                        order.save(update_fields=["status"])
+
+            if not wi:
+                self.message_user(
+                    request,
+                    "Nije kreirana primka (nema odabranih stavki ili su sve količine 0).",
+                    level=messages.ERROR,
+                )
+                return HttpResponseRedirect(request.path)
+
+            url = reverse("admin:orders_warehouseinput_change", args=[wi.id])
+            self.message_user(
+                request,
+                format_html('Kreirana primka: <a href="{}" target="_blank">#{}</a>', url, wi.id),
+                level=messages.SUCCESS,
+            )
+            return HttpResponseRedirect(request.path)
+
+        rows = []
+        for it in items:
+            info = form.qty_info_by_item_id.get(it.id) if hasattr(form, "qty_info_by_item_id") else None
+            rows.append(
+                {
+                    "item": it,
+                    "sel": form[f"sel_{it.id}"],
+                    "qty": form[f"qty_{it.id}"],
+                    "ordered": (info or {}).get("ordered"),
+                    "received": (info or {}).get("received"),
+                    "remaining": (info or {}).get("remaining"),
+                }
+            )
+
+        ctx = dict(
+            self.admin_site.each_context(request),
+            title=f"Rastavi narudžbu #{order.id} u više primki",
+            order=order,
+            rows=rows,
+            form=form,
+            opts=self.model._meta,
+        )
+        return TemplateResponse(request, "admin/orders/purchaseorder/split_primke.html", ctx)
+
     class Media:
         css = {
             "all": ("orders/css/purchase_order_status.css",),
@@ -928,6 +1465,7 @@ class PurchaseOrderAdmin(admin.ModelAdmin):
             PurchaseOrder.STATUS_SENT: "#ffe5cc",
             PurchaseOrder.STATUS_CONFIRMED: "#fff7cc",
             PurchaseOrder.STATUS_RECEIVED: "#d9f7d9",
+            PurchaseOrder.STATUS_RECEIVED_ALL: "#c2f0c2",
             PurchaseOrder.STATUS_CANCELED: "#ffd6d6",
         }
         color = colors.get(obj.status)
@@ -1020,6 +1558,35 @@ class SupplierPriceItemInline(admin.TabularInline):
 
 @admin.register(SupplierPriceList)
 class SupplierPriceListAdmin(admin.ModelAdmin):
+    class SupplierPriceListAdminForm(forms.ModelForm):
+        valid_from = forms.DateField(
+            required=False,
+            input_formats=[
+                "%d.%m.%Y",
+                "%Y-%m-%d",
+            ],
+            widget=forms.DateInput(
+                format="%d.%m.%Y",
+                attrs={"class": "js-flatpickr-date"},
+            ),
+        )
+        valid_to = forms.DateField(
+            required=False,
+            input_formats=[
+                "%d.%m.%Y",
+                "%Y-%m-%d",
+            ],
+            widget=forms.DateInput(
+                format="%d.%m.%Y",
+                attrs={"class": "js-flatpickr-date"},
+            ),
+        )
+
+        class Meta:
+            model = SupplierPriceList
+            fields = "__all__"
+
+    form = SupplierPriceListAdminForm
     list_display = ("supplier", "created_at", "valid_from", "valid_to", "currency", "is_active")
     list_filter = ("supplier", "is_active")
     search_fields = ("supplier__name",)

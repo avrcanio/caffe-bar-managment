@@ -1,4 +1,16 @@
 (function () {
+  function normalizeDecimalComma(value) {
+    if (value == null) return '';
+    var v = String(value);
+    // Treat '.' as decimal separator too, then keep only digits and one comma.
+    v = v.replace(/\./g, ',');
+    // Remove spaces and any non-digit/non-comma chars.
+    v = v.replace(/[^0-9,]/g, '');
+    var parts = v.split(',');
+    if (parts.length <= 1) return parts[0];
+    return parts[0] + ',' + parts.slice(1).join('').slice(0, 2);
+  }
+
   function setDisabled(row, disabled) {
     if (!row) return;
     row.style.display = '';
@@ -116,5 +128,17 @@
     var depositTotal = document.querySelector('#id_deposit_total');
     if (terms) terms.addEventListener('change', toggleFields);
     if (depositTotal) depositTotal.addEventListener('input', toggleFields);
+
+    // Money inputs: allow numeric keypad input and prefer comma as decimal separator.
+    document.querySelectorAll('input.js-decimal-comma').forEach(function (input) {
+      input.addEventListener('input', function () {
+        var next = normalizeDecimalComma(input.value);
+        if (input.value !== next) input.value = next;
+      });
+      input.addEventListener('blur', function () {
+        // Ensure at most 2 decimal digits on blur.
+        input.value = normalizeDecimalComma(input.value);
+      });
+    });
   });
 })();

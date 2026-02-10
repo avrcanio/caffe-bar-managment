@@ -1,0 +1,76 @@
+/* Two-column card layout for WarehouseInputItem on smaller screens */
+@media (max-width: 1200px) {
+  .inline-group .tabular thead {
+    display: none;
+  }
+
+  .inline-group .tabular tr.form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 16px;
+    border: 1px solid var(--hairline-color, #d7d7d7);
+    border-radius: 6px;
+    padding: 12px;
+    margin: 0 0 12px;
+    background: var(--body-bg, #fff);
+  }
+
+  .inline-group .tabular td {
+    display: block;
+    border: 0;
+    padding: 0;
+  }
+
+  .inline-group .tabular td.original,
+  .inline-group .tabular td.delete {
+    grid-column: 1 / -1;
+  }
+
+  .inline-group .tabular td.original {
+    font-weight: 600;
+    padding-bottom: 2px;
+  }
+
+  .inline-group .tabular td.delete {
+    padding-top: 8px;
+    border-top: 1px dashed var(--hairline-color, #d7d7d7);
+  }
+
+  /* Labels for each field */
+  .inline-group .tabular td.field-artikl::before { content: "Artikl"; }
+  .inline-group .tabular td.field-product_id::before { content: "Product id"; }
+  .inline-group .tabular td.field-product_name::before { content: "Naziv artikla"; }
+  .inline-group .tabular td.field-unit_of_measure::before { content: "Jedinica mjere"; }
+  .inline-group .tabular td.field-unit_name::before { content: "Naziv jedinice"; }
+  .inline-group .tabular td.field-quantity::before { content: "Količina"; }
+  .inline-group .tabular td.field-price::before { content: "Cijena"; }
+  .inline-group .tabular td.field-total::before { content: "Ukupno"; }
+  .inline-group .tabular td.field-buying_price::before { content: "Nabavna cijena"; }
+  .inline-group .tabular td.field-gross_price::before { content: "Bruto"; }
+  .inline-group .tabular td.field-tax_rate::before { content: "PDV stopa"; }
+  .inline-group .tabular td.field-calculate_tax::before { content: "Računaj PDV"; }
+  .inline-group .tabular td.field-rebate::before { content: "Rabat"; }
+  .inline-group .tabular td.field-margin::before { content: "Marža"; }
+  .inline-group .tabular td.field-sales_price::before { content: "Prodajna cijena"; }
+  .inline-group .tabular td.field-ordinal::before { content: "Redni broj"; }
+  .inline-group .tabular td.field-base_quantity::before { content: "Bazna količina"; }
+  .inline-group .tabular td.field-vat_prepayment::before { content: "Predujam PDV"; }
+  .inline-group .tabular td.field-calculate_spillage::before { content: "Izljev"; }
+  .inline-group .tabular td.field-price_on_stock_card::before { content: "Cijena na kartici"; }
+  .inline-group .tabular td.field-last_input_price::before { content: "Zadnja nabavna cijena"; }
+  .inline-group .tabular td.field-guid::before { content: "Guid"; }
+  .inline-group .tabular td.field-parent_guid::before { content: "Parent guid"; }
+
+  .inline-group .tabular td::before {
+    display: block;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    color: var(--body-quiet-color, #666);
+    margin-bottom: 4px;
+  }
+
+  .inline-group .tabular td.delete::before {
+    content: "Izbriši?";
+  }
+}

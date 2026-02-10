@@ -861,16 +861,153 @@ class InventoryItemInline(admin.TabularInline):
 
 @admin.register(Inventory)
 class InventoryAdmin(admin.ModelAdmin):
+    class InventoryAdminForm(forms.ModelForm):
+        date = forms.DateTimeField(
+            required=True,
+            input_formats=[
+                "%d.%m.%Y",
+                "%d.%m.%Y %H:%M",
+                "%d.%m.%Y %H.%M",
+                "%Y-%m-%dT%H:%M",
+                "%Y-%m-%d %H:%M:%S",
+            ],
+            widget=forms.DateTimeInput(
+                format="%d.%m.%Y %H:%M",
+                attrs={"class": "js-flatpickr-datetime"},
+            ),
+        )
+        opens_at = forms.DateTimeField(
+            required=False,
+            input_formats=[
+                "%d.%m.%Y",
+                "%d.%m.%Y %H:%M",
+                "%d.%m.%Y %H.%M",
+                "%Y-%m-%dT%H:%M",
+                "%Y-%m-%d %H:%M:%S",
+            ],
+            widget=forms.DateTimeInput(
+                format="%d.%m.%Y %H:%M",
+                attrs={"class": "js-flatpickr-datetime"},
+            ),
+        )
+        closes_at = forms.DateTimeField(
+            required=False,
+            input_formats=[
+                "%d.%m.%Y",
+                "%d.%m.%Y %H:%M",
+                "%d.%m.%Y %H.%M",
+                "%Y-%m-%dT%H:%M",
+                "%Y-%m-%d %H:%M:%S",
+            ],
+            widget=forms.DateTimeInput(
+                format="%d.%m.%Y %H:%M",
+                attrs={"class": "js-flatpickr-datetime"},
+            ),
+        )
+
+        class Meta:
+            model = Inventory
+            fields = "__all__"
+
+    form = InventoryAdminForm
     list_display = ("id", "warehouse", "date", "status", "created_by")
     search_fields = ("warehouse__name", "created_by__username")
     list_filter = ("status", "warehouse")
-    readonly_fields = ("created_by", "status")
-    fields = ("warehouse", "date", "status", "created_by")
-    actions = [create_transfer_for_inventory_shortage]
+    autocomplete_fields = ("warehouse", "counted_by")
+    readonly_fields = (
+        "created_by",
+        "public_token_created_at",
+        "submitted_at",
+        "submitted_by_name",
+        "submitted_ip",
+        "submitted_user_agent",
+        "public_link_status",
+    )
+    fields = (
+        "warehouse",
+        "date",
+        "opens_at",
+        "closes_at",
+        "status",
+        "created_by",
+        "counted_by",
+        "public_link_status",
+        "public_token_created_at",
+        "submitted_at",
+        "submitted_by_name",
+        "submitted_ip",
+        "submitted_user_agent",
+    )
     inlines = [InventoryItemInline]
 
+    @admin.display(description="Public link")
+    def public_link_status(self, obj):
+        if not obj.public_token_digest:
+            return "Nije generirano"
+        if obj.submitted_at:
+            return "Predano (zakljucano)"
+        return "Aktivno"
+
+    @admin.action(description="Generiraj public link (/inventory/<token>)", permissions=["change"])
+    def generate_public_link(self, request, queryset):
+        updated = 0
+        for inv in queryset:
+            token = inv.generate_public_token()
+            url = f"{request.scheme}://{request.get_host()}/inventory/{token}"
+            self.message_user(
+                request,
+                f"Inventura {inv.id}: link = {url} (token se prikazuje samo sada; regeneriraj ako zatreba).",
+                level=messages.SUCCESS,
+            )
+            updated += 1
+        if not updated:
+            self.message_user(request, "Nema inventura za generiranje linka.", level=messages.WARNING)
+
+    @admin.action(description="Otkljucaj (ispravak brojanja) + regeneriraj public link", permissions=["change"])
+    def reopen_for_correction(self, request, queryset):
+        updated = 0
+        with transaction.atomic():
+            for inv in queryset:
+                inv = Inventory.objects.select_for_update().get(pk=inv.pk)
+                inv.submitted_at = None
+                inv.submitted_by_name = ""
+                inv.submitted_ip = None
+                inv.submitted_user_agent = ""
+                inv.save(
+                    update_fields=[
+                        "submitted_at",
+                        "submitted_by_name",
+                        "submitted_ip",
+                        "submitted_user_agent",
+                    ]
+                )
+                token = inv.generate_public_token()
+                url = f"{request.scheme}://{request.get_host()}/inventory/{token}"
+                self.message_user(
+                    request,
+                    f"Inventura {inv.id}: otkljucano i generiran novi link = {url}",
+                    level=messages.SUCCESS,
+                )
+                updated += 1
+        if not updated:
+            self.message_user(request, "Nema inventura za otkljucavanje.", level=messages.WARNING)
+
+    @admin.action(description="Ukloni public link", permissions=["change"])
+    def clear_public_link(self, request, queryset):
+        updated = queryset.update(public_token_digest="", public_token_created_at=None)
+        self.message_user(request, f"Uklonjeno linkova: {updated}", level=messages.SUCCESS)
+
+    actions = [
+        create_transfer_for_inventory_shortage,
+        generate_public_link,
+        reopen_for_correction,
+        clear_public_link,
+    ]
+
     def save_model(self, request, obj, form, change):
+        prev_submitted_at = None
         if change:
+            prev_submitted_at = Inventory.objects.values_list("submitted_at", flat=True).get(pk=obj.pk)
             if obj.created_by_id:
                 obj.created_by_id = Inventory.objects.values_list(
                     "created_by_id",
@@ -881,6 +1018,29 @@ class InventoryAdmin(admin.ModelAdmin):
         else:
             obj.created_by = request.user
         super().save_model(request, obj, form, change)
+
+        # If admin explicitly re-opens an already-submitted inventory, unlock it and regenerate a link
+        # so staff can re-enter corrected counts.
+        if change and obj.status == Inventory.Status.OPEN and prev_submitted_at:
+            obj.submitted_at = None
+            obj.submitted_by_name = ""
+            obj.submitted_ip = None
+            obj.submitted_user_agent = ""
+            obj.save(
+                update_fields=[
+                    "submitted_at",
+                    "submitted_by_name",
+                    "submitted_ip",
+                    "submitted_user_agent",
+                ]
+            )
+            token = obj.generate_public_token()
+            url = f"{request.scheme}://{request.get_host()}/inventory/{token}"
+            self.message_user(
+                request,
+                f"Inventura {obj.id}: otkljucano i generiran novi link = {url}",
+                level=messages.SUCCESS,
+            )
 
 
 class WarehouseTransferItemInline(admin.TabularInline):
@@ -1120,10 +1280,18 @@ class StockMoveAdmin(admin.ModelAdmin):
 
 @admin.register(StockMoveLine)
 class StockMoveLineAdmin(admin.ModelAdmin):
-    list_display = ("id", "move", "warehouse", "artikl", "quantity", "unit_cost", "source_item")
+    def move_display(self, obj):
+        # Display like "in @ 2026-02-06 21:28" but sort by StockMove.date.
+        return str(obj.move) if obj.move_id else ""
+
+    move_display.short_description = "move"
+    move_display.admin_order_field = "move__date"
+
+    list_display = ("id", "move_display", "warehouse", "artikl", "quantity", "unit_cost", "source_item")
     list_filter = ("move__move_type", "warehouse", "artikl")
     search_fields = ("artikl__name", "artikl__code", "move__reference")
     raw_id_fields = ("move", "warehouse", "artikl", "source_item")
+    ordering = ("-move__date", "-id")
 
 
 @admin.register(ReplenishRequestLine)

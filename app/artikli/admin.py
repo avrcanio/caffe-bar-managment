@@ -1,6 +1,7 @@
 import time
 from decimal import Decimal
 
+from django import forms
 from django.contrib import admin, messages
 from django.http import HttpResponseRedirect
 from django.urls import path, reverse
@@ -8,6 +9,7 @@ from django.db import models, transaction
 from django.utils.html import format_html
 from mptt.admin import DraggableMPTTAdmin, TreeRelatedFieldListFilter
 
+from configuration.models import TaxGroup
 from .models import (
     Artikl,
     ArtiklDetail,
@@ -142,6 +144,23 @@ def import_artikl_details_from_remaris(modeladmin, request, queryset):
 
 @admin.register(Artikl)
 class ArtiklAdmin(admin.ModelAdmin):
+    class ArtiklAdminForm(forms.ModelForm):
+        class Meta:
+            model = Artikl
+            fields = "__all__"
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.fields["tax_group"].required = True
+            if not self.instance.pk and not self.initial.get("tax_group"):
+                tg = (
+                    TaxGroup.objects.filter(code__iexact="PDV25").first()
+                    or TaxGroup.objects.filter(rate=Decimal("0.2500")).order_by("id").first()
+                )
+                if tg:
+                    self.initial["tax_group"] = tg
+
+    form = ArtiklAdminForm
     autocomplete_fields = ("drink_category",)
     list_display = (
         "rm_id",

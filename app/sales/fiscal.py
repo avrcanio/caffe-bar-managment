@@ -17,6 +17,7 @@ class FiscalConfig:
     office_code: str
     device_code: str
     cert_path: str
+    cert_p12_data: bytes | None
     cert_pass: str
     environment: str = "EDUC"
 
@@ -27,13 +28,19 @@ def get_fiscal_config() -> FiscalConfig:
     office_code = os.getenv("FISCAL_OFFICE_CODE", "POS1")
     device_code = os.getenv("FISCAL_DEVICE_CODE", "1")
     cert_path = os.getenv("FISCAL_CERT_PATH", "")
+    cert_p12_data = None
     cert_pass = os.getenv("FISCAL_CERT_PASS", "")
+    if company and getattr(company, "fiscal_cert_p12", None):
+        # Prefer DB-stored certificate to avoid filesystem/public media exposure.
+        cert_p12_data = bytes(company.fiscal_cert_p12)
+        cert_pass = (company.fiscal_cert_pass or "").strip() or cert_pass
     environment = os.getenv("FISCAL_ENV", "EDUC")
     return FiscalConfig(
         oib=oib,
         office_code=office_code,
         device_code=device_code,
         cert_path=cert_path,
+        cert_p12_data=cert_p12_data,
         cert_pass=cert_pass,
         environment=environment,
     )
@@ -42,12 +49,15 @@ def get_fiscal_config() -> FiscalConfig:
 def _load_private_key(config: FiscalConfig):
     from cryptography.hazmat.primitives.serialization.pkcs12 import load_key_and_certificates
 
-    if not config.cert_path:
-        raise ValueError("FISCAL_CERT_PATH nije postavljen.")
     if not config.cert_pass:
         raise ValueError("FISCAL_CERT_PASS nije postavljen.")
-    with open(config.cert_path, "rb") as fh:
-        p12_data = fh.read()
+    if config.cert_p12_data:
+        p12_data = config.cert_p12_data
+    else:
+        if not config.cert_path:
+            raise ValueError("FISCAL_CERT_PATH nije postavljen (nema certifikata u bazi).")
+        with open(config.cert_path, "rb") as fh:
+            p12_data = fh.read()
     key, _cert, _additional = load_key_and_certificates(
         p12_data, config.cert_pass.encode("utf-8")
     )
@@ -107,15 +117,41 @@ def fiscalize_sales_invoice(invoice: SalesInvoice, *, user=None) -> FiscalReceip
     if not config.oib:
         raise ValueError("OIB nije postavljen (CompanyProfile.oib ili FISCAL_OIB).")
     receipt, _ = FiscalReceipt.objects.get_or_create(invoice=invoice)
+    if receipt.status == FiscalReceipt.Status.SUCCESS and receipt.jir:
+        return receipt
     try:
         zki = generate_zki(invoice, config)
         receipt.zki = zki
         receipt.qr_payload = build_qr_payload(invoice, config, zki)
-        receipt.status = FiscalReceipt.Status.SUCCESS if _is_mock_enabled() else FiscalReceipt.Status.PENDING
-        receipt.error_message = "MOCK fiskalizacija (bez certifikata)." if _is_mock_enabled() else ""
+        if _is_mock_enabled():
+            receipt.status = FiscalReceipt.Status.SUCCESS
+            receipt.error_message = "MOCK fiskalizacija (bez certifikata)."
+            receipt.save(update_fields=["zki", "qr_payload", "status", "error_message", "updated_at"])
+            return receipt
+
+        receipt.status = FiscalReceipt.Status.PENDING
+        receipt.error_message = ""
         receipt.save(update_fields=["zki", "qr_payload", "status", "error_message", "updated_at"])
-        if os.getenv("FISCAL_SEND_ENABLED", "false").lower() == "true":
-            raise NotImplementedError("Slanje u Poreznu (JIR) nije još implementirano.")
+
+        from sales.fiscal_send import is_send_enabled, send_sales_invoice
+
+        if is_send_enabled():
+            result = send_sales_invoice(invoice, config)
+            receipt.jir = result.jir
+            receipt.xml_request = result.xml_request
+            receipt.xml_response = result.xml_response
+            receipt.sent_at = timezone.now()
+            receipt.status = FiscalReceipt.Status.SUCCESS
+            receipt.save(
+                update_fields=[
+                    "jir",
+                    "xml_request",
+                    "xml_response",
+                    "sent_at",
+                    "status",
+                    "updated_at",
+                ]
+            )
     except Exception as exc:
         receipt.status = FiscalReceipt.Status.ERROR
         receipt.error_message = str(exc)

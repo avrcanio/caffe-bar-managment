@@ -147,12 +147,21 @@ class Inventory(models.Model):
         related_name="inventories",
     )
     date = models.DateTimeField()
+    opens_at = models.DateTimeField(null=True, blank=True)
+    closes_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(
         max_length=20,
         choices=Status.choices,
         default=Status.OPEN,
         verbose_name="Status",
     )
+    # Bearer token used for public counting UI. Stored as a digest so we can look it up efficiently.
+    public_token_digest = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    public_token_created_at = models.DateTimeField(null=True, blank=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    submitted_by_name = models.CharField(max_length=120, blank=True, default="")
+    submitted_ip = models.GenericIPAddressField(null=True, blank=True)
+    submitted_user_agent = models.CharField(max_length=400, blank=True, default="")
     created_by = models.ForeignKey(
         "auth.User",
         null=True,
@@ -161,15 +170,44 @@ class Inventory(models.Model):
         on_delete=models.SET_NULL,
         related_name="inventories",
     )
+    counted_by = models.ForeignKey(
+        "auth.User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="inventories_counted",
+        verbose_name="Brojao",
+    )
 
     def update_status_from_items(self) -> None:
         if self.status == self.Status.CLOSED:
             return
-        has_counted = (
-            self.items.exclude(quantity__isnull=True).exclude(quantity=0).exists()
-        )
+        # quantity NULL means "not counted yet"; 0 is a valid counted value.
+        has_counted = self.items.filter(quantity__isnull=False).exists()
         self.status = self.Status.COUNTED if has_counted else self.Status.OPEN
         self.save(update_fields=["status"])
+
+    def generate_public_token(self) -> str:
+        import hashlib
+        import secrets
+
+        from django.utils import timezone
+
+        # High-entropy token; we store only sha256(token) in DB.
+        for _ in range(10):
+            token = secrets.token_urlsafe(32)
+            digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            if not Inventory.objects.filter(public_token_digest=digest).exists():
+                self.public_token_digest = digest
+                self.public_token_created_at = timezone.now()
+                self.save(update_fields=["public_token_digest", "public_token_created_at"])
+                return token
+        raise RuntimeError("Failed to generate unique inventory token.")
+
+    def clear_public_token(self) -> None:
+        self.public_token_digest = ""
+        self.public_token_created_at = None
+        self.save(update_fields=["public_token_digest", "public_token_created_at"])
 
     def __str__(self) -> str:
         warehouse_name = self.warehouse.name if self.warehouse else "Skladiste ?"
@@ -194,7 +232,7 @@ class InventoryItem(models.Model):
         on_delete=models.SET_NULL,
         related_name="inventory_items",
     )
-    quantity = models.DecimalField(max_digits=12, decimal_places=4)
+    quantity = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
     unit = models.ForeignKey(
         "artikli.UnitOfMeasureData",
         null=True,

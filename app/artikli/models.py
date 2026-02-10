@@ -1,5 +1,6 @@
 import secrets
 
+from django.core.exceptions import ValidationError
 from django.db import models
 from mptt.models import MPTTModel, TreeForeignKey
 
@@ -30,7 +31,7 @@ class Artikl(models.Model):
         "configuration.TaxGroup",
         on_delete=models.SET_NULL,
         null=True,
-        blank=True,
+        blank=False,
         related_name="artikli",
         verbose_name="porezna grupa",
     )
@@ -49,6 +50,26 @@ class Artikl(models.Model):
         return f"{self.code} - {self.name}"
 
     def save(self, *args, **kwargs):
+        # Porezna grupa mora biti postavljena; ako nije, pokušaj default na PDV 25%.
+        if not self.tax_group_id:
+            try:
+                from decimal import Decimal
+
+                from configuration.models import TaxGroup
+
+                tg = (
+                    TaxGroup.objects.filter(code__iexact="PDV25").first()
+                    or TaxGroup.objects.filter(rate=Decimal("0.2500")).order_by("id").first()
+                )
+                if tg:
+                    self.tax_group = tg
+            except Exception:
+                # If TaxGroup table isn't available (early migrations) or any other
+                # unexpected issue occurs, fall through to validation below.
+                pass
+        if not self.tax_group_id:
+            raise ValidationError({"tax_group": "Porezna grupa je obavezna."})
+
         if not self.code:
             while True:
                 code = "".join(secrets.choice("0123456789") for _ in range(8))

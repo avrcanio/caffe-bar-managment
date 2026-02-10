@@ -119,7 +119,6 @@ class SalesInvoiceItem(models.Model):
         blank=True,
     )
     stock_out_posted_at = models.DateTimeField(null=True, blank=True)
-    stock_out_posted_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self) -> str:
         return f"{self.product_name} x {self.quantity}"

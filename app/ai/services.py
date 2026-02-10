@@ -5,10 +5,10 @@ from urllib.parse import quote
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
-from django.db.models import Count, Sum, Q
+from django.db.models import Count, DecimalField, ExpressionWrapper, F, Q, Sum
 from django.utils import timezone
 
 from artikli.models import Artikl, ArtiklDetail, Normativ, DrinkCategory
@@ -19,7 +19,8 @@ from contacts.models import Supplier
 from orders.models import PurchaseOrder, PurchaseOrderItem
 from sales.models import SalesInvoice, SalesInvoiceItem
 from orders.models import WarehouseInput, WarehouseInputItem
-from stock.models import WarehouseId, WarehouseStock
+from sales.models import Representation, RepresentationItem, RepresentationReason
+from stock.models import WarehouseId, WarehouseStock, StockLot
 
 
 @dataclass
@@ -27,6 +28,11 @@ class ToolResult:
     name: str
     arguments: Dict[str, Any]
     result: Any
+
+    def __post_init__(self) -> None:
+        # Tool results are persisted into JSONField and returned via DRF JSON rendering.
+        # Ensure we don't leak non-JSON types (datetime/Decimal/etc).
+        self.result = _normalize(self.result)
 
 
 def _openai_settings():
@@ -59,7 +65,10 @@ def _parse_datetime(value: Optional[str]) -> datetime:
         return datetime.combine(value, datetime.min.time(), tzinfo=timezone.get_current_timezone())
     return datetime.fromisoformat(value)
 
+
 def _normalize(value: Any) -> Any:
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
     if isinstance(value, Decimal):
         return str(value)
     if isinstance(value, list):
@@ -70,6 +79,457 @@ def _normalize(value: Any) -> Any:
 
 def _json_dumps(value: Any) -> str:
     return json.dumps(_normalize(value), ensure_ascii=False)
+
+
+def _strip_json_object(text: str) -> Optional[str]:
+    """
+    Best-effort extractor for a single JSON object from model output.
+    Handles accidental code fences / extra text.
+    """
+    if not text:
+        return None
+    cleaned = text.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    if cleaned.startswith("{") and cleaned.endswith("}"):
+        return cleaned
+    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+    if match:
+        return match.group(0)
+    return None
+
+
+def _extract_time_filter_ai(question: str, today: date) -> Optional[Dict[str, Any]]:
+    """
+    Paid fallback: ask OpenAI to extract date range from the user's text.
+    Only used when local heuristics fail.
+    """
+    if os.getenv("AI_TIME_FILTER_FALLBACK", "1").strip() in {"0", "false", "False"}:
+        return None
+    tz_name = str(timezone.get_current_timezone())
+    dow = ["pon", "uto", "sri", "cet", "pet", "sub", "ned"][today.weekday()]
+    instructions = (
+        "Iz teksta korisnika izvuci vremenski filter kao datum/e.\n"
+        f"Danas je {today.isoformat()} ({dow}) u vremenskoj zoni {tz_name}.\n"
+        "Vrati ISKLJUCIVO jedan JSON objekt bez dodatnog teksta.\n"
+        "Schema:\n"
+        "{\n"
+        '  "label": string|null,\n'
+        '  "date_from": "YYYY-MM-DD"|null,\n'
+        '  "date_to": "YYYY-MM-DD"|null\n'
+        "}\n"
+        "Pravila:\n"
+        "- Ako nema vremenskog izraza, sva polja nek budu null.\n"
+        '- Ako je jedan dan ("prosla subota", "jucer"), date_from=date_to.\n'
+        "- date_from mora biti <= date_to.\n"
+    )
+    input_items = [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": question or ""}],
+        }
+    ]
+    try:
+        resp = _call_openai(instructions=instructions, input_items=input_items, tools=[])
+    except Exception:
+        return None
+
+    raw = _extract_output_text(resp) or ""
+    json_text = _strip_json_object(raw)
+    if not json_text:
+        return None
+    try:
+        obj = json.loads(json_text)
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+
+    date_from_raw = obj.get("date_from")
+    date_to_raw = obj.get("date_to")
+    label = obj.get("label")
+    if not date_from_raw and not date_to_raw:
+        return None
+    try:
+        date_from = _parse_date(date_from_raw)
+        date_to = _parse_date(date_to_raw)
+    except Exception:
+        return None
+    if not date_from or not date_to:
+        return None
+    if date_from > date_to:
+        date_from, date_to = date_to, date_from
+    # Basic sanity guard: avoid far-future / far-past hallucinations.
+    if date_from > today + timedelta(days=1):
+        return None
+    if date_from < today - timedelta(days=366 * 3):
+        return None
+
+    return {
+        "label": (str(label).strip() if isinstance(label, str) and label.strip() else "ai"),
+        "start": date_from,
+        "end": date_to,
+    }
+
+
+def _drink_category_outflow_response(
+    *,
+    date_from: date,
+    date_to: date,
+    category_label: str,
+    category_ids: List[int],
+    label: str,
+    warehouse_rm_id: Optional[int],
+) -> Tuple[str, List[ToolResult]]:
+    """
+    "Izlaz" = prodaja (SalesInvoice/SalesInvoiceItem) + reprezentacija
+    (Representation/RepresentationItem + RepresentationReason) za zadanu drink kategoriju.
+    """
+    max_detail_rows = int(os.getenv("AI_MAX_DETAIL_ROWS", "500"))
+    max_text_rows = int(os.getenv("AI_MAX_TEXT_ROWS", "120"))
+    include_details = os.getenv("AI_INCLUDE_OUTFLOW_DETAILS", "0").strip() in {"1", "true", "True"}
+
+    # 1) Prodaja (racuni)
+    sales_qs = SalesInvoiceItem.objects.select_related("invoice", "artikl").filter(
+        invoice__issued_on__gte=date_from,
+        invoice__issued_on__lte=date_to,
+        artikl__drink_category_id__in=category_ids,
+    )
+    if warehouse_rm_id is not None:
+        sales_qs = sales_qs.filter(invoice__warehouse_id=warehouse_rm_id)
+    sales_agg = sales_qs.aggregate(
+        qty=Sum("quantity"),
+        amount=Sum("amount"),
+        invoice_count=Count("invoice_id", distinct=True),
+        item_count=Count("id"),
+    )
+    sales_rows = (
+        sales_qs.values("artikl_id", "product_name", "artikl__name")
+        .annotate(qty=Sum("quantity"), amount=Sum("amount"))
+        .order_by("-amount")[:max_detail_rows]
+    )
+    sales_items = [
+        {
+            "artikl_id": row["artikl_id"],
+            "product_name": row.get("artikl__name") or row.get("product_name"),
+            "qty": str(row["qty"] or 0),
+            "amount": str(row["amount"] or 0),
+        }
+        for row in sales_rows
+    ]
+
+    # 2) Reprezentacija
+    reps_qs = Representation.objects.select_related("warehouse", "user", "reason").filter(
+        occurred_at__date__gte=date_from,
+        occurred_at__date__lte=date_to,
+    )
+    if warehouse_rm_id is not None:
+        reps_qs = reps_qs.filter(warehouse_id=warehouse_rm_id)
+    rep_items_qs = RepresentationItem.objects.select_related(
+        "representation",
+        "representation__warehouse",
+        "representation__user",
+        "representation__reason",
+        "artikl",
+    ).filter(
+        representation__in=reps_qs,
+        artikl__drink_category_id__in=category_ids,
+    )
+    rep_amount_expr = ExpressionWrapper(
+        F("quantity") * F("price"),
+        output_field=DecimalField(max_digits=18, decimal_places=6),
+    )
+    rep_agg = rep_items_qs.aggregate(
+        qty=Sum("quantity"),
+        amount=Sum(rep_amount_expr),
+        representation_count=Count("representation_id", distinct=True),
+        item_count=Count("id"),
+    )
+    rep_rows = (
+        rep_items_qs.values("artikl_id", "artikl__name")
+        .annotate(qty=Sum("quantity"), amount=Sum(rep_amount_expr))
+        .order_by("-amount")[:max_detail_rows]
+    )
+    rep_items_summary = [
+        {
+            "artikl_id": row["artikl_id"],
+            "artikl_name": row["artikl__name"],
+            "qty": str(row["qty"] or 0),
+            "amount": str(row["amount"] or 0),
+        }
+        for row in rep_rows
+    ]
+
+    # 3) Kumulativno po artiklu (prodaja + reprezentacija)
+    combined: Dict[int, Dict[str, Any]] = {}
+    for item in sales_items:
+        artikl_id = int(item["artikl_id"])
+        row = combined.setdefault(
+            artikl_id,
+            {
+                "artikl_id": artikl_id,
+                "name": item.get("product_name") or "",
+                "sales_qty": Decimal("0"),
+                "rep_qty": Decimal("0"),
+                "sales_amount": Decimal("0"),
+                "rep_amount": Decimal("0"),
+            },
+        )
+        if not row["name"]:
+            row["name"] = item.get("product_name") or ""
+        try:
+            row["sales_qty"] += Decimal(str(item.get("qty") or "0"))
+        except Exception:
+            pass
+        try:
+            row["sales_amount"] += Decimal(str(item.get("amount") or "0"))
+        except Exception:
+            pass
+
+    for item in rep_items_summary:
+        artikl_id = int(item["artikl_id"])
+        row = combined.setdefault(
+            artikl_id,
+            {
+                "artikl_id": artikl_id,
+                "name": item.get("artikl_name") or "",
+                "sales_qty": Decimal("0"),
+                "rep_qty": Decimal("0"),
+                "sales_amount": Decimal("0"),
+                "rep_amount": Decimal("0"),
+            },
+        )
+        if not row["name"]:
+            row["name"] = item.get("artikl_name") or ""
+        try:
+            row["rep_qty"] += Decimal(str(item.get("qty") or "0"))
+        except Exception:
+            pass
+        try:
+            row["rep_amount"] += Decimal(str(item.get("amount") or "0"))
+        except Exception:
+            pass
+
+    combined_rows = []
+    for row in combined.values():
+        total_qty = row["sales_qty"] + row["rep_qty"]
+        total_amount = row["sales_amount"] + row["rep_amount"]
+        combined_rows.append(
+            {
+                "artikl_id": row["artikl_id"],
+                "name": row["name"],
+                "sales_qty": str(row["sales_qty"]),
+                "rep_qty": str(row["rep_qty"]),
+                "total_qty": str(total_qty),
+                "sales_amount": str(row["sales_amount"]),
+                "rep_amount": str(row["rep_amount"]),
+                "total_amount": str(total_amount),
+            }
+        )
+    combined_rows.sort(key=lambda r: Decimal(str(r.get("total_qty") or "0")), reverse=True)
+
+    # "Navedi sva polja" (za relevantne zapise u tom periodu/kategoriji)
+    rep_ids = list(
+        rep_items_qs.values_list("representation_id", flat=True).distinct()[:max_detail_rows]
+    )
+    reps_full = list(
+        Representation.objects.select_related("warehouse", "user", "reason")
+        .filter(id__in=rep_ids)
+        .values(
+            "id",
+            "occurred_at",
+            "warehouse_id",
+            "user_id",
+            "reason_id",
+            "note",
+        )[:max_detail_rows]
+    )
+    reason_ids = sorted({row["reason_id"] for row in reps_full if row.get("reason_id")})
+    reasons_full = list(
+        RepresentationReason.objects.filter(id__in=reason_ids).values(
+            "id",
+            "code",
+            "name",
+            "is_active",
+            "sort_order",
+        )[:max_detail_rows]
+    )
+    reason_name_by_id = {row["id"]: row.get("name") for row in reasons_full if row.get("id")}
+    rep_items_full = list(
+        rep_items_qs.values(
+            "id",
+            "representation_id",
+            "artikl_id",
+            "quantity",
+            "price",
+            "transfer_posted_at",
+        )[:max_detail_rows]
+    )
+    rep_notes = [
+        {
+            "id": row.get("id"),
+            "occurred_at": row.get("occurred_at"),
+            "warehouse_id": row.get("warehouse_id"),
+            "user_id": row.get("user_id"),
+            "reason_id": row.get("reason_id"),
+            "reason_name": reason_name_by_id.get(row.get("reason_id")),
+            "note": (row.get("note") or "").strip(),
+        }
+        for row in reps_full
+        if (row.get("note") or "").strip()
+    ]
+
+    scope = f" za skladiste {warehouse_rm_id}" if warehouse_rm_id else ""
+    date_label = f"{label} ({date_from.isoformat()}" + (
+        f" do {date_to.isoformat()})" if date_to != date_from else ")"
+    )
+
+    sales_qty = str(sales_agg.get("qty") or 0)
+    sales_amount = str(sales_agg.get("amount") or 0)
+    sales_invoice_count = sales_agg.get("invoice_count") or 0
+
+    rep_qty = str(rep_agg.get("qty") or 0)
+    rep_amount = str(rep_agg.get("amount") or 0)
+    rep_count = rep_agg.get("representation_count") or 0
+
+    parts: List[str] = []
+    parts.append(f"Izlaz {category_label} {date_label}{scope}:")
+    parts.append("")
+    parts.append(
+        f"1) Prodaja (racuni): {sales_qty} kom, {sales_amount} EUR, {sales_invoice_count} racuna."
+    )
+    parts.append("")
+    parts.append(
+        f"Kumulativno artikli (prodaja + reprezentacija), sortirano po kolicini (max {max_text_rows} redova):"
+    )
+    if combined_rows:
+        shown = combined_rows[:max_text_rows]
+        parts.extend(
+            [
+                (
+                    f"{idx+1}. {row['name']} "
+                    f"(prodaja {row['sales_qty']}, repr {row['rep_qty']}, ukupno {row['total_qty']})"
+                )
+                for idx, row in enumerate(shown)
+            ]
+        )
+        if len(combined_rows) > len(shown):
+            parts.append(f"... ({len(combined_rows) - len(shown)} jos, skraceno)")
+    else:
+        parts.append("Nema stavki u tom periodu.")
+
+    parts.append("")
+    parts.append(f"2) Reprezentacija: {rep_qty} kom, {rep_amount} EUR, {rep_count} reprezentacija.")
+    if rep_items_summary:
+        parts.append("Reprezentacija po artiklu (top):")
+        parts.extend(
+            [
+                f"{idx+1}. {item['artikl_name']} ({item['qty']} kom, {item['amount']} EUR)"
+                for idx, item in enumerate(rep_items_summary[:min(30, max_text_rows)])
+            ]
+        )
+    else:
+        parts.append("Reprezentacija: nema stavki.")
+
+    parts.append("")
+    parts.append("Napomene reprezentacije:")
+    if rep_notes:
+        parts.extend(
+            [
+                (
+                    f"{idx+1}. [{n.get('occurred_at')}] rep_id {n.get('id')}, "
+                    f"reason {n.get('reason_name') or n.get('reason_id')}, "
+                    f"user {n.get('user_id')}: {re.sub(r'\s+', ' ', n.get('note') or '').strip()}"
+                )
+                for idx, n in enumerate(rep_notes[:max_text_rows])
+            ]
+        )
+        if len(rep_notes) > max_text_rows:
+            parts.append(f"... ({len(rep_notes) - max_text_rows} jos, skraceno)")
+    else:
+        parts.append("Nema napomena.")
+
+    if include_details:
+        parts.append("")
+        parts.append("Detalji (sva polja):")
+        # For sales we output aggregated per artikl rows (not the entire invoice/items tables).
+        parts.append(_json_dumps({"sales_salesinvoiceitem_agg": sales_items}))
+        parts.append(_json_dumps({"combined_agg": combined_rows}))
+        parts.append(_json_dumps({"sales_representation": reps_full}))
+        parts.append(_json_dumps({"sales_representationreason": reasons_full}))
+        parts.append(_json_dumps({"sales_representationitem": rep_items_full}))
+
+    answer = "\n".join(parts).strip()
+    rep_tool_payload: Dict[str, Any] = {
+        "summary": _normalize(rep_agg),
+        "items": rep_items_summary,
+        "notes": rep_notes,
+    }
+    if include_details:
+        rep_tool_payload.update(
+            {
+                "representation": reps_full,
+                "representationreason": reasons_full,
+                "representationitem": rep_items_full,
+            }
+        )
+    return answer, [
+        ToolResult(
+            name="get_sales_by_product",
+            arguments={
+                "date_from": date_from.isoformat(),
+                "date_to": date_to.isoformat(),
+                "query": f"{category_label} (drink_category)",
+                "warehouse_rm_id": warehouse_rm_id,
+            },
+            result={"summary": _normalize(sales_agg), "items": sales_items},
+        ),
+        ToolResult(
+            name="get_representation_report",
+            arguments={
+                "date_from": date_from.isoformat(),
+                "date_to": date_to.isoformat(),
+                "query": f"{category_label} (drink_category)",
+                "warehouse_rm_id": warehouse_rm_id,
+            },
+            result=rep_tool_payload,
+        ),
+    ]
+
+
+def _format_representation_item(idx: int, item: Dict[str, Any]) -> str:
+    artikl = item.get("artikl")
+    qty = item.get("quantity")
+    breakdown = item.get("normativ_breakdown") or []
+    if breakdown:
+        normativ_cost = item.get("normativ_cost")
+        if len(breakdown) == 1:
+            part = breakdown[0]
+            per_unit = part.get("unit_cost_total")
+            total = normativ_cost
+            try:
+                per_unit_dec = Decimal(str(per_unit)).quantize(Decimal("0.01"))
+            except Exception:
+                per_unit_dec = per_unit
+            try:
+                qty_dec = Decimal(str(qty)).quantize(Decimal("0.01"))
+            except Exception:
+                qty_dec = qty
+            try:
+                total_dec = Decimal(str(total)).quantize(Decimal("0.001"))
+            except Exception:
+                total_dec = total
+            return (
+                f"{idx+1}. {artikl} x {qty_dec} x {per_unit_dec} Ukupno {total_dec} EUR"
+            )
+        return (
+            f"{idx+1}. {artikl} x {qty} Ukupno {normativ_cost} EUR"
+        )
+    return (
+        f"{idx+1}. {artikl} x {qty} "
+        f"(cijena {item.get('price')}, iznos {item.get('amount')})"
+    )
 
 
 def _extract_time_filter(normalized_question: str, today: date):
@@ -90,6 +550,14 @@ def _extract_time_filter(normalized_question: str, today: date):
     if "prekjucer" in q_ascii:
         target = today - timedelta(days=2)
         return {"label": "prekjucer", "start": target, "end": target}
+    # "proslu subotu" => uvijek prosla (ne danasnja) subota.
+    if re.search(r"\bprosl[aieuo]\s+subot", q_ascii):
+        # Python: Monday=0 .. Sunday=6, Saturday=5
+        delta = (today.weekday() - 5) % 7
+        if delta == 0:
+            delta = 7
+        target = today - timedelta(days=delta)
+        return {"label": "prosla subota", "start": target, "end": target}
     if "prosli tjedan" in q_ascii:
         week_start = today - timedelta(days=today.weekday())
         target_start = week_start - timedelta(days=7)
@@ -137,31 +605,6 @@ def _match_drink_category(normalized_question: str) -> Optional[Dict[str, Any]]:
         .replace("š", "s")
         .replace("đ", "dj")
     )
-    synonym_groups = [
-        ("pivo", ["pivo", "piva", "pive"]),
-        ("vino", ["vino", "vina"]),
-        ("sok", ["sok", "sokovi"]),
-        ("voda", ["voda", "vode"]),
-        ("rakija", ["rakija", "rakije"]),
-        ("kava", ["kava", "kave"]),
-    ]
-    for canonical, tokens in synonym_groups:
-        if any(token in q_ascii for token in tokens):
-            qs = DrinkCategory.objects.filter(is_active=True)
-            token_q = Q()
-            for token in tokens:
-                token_q |= Q(name__icontains=token)
-            matches = list(qs.filter(token_q))
-            if matches:
-                min_level = min(cat.level for cat in matches)
-                top_matches = [cat for cat in matches if cat.level == min_level]
-                ids: List[int] = []
-                for cat in top_matches:
-                    ids.extend(
-                        list(cat.get_descendants(include_self=True).values_list("id", flat=True))
-                    )
-                label = top_matches[0].name if len(top_matches) == 1 else "kategorije"
-                return {"label": label, "ids": list(sorted(set(ids)))}
     categories = list(DrinkCategory.objects.filter(is_active=True).values_list("id", "name"))
     for category_id, name in categories:
         if not name:
@@ -178,9 +621,46 @@ def _match_drink_category(normalized_question: str) -> Optional[Dict[str, Any]]:
             cat = DrinkCategory.objects.filter(id=category_id).first()
             if not cat:
                 return {"label": name, "ids": [category_id]}
-            root = cat.get_root()
-            ids = list(root.get_descendants(include_self=True).values_list("id", flat=True))
-            return {"label": root.name, "ids": ids}
+            target = None
+            for anc in cat.get_ancestors(include_self=True):
+                anc_ascii = (
+                    (anc.name or "")
+                    .lower()
+                    .replace("č", "c")
+                    .replace("ć", "c")
+                    .replace("ž", "z")
+                    .replace("š", "s")
+                    .replace("đ", "dj")
+                )
+                if anc_ascii and anc_ascii in q_ascii:
+                    target = anc
+            if target is None:
+                target = cat
+            ids = list(target.get_descendants(include_self=True).values_list("id", flat=True))
+            return {"label": target.name, "ids": ids}
+    synonym_groups = [
+        ("pivo", ["pivo", "piva", "pive"]),
+        ("vino", ["vino", "vina"]),
+        ("sok", ["sok", "sokovi"]),
+        ("voda", ["voda", "vode"]),
+        ("rakija", ["rakija", "rakije"]),
+        ("kava", ["kava", "kave"]),
+        ("pelinkovac", ["pelinkovac", "pelinkovca", "pelinkovcu"]),
+    ]
+    for canonical, tokens in synonym_groups:
+        if any(token in q_ascii for token in tokens):
+            qs = DrinkCategory.objects.filter(is_active=True, name__icontains=canonical)
+            matches = list(qs)
+            if matches:
+                min_level = min(cat.level for cat in matches)
+                top_matches = [cat for cat in matches if cat.level == min_level]
+                ids: List[int] = []
+                for cat in top_matches:
+                    ids.extend(
+                        list(cat.get_descendants(include_self=True).values_list("id", flat=True))
+                    )
+                label = top_matches[0].name if len(top_matches) == 1 else canonical
+                return {"label": label, "ids": list(sorted(set(ids)))}
     return None
 
 
@@ -378,14 +858,13 @@ def _build_artikl_info(artikl: Artikl, warehouse_rm_id: Optional[int] = None) ->
             if glasses_info:
                 lines.append(f"{glasses_info}.")
             for item in items:
-                if "1 l" in (item.ingredient.name or "").lower():
-                    supplier_price = _find_supplier_price_item(item.ingredient)
-                    if supplier_price:
-                        lines.append(
-                            f"Nabavna cijena {item.ingredient.name}: "
-                            f"{supplier_price.price} {supplier_price.price_list.currency} "
-                            f"({supplier_price.price_list.supplier.name})."
-                        )
+                supplier_price = _find_supplier_price_item(item.ingredient)
+                if supplier_price:
+                    lines.append(
+                        f"Nabavna cijena {item.ingredient.name}: "
+                        f"{supplier_price.price} {supplier_price.price_list.currency} "
+                        f"({supplier_price.price_list.supplier.name})."
+                    )
                     break
     return "\n".join(lines)
 
@@ -702,6 +1181,128 @@ def tool_get_supplier_inputs(
     }
 
 
+def tool_get_representation_report(date_from: str, date_to: str):
+    start = _parse_date(date_from)
+    end = _parse_date(date_to)
+    if not start or not end:
+        return {"error": "date_from i date_to su obavezni."}
+    reps = (
+        Representation.objects.select_related("reason", "warehouse")
+        .prefetch_related("items__artikl__normativ__items__ingredient")
+        .filter(occurred_at__date__gte=start, occurred_at__date__lte=end)
+        .order_by("occurred_at")
+    )
+    rows = []
+    total_amount = Decimal("0")
+    total_cost = Decimal("0")
+    reason_totals: Dict[str, Dict[str, Any]] = {}
+    for rep in reps:
+        for item in rep.items.all():
+            amount = (item.price or Decimal("0")) * (item.quantity or Decimal("0"))
+            total_amount += amount
+            normativ_cost = None
+            normativ_breakdown: List[Dict[str, Any]] = []
+            if getattr(item.artikl, "normativ", None):
+                normativ = item.artikl.normativ
+                if normativ and normativ.is_active:
+                    cost_sum = Decimal("0")
+                    has_cost = False
+                    for nitem in normativ.items.all():
+                        lot = (
+                            StockLot.objects.filter(
+                                warehouse_id=rep.warehouse_id,
+                                artikl_id=nitem.ingredient.rm_id,
+                                qty_remaining__gt=0,
+                            )
+                            .order_by("-received_at")
+                            .first()
+                        )
+                        if lot and lot.unit_cost is not None:
+                            has_cost = True
+                            ingredient_qty = nitem.qty or Decimal("0")
+                            unit_cost = lot.unit_cost
+                            cost_sum += ingredient_qty * unit_cost
+                            normativ_breakdown.append(
+                                {
+                                    "ingredient": nitem.ingredient.name,
+                                    "ingredient_qty": str(ingredient_qty),
+                                    "unit_cost": str(unit_cost),
+                                    "unit_cost_total": str(ingredient_qty * unit_cost),
+                                }
+                            )
+                    if has_cost:
+                        normativ_cost = cost_sum * (item.quantity or Decimal("0"))
+                        total_cost += normativ_cost
+            if normativ_cost is None:
+                lot = (
+                    StockLot.objects.filter(
+                        warehouse_id=rep.warehouse_id,
+                        artikl_id=item.artikl.rm_id,
+                        qty_remaining__gt=0,
+                    )
+                    .order_by("-received_at")
+                    .first()
+                )
+                if lot and lot.unit_cost is not None:
+                    per_unit = lot.unit_cost
+                    normativ_cost = per_unit * (item.quantity or Decimal("0"))
+                    total_cost += normativ_cost
+                    normativ_breakdown.append(
+                        {
+                            "ingredient": item.artikl.name if item.artikl else None,
+                            "ingredient_qty": "1",
+                            "unit_cost": str(per_unit),
+                            "unit_cost_total": str(per_unit),
+                        }
+                    )
+            rows.append(
+                {
+                    "representation_id": rep.id,
+                    "occurred_at": rep.occurred_at.isoformat(),
+                    "reason": rep.reason.name if rep.reason else None,
+                    "artikl": item.artikl.name if item.artikl else None,
+                    "quantity": str(item.quantity),
+                    "price": str(item.price),
+                    "amount": str(amount),
+                    "normativ_cost": str(normativ_cost) if normativ_cost is not None else None,
+                    "normativ_breakdown": normativ_breakdown,
+                }
+            )
+            reason_label = rep.reason.name if rep.reason else "Nepoznato"
+            reason_entry = reason_totals.setdefault(
+                reason_label, {"amount": Decimal("0"), "normativ_cost": Decimal("0"), "items": []}
+            )
+            reason_entry["amount"] += amount
+            if normativ_cost is not None:
+                reason_entry["normativ_cost"] += normativ_cost
+            reason_entry["items"].append(
+                {
+                    "artikl": item.artikl.name if item.artikl else None,
+                    "quantity": str(item.quantity),
+                    "price": str(item.price),
+                    "amount": str(amount),
+                    "normativ_cost": str(normativ_cost) if normativ_cost is not None else None,
+                    "normativ_breakdown": normativ_breakdown,
+                }
+            )
+    return {
+        "date_from": start.isoformat(),
+        "date_to": end.isoformat(),
+        "count": len(rows),
+        "total_amount": str(total_amount),
+        "total_normativ_cost": str(total_cost),
+        "items": rows,
+        "reasons": {
+            key: {
+                "amount": str(val["amount"]),
+                "normativ_cost": str(val["normativ_cost"]),
+                "items": val["items"],
+            }
+            for key, val in reason_totals.items()
+        },
+    }
+
+
 def _tool_definitions():
     return [
         {
@@ -791,6 +1392,19 @@ def _tool_definitions():
         },
         {
             "type": "function",
+            "name": "get_representation_report",
+            "description": "Reprezentacija po razdoblju.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date_from": {"type": "string"},
+                    "date_to": {"type": "string"},
+                },
+                "required": ["date_from", "date_to"],
+            },
+        },
+        {
+            "type": "function",
             "name": "get_sales_by_product",
             "description": "Prodaja po artiklu (filtrirano po nazivu artikla).",
             "parameters": {
@@ -840,7 +1454,7 @@ def _call_openai(
     input_items: List[Dict[str, Any]],
     tools: List[Dict[str, Any]],
     previous_response_id: Optional[str] = None,
-):
+) -> Dict[str, Any]:
     conf = _openai_settings()
     if not conf["api_key"]:
         raise RuntimeError("OPENAI_API_KEY nije postavljen.")
@@ -860,12 +1474,15 @@ def _call_openai(
         headers["OpenAI-Organization"] = conf["org"]
     if conf["project"]:
         headers["OpenAI-Project"] = conf["project"]
-    resp = requests.post(
-        f"{conf['base_url'].rstrip('/')}/responses",
-        headers=headers,
-        json=payload,
-        timeout=conf["timeout"],
-    )
+    try:
+        resp = requests.post(
+            f"{conf['base_url'].rstrip('/')}/responses",
+            headers=headers,
+            json=payload,
+            timeout=conf["timeout"],
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(f"OpenAI network error: {exc}") from exc
     if not resp.ok:
         raise RuntimeError(f"OpenAI error {resp.status_code}: {resp.text}")
     return resp.json()
@@ -885,11 +1502,19 @@ def _extract_output_text(response: Dict[str, Any]) -> str:
     return "".join(texts).strip()
 
 
-def handle_ai_query(question: str):
+def handle_ai_query(question: str) -> Tuple[str, List[ToolResult]]:
     normalized_question = (question or "").lower()
-    normalized_question_ascii = normalized_question.replace("đ", "dj")
+    normalized_question_ascii = (
+        normalized_question.replace("č", "c")
+        .replace("ć", "c")
+        .replace("ž", "z")
+        .replace("š", "s")
+        .replace("đ", "dj")
+    )
     today = timezone.localdate()
     time_filter = _extract_time_filter(normalized_question, today)
+    if not time_filter:
+        time_filter = _extract_time_filter_ai(question, today)
     drink_category_match = _match_drink_category(normalized_question) if time_filter else None
     waiter_user = None
     waiter_name = None
@@ -922,15 +1547,24 @@ def handle_ai_query(question: str):
     if "prikaz" in normalized_question_ascii or "pokaz" in normalized_question_ascii:
         query = _extract_list_query(question)
         if query:
-            matches = list(
-                Artikl.objects.filter(name__icontains=query).order_by("name")[:50]
-            )
+            category_match = _match_drink_category(query)
+            if category_match:
+                matches = list(
+                    Artikl.objects.filter(
+                        drink_category_id__in=category_match["ids"]
+                    ).order_by("name")[:50]
+                )
+            else:
+                matches = list(
+                    Artikl.objects.filter(name__icontains=query).order_by("name")[:50]
+                )
             if not matches:
                 return f"Nema artikala za upit: {query}.", []
             lines = [
                 (
-                    f"- [{a.name}](/admin/artikli/artikl/{a.id}/change/) "
+                    f"- [{a.name}](fill:{a.name}) "
                     f"(id {a.id}, rm_id {a.rm_id}, sifra {a.code}) "
+                    f"admin: /admin/artikli/artikl/{a.id}/change/ "
                     f"detalji: /ai?q={quote(a.name)}"
                 )
                 for a in matches
@@ -939,23 +1573,40 @@ def handle_ai_query(question: str):
 
     artikl_list_query = _extract_artikl_list_query(question)
     if artikl_list_query:
-        matches = list(
-            Artikl.objects.filter(name__icontains=artikl_list_query).order_by("name")[:50]
-        )
+        category_match = _match_drink_category(artikl_list_query)
+        if category_match:
+            matches = list(
+                Artikl.objects.filter(
+                    drink_category_id__in=category_match["ids"]
+                ).order_by("name")[:50]
+            )
+        else:
+            matches = list(
+                Artikl.objects.filter(name__icontains=artikl_list_query).order_by("name")[:50]
+            )
         if not matches:
             return f"Nema artikala za upit: {artikl_list_query}.", []
         lines = [
             (
-                f"- [{a.name}](/admin/artikli/artikl/{a.id}/change/) "
+                f"- [{a.name}](fill:{a.name}) "
                 f"(id {a.id}, rm_id {a.rm_id}, sifra {a.code}) "
+                f"admin: /admin/artikli/artikl/{a.id}/change/ "
                 f"detalji: /ai?q={quote(a.name)}"
             )
             for a in matches
         ]
         return "Artikli:\n" + "\n".join(lines), []
 
-    if "skladist" in normalized_question:
+    if "skladist" in normalized_question_ascii:
         query = _extract_artikl_query(question)
+        cleaned = re.sub(
+            r"\\b(stanje|na|u|skladištu|skladistu|skladište|skladiste|skladistu)\\b",
+            "",
+            query,
+            flags=re.IGNORECASE,
+        ).strip()
+        if cleaned:
+            query = cleaned
         artikl = _find_artikl(query)
         if artikl and not artikl.is_stock_item:
             try:
@@ -975,6 +1626,48 @@ def handle_ai_query(question: str):
                 f"{artikl.name} nije skladisni artikl (is_stock_item = False).",
                 [],
             )
+        if artikl:
+            result = tool_get_stock_balance(query=str(artikl.id), warehouse_rm_id=warehouse_rm_id)
+            result = _normalize(result)
+            rows = result.get("rows", [])
+            if rows:
+                parts = [
+                    f"- skladiste {row.get('warehouse_id')}: {row.get('internal_quantity')} {row.get('unit') or ''}".strip()
+                    for row in rows
+                ]
+                return (
+                    f"Stanje za {result.get('name')}:\n" + "\n".join(parts),
+                    [ToolResult(name="get_stock_balance", arguments={"query": str(artikl.id), "warehouse_rm_id": warehouse_rm_id}, result=result)],
+                )
+            return f"Nema stanja za {result.get('name')}.", [
+                ToolResult(name="get_stock_balance", arguments={"query": str(artikl.id), "warehouse_rm_id": warehouse_rm_id}, result=result),
+            ]
+
+    # Must run before the generic "list artikli by category" fallback.
+    if (
+        time_filter
+        and drink_category_match
+        and any(
+            token in normalized_question_ascii
+            for token in (
+                "izaslo",
+                "izislo",
+                "izaso",
+                "izasla",
+                "izlaz",
+                "izaslo je",
+                "izislo je",
+            )
+        )
+    ):
+        return _drink_category_outflow_response(
+            date_from=time_filter["start"],
+            date_to=time_filter["end"],
+            category_label=drink_category_match["label"],
+            category_ids=drink_category_match["ids"],
+            label=time_filter["label"],
+            warehouse_rm_id=warehouse_rm_id,
+        )
 
     if not any(
         key in normalized_question
@@ -1018,6 +1711,22 @@ def handle_ai_query(question: str):
                 artikl = _find_artikl(query)
                 if artikl:
                     return _build_artikl_info(artikl, warehouse_rm_id=warehouse_rm_id), []
+            exact = Artikl.objects.filter(name__iexact=query).first()
+            if exact:
+                return _build_artikl_info(exact, warehouse_rm_id=warehouse_rm_id), []
+            category_match = _match_drink_category(query)
+            if category_match:
+                matches = list(
+                    Artikl.objects.filter(
+                        drink_category_id__in=category_match["ids"]
+                    ).order_by("name")[:50]
+                )
+                if matches:
+                    lines = [
+                        f"- {a.name} (id {a.id}, rm_id {a.rm_id})"
+                        for a in matches
+                    ]
+                    return "Artikli:\n" + "\n".join(lines), []
             matches = list(
                 Artikl.objects.filter(name__icontains=query).order_by("name")[:50]
             )
@@ -1327,7 +2036,15 @@ def handle_ai_query(question: str):
                 )
             ]
 
-    if time_filter and ("kupljeno" in normalized_question or "primka" in normalized_question):
+    if time_filter and (
+        "kupljeno" in normalized_question
+        or "kupili" in normalized_question
+        or "kupnja" in normalized_question
+        or "kupnje" in normalized_question
+        or "kupio" in normalized_question
+        or "kupila" in normalized_question
+        or "primka" in normalized_question
+    ):
         supplier_match = re.search(r"kod\s+(.+)$", normalized_question, flags=re.IGNORECASE)
         supplier_query = None
         if supplier_match:
@@ -1340,6 +2057,14 @@ def handle_ai_query(question: str):
                 supplier_query = "fructus"
             if supplier_query_norm in {"julius", "juliusa", "juliusu"}:
                 supplier_query = "Junus Meinl Bonfenti d.o.o."
+        if not supplier_query:
+            supplier_names = list(Supplier.objects.values_list("name", flat=True))
+            for name in supplier_names:
+                if not name:
+                    continue
+                if name.lower() in normalized_question:
+                    supplier_query = name
+                    break
         if supplier_query:
             result = tool_get_supplier_inputs(
                 supplier_query=supplier_query,
@@ -1381,6 +2106,64 @@ def handle_ai_query(question: str):
                     result=result,
                 )
             ]
+
+    if time_filter and "reprezentacij" in normalized_question:
+        result = tool_get_representation_report(
+            date_from=time_filter["start"].isoformat(),
+            date_to=time_filter["end"].isoformat(),
+        )
+        result = _normalize(result)
+        items = result.get("items", [])
+        reasons = result.get("reasons", {})
+        if reasons:
+            groups = []
+            for reason, payload in reasons.items():
+                lines = [
+                    _format_representation_item(idx, item)
+                    for idx, item in enumerate(payload.get("items", []))
+                ]
+                group = (
+                    f"Razlog: {reason}\n"
+                    + "\n".join(lines)
+                    + f"\nUkupno {reason}: {Decimal(str(payload.get('normativ_cost') or payload.get('amount'))).quantize(Decimal('0.01'))} EUR"
+                )
+                groups.append(group)
+            answer = (
+                f"Reprezentacija {time_filter['label']} ({time_filter['start'].isoformat()} do {time_filter['end'].isoformat()}):\n"
+                + "\n\n".join(groups)
+            )
+        elif items:
+            lines = [
+                (
+                    f"{idx+1}. {item.get('artikl')} x {item.get('quantity')} "
+                    f"(cijena {item.get('price')}, iznos {item.get('amount')})"
+                    + (f", normativ {item.get('normativ_cost')}" if item.get("normativ_cost") else "")
+                    + (f", razlog {item.get('reason')}" if item.get("reason") else "")
+                )
+                for idx, item in enumerate(items)
+            ]
+            answer = (
+                f"Reprezentacija {time_filter['label']} ({time_filter['start'].isoformat()} do {time_filter['end'].isoformat()}):\n"
+                + "\n".join(lines)
+            )
+            if result.get("total_amount") is not None:
+                answer += f"\n\nUkupno iznos: {result.get('total_amount')} EUR"
+            if result.get("total_normativ_cost") is not None:
+                answer += f"\nUkupno normativ: {result.get('total_normativ_cost')} EUR"
+        else:
+            answer = (
+                f"Nema reprezentacije u razdoblju {time_filter['start'].isoformat()} do {time_filter['end'].isoformat()}."
+            )
+        return answer, [
+            ToolResult(
+                name="get_representation_report",
+                arguments={
+                    "date_from": time_filter["start"].isoformat(),
+                    "date_to": time_filter["end"].isoformat(),
+                },
+                result=result,
+            )
+        ]
 
     if "jucer" in normalized_question or "jučer" in normalized_question:
         if "datum" in normalized_question:
@@ -1557,46 +2340,88 @@ def handle_ai_query(question: str):
     tool_results: List[ToolResult] = []
 
     response = _call_openai(instructions, input_items, tools)
-    tool_calls = [item for item in response.get("output", []) if item.get("type") == "function_call"]
+    tool_dispatch = {
+        "list_warehouses": tool_list_warehouses,
+        "list_suppliers": tool_list_suppliers,
+        "get_stock_balance": tool_get_stock_balance,
+        "get_sales_summary": tool_get_sales_summary,
+        "get_top_selling_items": tool_get_top_selling_items,
+        "get_sales_by_product": tool_get_sales_by_product,
+        "get_supplier_inputs": tool_get_supplier_inputs,
+        "get_representation_report": tool_get_representation_report,
+        "create_purchase_order": tool_create_purchase_order,
+    }
 
-    if tool_calls:
+    max_tool_rounds = int(os.getenv("OPENAI_MAX_TOOL_ROUNDS", "4"))
+    for _round in range(max_tool_rounds):
+        tool_calls = [
+            item for item in response.get("output", []) if item.get("type") == "function_call"
+        ]
+        if not tool_calls:
+            break
+
         output_items: List[Dict[str, Any]] = []
         for tool_call in tool_calls:
-            name = tool_call["name"]
-            args = json.loads(tool_call.get("arguments") or "{}")
-            if name == "list_warehouses":
-                result = tool_list_warehouses(**args)
-            elif name == "list_suppliers":
-                result = tool_list_suppliers(**args)
-            elif name == "get_stock_balance":
-                result = tool_get_stock_balance(**args)
-            elif name == "get_sales_summary":
-                result = tool_get_sales_summary(**args)
-            elif name == "get_top_selling_items":
-                result = tool_get_top_selling_items(**args)
-            elif name == "get_sales_by_product":
-                result = tool_get_sales_by_product(**args)
-            elif name == "get_supplier_inputs":
-                result = tool_get_supplier_inputs(**args)
-            elif name == "create_purchase_order":
-                result = tool_create_purchase_order(**args)
+            name = tool_call.get("name") or ""
+            call_id = tool_call.get("call_id")
+            raw_args = tool_call.get("arguments") or "{}"
+
+            if not call_id:
+                tool_results.append(
+                    ToolResult(
+                        name=name or "unknown_tool",
+                        arguments={"raw_arguments": raw_args},
+                        result={"error": "Nedostaje call_id."},
+                    )
+                )
+                continue
+
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                if not isinstance(args, dict):
+                    args = {"_raw": args}
+            except Exception as exc:
+                args = {}
+                result = {"error": "Neispravni tool arguments JSON.", "details": str(exc), "raw_arguments": raw_args}
+                result = _normalize(result)
+                tool_results.append(ToolResult(name=name or "unknown_tool", arguments={}, result=result))
+                output_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": _json_dumps(result),
+                    }
+                )
+                continue
+
+            fn = tool_dispatch.get(name)
+            if not fn:
+                result = {"error": "Nepoznat alat.", "name": name}
             else:
-                result = {"error": "Nepoznat alat."}
+                try:
+                    result = fn(**args)
+                except Exception as exc:
+                    result = {"error": "Greska pri izvrsavanju alata.", "name": name, "details": str(exc)}
+
             result = _normalize(result)
             tool_results.append(ToolResult(name=name, arguments=args, result=result))
             output_items.append(
                 {
                     "type": "function_call_output",
-                    "call_id": tool_call["call_id"],
+                    "call_id": call_id,
                     "output": _json_dumps(result),
                 }
             )
 
+        prev_id = response.get("id")
+        next_input_items = output_items if prev_id else (input_items + output_items)
         response = _call_openai(
             instructions,
-            output_items,
+            next_input_items,
             tools,
-            previous_response_id=response.get("id"),
+            previous_response_id=prev_id,
         )
+    else:
+        raise RuntimeError("Prekidanjem: previse uzastopnih tool roundova.")
 
     return _extract_output_text(response) or "", tool_results

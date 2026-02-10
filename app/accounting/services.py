@@ -203,10 +203,16 @@ def compute_purchase_totals_from_items(
         tax_group = getattr(it, "tax_group", None)
         if tax_group is None:
             tax_group = getattr(getattr(it, "artikl", None), "tax_group", None)
-        if not tax_group:
-            raise ValidationError("WarehouseInputItem nema tax_group – ne mogu izračunati PDV.")
+        rate: Decimal | None = None
+        if tax_group:
+            rate = Decimal(str(tax_group.rate))
+        elif getattr(it, "tax_rate", None) is not None:
+            # Some imports set tax_rate but don't link artikl.tax_group.
+            # Accept tax_rate as a fallback to avoid hard-failing admin workflows.
+            rate = Decimal(str(it.tax_rate))
+        if rate is None:
+            raise ValidationError("WarehouseInputItem nema tax_group/tax_rate – ne mogu izračunati PDV.")
 
-        rate = Decimal(str(tax_group.rate))
         line_net = Decimal(str(it.total))
         percent = q2(rate * Decimal("100.00"))
         net_by_rate[percent] = net_by_rate.get(percent, Decimal("0.00")) + line_net

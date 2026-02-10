@@ -5,6 +5,7 @@ from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, serializers
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
+from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
 from PIL import Image, ImageOps
 
@@ -188,6 +189,8 @@ class DrinkCategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class ArtiklImage46x75View(APIView):
+    permission_classes = [AllowAny]
+
     def get(self, request, rm_id):
         artikl = get_object_or_404(Artikl, rm_id=rm_id)
         if not artikl.image:
@@ -209,6 +212,8 @@ class ArtiklImage46x75View(APIView):
 
 
 class ArtiklImage125x200View(APIView):
+    permission_classes = [AllowAny]
+
     def get(self, request, rm_id):
         artikl = get_object_or_404(Artikl, rm_id=rm_id)
         if not artikl.image:

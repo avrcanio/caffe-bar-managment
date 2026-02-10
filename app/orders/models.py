@@ -2,6 +2,7 @@ from decimal import Decimal, ROUND_HALF_UP
 import secrets
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 
@@ -11,12 +12,14 @@ class PurchaseOrder(models.Model):
     STATUS_SENT = "sent"
     STATUS_CONFIRMED = "confirmed"
     STATUS_RECEIVED = "received"
+    STATUS_RECEIVED_ALL = "received_all"
     STATUS_CANCELED = "canceled"
     STATUS_CHOICES = (
         (STATUS_CREATED, "Kreirana"),
         (STATUS_SENT, "Poslana"),
         (STATUS_CONFIRMED, "Potvrđena"),
         (STATUS_RECEIVED, "Zaprimljena"),
+        (STATUS_RECEIVED_ALL, "Sve stavke s narudžbe su zaprimljene"),
         (STATUS_CANCELED, "Otkazana"),
     )
 
@@ -389,8 +392,57 @@ class WarehouseInput(models.Model):
         verbose_name="skladisno kretanje",
     )
 
+    def clean(self) -> None:
+        invoice_code = (self.invoice_code or "").strip()
+        delivery_note = (self.delivery_note or "").strip()
+        if not invoice_code and not delivery_note:
+            raise ValidationError(
+                {
+                    "invoice_code": "Unesi broj računa ili otpremnice.",
+                    "delivery_note": "Unesi broj računa ili otpremnice.",
+                }
+            )
+
     def __str__(self) -> str:
         return f"Primka {self.id} ({self.order_id})"
+
+    def recalculate_total(self, *, persist: bool = True) -> Decimal:
+        total = Decimal("0.00")
+        items = list(self.items.all().only("id", "quantity", "price", "total", "tax_rate", "gross_price"))
+        for item in items:
+            line_total = item.total
+            if line_total is None and item.quantity is not None and item.price is not None:
+                line_total = (item.quantity * item.price).quantize(
+                    Decimal("0.01"),
+                    rounding=ROUND_HALF_UP,
+                )
+            if line_total is None:
+                continue
+            line_gross = None
+            if item.tax_rate is not None:
+                line_gross = (line_total + (line_total * item.tax_rate)).quantize(
+                    Decimal("0.01"),
+                    rounding=ROUND_HALF_UP,
+                )
+            total += line_total
+            if persist and item.id:
+                updates = {}
+                if item.total != line_total:
+                    updates["total"] = line_total
+                if line_gross is not None and item.gross_price != line_gross:
+                    updates["gross_price"] = line_gross
+                if updates:
+                    WarehouseInputItem.objects.filter(pk=item.id).update(**updates)
+        total = total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if persist and self.pk:
+            WarehouseInput.objects.filter(pk=self.pk).update(total=total)
+            self.total = total
+        return total
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        # Always keep total in sync after any save/update.
+        self.recalculate_total(persist=True)
 
     class Meta:
         verbose_name = "Primka"
@@ -425,8 +477,8 @@ class WarehouseInputItem(models.Model):
     price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True, verbose_name="cijena")
     total = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True, verbose_name="ukupno")
     buying_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True, verbose_name="nabavna cijena")
-    gross_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True, verbose_name="bruto")
     tax_rate = models.DecimalField(max_digits=5, decimal_places=4, null=True, blank=True, verbose_name="pdv stopa")
+    gross_price = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True, verbose_name="bruto")
     calculate_tax = models.BooleanField(default=True, verbose_name="racunaj pdv")
     rebate = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True, verbose_name="rabat")
     margin = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True, verbose_name="marza")
@@ -442,6 +494,25 @@ class WarehouseInputItem(models.Model):
 
     def __str__(self) -> str:
         return f"{self.artikl} x {self.quantity}"
+
+    def save(self, *args, **kwargs):
+        if self.price is not None and self.quantity is not None:
+            self.total = (self.quantity * self.price).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            )
+            if self.tax_rate is not None:
+                self.gross_price = (self.total + (self.total * self.tax_rate)).quantize(
+                    Decimal("0.01"),
+                    rounding=ROUND_HALF_UP,
+                )
+        super().save(*args, **kwargs)
+        self.warehouse_input.recalculate_total(persist=True)
+
+    def delete(self, *args, **kwargs):
+        warehouse_input = self.warehouse_input
+        super().delete(*args, **kwargs)
+        warehouse_input.recalculate_total(persist=True)
 
     class Meta:
         verbose_name = "Stavka primke"

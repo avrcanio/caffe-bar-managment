@@ -1,5 +1,12 @@
+import os
+
 from django import forms
 from django.contrib import admin, messages
+from django.db import transaction
+from django.http import HttpRequest, HttpResponseRedirect
+from django.shortcuts import get_object_or_404
+from django.urls import path, reverse
+from django.utils import timezone
 from django.utils.html import format_html
 
 from .models import Pos, PosProfile, PosReceipt, PosReceiptItem, PosScreen, PosScreenItem, PosMode, PosModeScreen, PosDevice
@@ -68,6 +75,15 @@ class PosReceiptItemInline(admin.TabularInline):
     extra = 0
     can_delete = True
     autocomplete_fields = ("artikl",)
+    fields = (
+        "artikl",
+        "quantity",
+        "unit_price",
+        "product_name",
+        "net_amount",
+        "vat_amount",
+        "total_amount",
+    )
     readonly_fields = (
         "product_name",
         "net_amount",
@@ -84,6 +100,31 @@ class PosScreenItemInline(admin.TabularInline):
 
 @admin.register(PosReceipt)
 class PosReceiptAdmin(admin.ModelAdmin):
+    class PosReceiptAdminForm(forms.ModelForm):
+        class Meta:
+            model = PosReceipt
+            # Keep this intentionally small so issuing a receipt is as simple as possible.
+            fields = (
+                "pos",
+                "warehouse",
+                "operator",
+                "office_code",
+                "device_code",
+                "payment_type",
+                "currency",
+                "issued_at",
+            )
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            if not getattr(self.instance, "pk", None):
+                self.fields["issued_at"].initial = timezone.now()
+                self.fields["office_code"].initial = os.getenv("FISCAL_OFFICE_CODE", "POS1")
+                self.fields["device_code"].initial = os.getenv("FISCAL_DEVICE_CODE", "1")
+
+    form = PosReceiptAdminForm
+    change_form_template = "admin/pos/posreceipt/change_form.html"
+
     list_display = (
         "receipt_number",
         "issued_at",
@@ -102,6 +143,9 @@ class PosReceiptAdmin(admin.ModelAdmin):
 
     def get_readonly_fields(self, request, obj=None):
         base = (
+            "receipt_number",
+            "issued_on",
+            "status",
             "net_amount",
             "vat_amount",
             "total_amount",
@@ -120,17 +164,50 @@ class PosReceiptAdmin(admin.ModelAdmin):
                 "pos",
                 "warehouse",
                 "operator",
-                "receipt_number",
-                "issued_on",
                 "issued_at",
                 "office_code",
                 "device_code",
                 "payment_type",
                 "currency",
-                "status",
                 "storno_of",
             )
         return base
+
+    def save_model(self, request, obj, form, change):
+        # Make "issue receipt" from admin as frictionless as possible:
+        # - issued_at defaults to now
+        # - issued_on derived from issued_at
+        # - receipt_number allocated server-side (per office/device/day)
+        # - status defaults to ISSUED
+        from .services import _next_receipt_number
+
+        with transaction.atomic():
+            if not obj.issued_at:
+                obj.issued_at = timezone.now()
+            obj.issued_on = timezone.localdate(obj.issued_at)
+
+            if not obj.operator_id:
+                obj.operator = request.user
+
+            if not obj.office_code:
+                obj.office_code = os.getenv("FISCAL_OFFICE_CODE", "POS1")
+            if not obj.device_code:
+                obj.device_code = os.getenv("FISCAL_DEVICE_CODE", "1")
+
+            if not obj.warehouse_id and obj.pos_id and getattr(obj.pos, "warehouse_id", None):
+                obj.warehouse = obj.pos.warehouse
+
+            if not obj.receipt_number:
+                obj.receipt_number = _next_receipt_number(
+                    office_code=obj.office_code,
+                    device_code=obj.device_code,
+                    issued_on=obj.issued_on,
+                )
+
+            if not obj.status or obj.status == PosReceipt.Status.DRAFT:
+                obj.status = PosReceipt.Status.ISSUED
+
+            super().save_model(request, obj, form, change)
 
     @admin.display(description="PDF")
     def pdf_preview(self, obj):
@@ -146,6 +223,54 @@ class PosReceiptAdmin(admin.ModelAdmin):
         receipt = form.instance
         if receipt:
             receipt.recalc_totals(save=True)
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom = [
+            path(
+                "<path:object_id>/fiscalize/",
+                self.admin_site.admin_view(self.fiscalize_one_view),
+                name="pos_posreceipt_fiscalize",
+            ),
+        ]
+        return custom + urls
+
+    def fiscalize_one_view(self, request: HttpRequest, object_id: str):
+        if request.method != "POST":
+            messages.error(request, "Neispravan zahtjev (očekivan POST).")
+            return HttpResponseRedirect(
+                reverse("admin:pos_posreceipt_change", args=[object_id])
+            )
+
+        receipt = get_object_or_404(PosReceipt, pk=object_id)
+        if not self.has_change_permission(request, receipt):
+            messages.error(request, "Nemate prava za fiskalizaciju ovog računa.")
+            return HttpResponseRedirect(
+                reverse("admin:pos_posreceipt_change", args=[object_id])
+            )
+
+        if receipt.status == PosReceipt.Status.FISCALIZED:
+            messages.info(request, "Račun je već fiskaliziran.")
+            return HttpResponseRedirect(
+                reverse("admin:pos_posreceipt_change", args=[object_id])
+            )
+
+        try:
+            fiscalize_pos_receipt(receipt)
+            messages.success(request, "Račun je fiskaliziran.")
+        except Exception as exc:
+            messages.error(request, f"Fiskalizacija nije uspjela: {exc}")
+
+        return HttpResponseRedirect(
+            reverse("admin:pos_posreceipt_change", args=[object_id])
+        )
+
+    def change_view(self, request, object_id, form_url="", extra_context=None):
+        extra_context = extra_context or {}
+        extra_context["pos_receipt_fiscalize_url"] = reverse(
+            "admin:pos_posreceipt_fiscalize", args=[object_id]
+        )
+        return super().change_view(request, object_id, form_url, extra_context=extra_context)
 
     @admin.action(description="Fiskaliziraj POS račune", permissions=["change"])
     def fiscalize_receipts(self, request, queryset):

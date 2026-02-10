@@ -289,12 +289,12 @@ class SalesInvoiceAdmin(admin.ModelAdmin):
         issued_on = forms.DateField(
             required=False,
             input_formats=["%d.%m.%Y", "%Y-%m-%d"],
-            widget=forms.DateInput(format="%d.%m.%Y"),
+            widget=forms.DateInput(format="%d.%m.%Y", attrs={"class": "js-flatpickr-date"}),
         )
         issued_at = forms.DateTimeField(
             required=False,
-            input_formats=["%d.%m.%Y %H:%M", "%d.%m.%Y %H.%M", "%Y-%m-%d %H:%M:%S"],
-            widget=forms.DateTimeInput(format="%d.%m.%Y %H:%M"),
+            input_formats=["%d.%m.%Y %H:%M", "%d.%m.%Y %H.%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S"],
+            widget=forms.DateTimeInput(format="%d.%m.%Y %H:%M", attrs={"class": "js-flatpickr-datetime"}),
         )
 
         class Meta:
@@ -1179,7 +1179,7 @@ class SalesPriceListAdmin(admin.ModelAdmin):
                 "%Y-%m-%dT%H:%M",
                 "%Y-%m-%d %H:%M:%S",
             ],
-            widget=forms.DateTimeInput(format="%d.%m.%Y %H:%M"),
+            widget=forms.DateTimeInput(format="%d.%m.%Y %H:%M", attrs={"class": "js-flatpickr-datetime"}),
         )
         valid_to = forms.DateTimeField(
             required=False,
@@ -1190,7 +1190,7 @@ class SalesPriceListAdmin(admin.ModelAdmin):
                 "%Y-%m-%dT%H:%M",
                 "%Y-%m-%d %H:%M:%S",
             ],
-            widget=forms.DateTimeInput(format="%d.%m.%Y %H:%M"),
+            widget=forms.DateTimeInput(format="%d.%m.%Y %H:%M", attrs={"class": "js-flatpickr-datetime"}),
         )
 
         class Meta:
@@ -1223,7 +1223,7 @@ class SalesPriceRuleAdmin(admin.ModelAdmin):
                 "%Y-%m-%dT%H:%M",
                 "%Y-%m-%d %H:%M:%S",
             ],
-            widget=forms.DateTimeInput(format="%d.%m.%Y %H:%M"),
+            widget=forms.DateTimeInput(format="%d.%m.%Y %H:%M", attrs={"class": "js-flatpickr-datetime"}),
         )
         valid_to = forms.DateTimeField(
             required=False,
@@ -1234,7 +1234,7 @@ class SalesPriceRuleAdmin(admin.ModelAdmin):
                 "%Y-%m-%dT%H:%M",
                 "%Y-%m-%d %H:%M:%S",
             ],
-            widget=forms.DateTimeInput(format="%d.%m.%Y %H:%M"),
+            widget=forms.DateTimeInput(format="%d.%m.%Y %H:%M", attrs={"class": "js-flatpickr-datetime"}),
         )
 
         class Meta:

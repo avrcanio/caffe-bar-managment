@@ -204,6 +204,29 @@ class PosReceiptItem(models.Model):
     def __str__(self) -> str:
         return f"{self.product_name} x {self.quantity}"
 
+    def save(self, *args, **kwargs):
+        if self.artikl and not self.product_name:
+            self.product_name = self.artikl.name
+
+        rate = self.vat_rate or Decimal("0.0000")
+        if rate == Decimal("0.0000") and self.artikl and getattr(self.artikl, "tax_group", None):
+            rate = self.artikl.tax_group.rate or Decimal("0.0000")
+            self.vat_rate = rate
+
+        quantity = self.quantity or Decimal("0.0000")
+        unit_price = self.unit_price or Decimal("0.0000")
+        total = (quantity * unit_price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if rate:
+            net = (total / (Decimal("1.00") + rate)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        else:
+            net = total
+        vat = (total - net).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        self.total_amount = total
+        self.net_amount = net
+        self.vat_amount = vat
+        super().save(*args, **kwargs)
+
 
 class PosScreen(models.Model):
     name = models.CharField(max_length=150, verbose_name="Naziv")
@@ -339,25 +362,3 @@ class PosModeScreen(models.Model):
 
     def __str__(self) -> str:
         return f"{self.mode} -> {self.screen}"
-
-    def save(self, *args, **kwargs):
-        if self.artikl and not self.product_name:
-            self.product_name = self.artikl.name
-
-        rate = self.vat_rate or Decimal("0.0000")
-        if rate == Decimal("0.0000") and self.artikl and self.artikl.tax_group:
-            rate = self.artikl.tax_group.rate or Decimal("0.0000")
-            self.vat_rate = rate
-
-        quantity = self.quantity or Decimal("0.0000")
-        unit_price = self.unit_price or Decimal("0.0000")
-        total = (quantity * unit_price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        if rate:
-            net = (total / (Decimal("1.00") + rate)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        else:
-            net = total
-        vat = (total - net).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        self.total_amount = total
-        self.net_amount = net
-        self.vat_amount = vat
-        super().save(*args, **kwargs)

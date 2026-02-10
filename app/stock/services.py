@@ -738,17 +738,24 @@ def refresh_internal_warehouse_stock(*, warehouse_ids: list[int] | None = None, 
         avg_cost = (value / qty) if qty else Decimal("0.0000")
 
         stock_row = (
-            WarehouseStock.objects
-            .filter(warehouse_id_id=wh_id, product_id=artikl_id, wh_id__isnull=False)
-            .first()
-        )
-        fallback_row = None
-        if not stock_row:
-            fallback_row = WarehouseStock.objects.filter(
+            WarehouseStock.objects.filter(
                 warehouse_id_id=wh_id,
                 product_id=artikl_id,
-                wh_id__isnull=True,
-            ).first()
+                wh_id__isnull=False,
+            )
+            .order_by("id")
+            .first()
+        )
+        # Internal-only fallback rows (wh_id NULL) can be created before Remaris-import rows exist.
+        # Once a Remaris row exists, we want to keep a single row by copying internal_* fields to
+        # the Remaris-backed row and deleting fallbacks.
+        fallback_qs = WarehouseStock.objects.filter(
+            warehouse_id_id=wh_id,
+            product_id=artikl_id,
+            wh_id__isnull=True,
+        ).order_by("id")
+        fallback_row = fallback_qs.first()
+        if not stock_row and fallback_row:
             stock_row = fallback_row
         if not stock_row:
             artikl = Artikl.objects.filter(rm_id=artikl_id).first()
@@ -767,8 +774,9 @@ def refresh_internal_warehouse_stock(*, warehouse_ids: list[int] | None = None, 
         stock_row.internal_avg_cost = avg_cost
         stock_row.internal_updated_at = now
         stock_row.save(update_fields=["internal_quantity", "internal_avg_cost", "internal_updated_at"])
-        if stock_row.wh_id and fallback_row and fallback_row.id != stock_row.id:
-            fallback_row.delete()
+        if stock_row.wh_id:
+            # Keep only the Remaris-backed row once it exists.
+            fallback_qs.exclude(id=stock_row.id).delete()
 
 
 @transaction.atomic

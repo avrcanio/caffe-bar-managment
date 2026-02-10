@@ -95,6 +95,8 @@ class PosPinVerifyView(APIView):
 
 class PosPinLoginView(APIView):
     permission_classes = [AllowAny]
+    # Token-based login endpoint: disable session auth to avoid CSRF requirements when browser has a session cookie.
+    authentication_classes = []
 
     def post(self, request):
         pin = str(request.data.get("pin", "")).strip()
@@ -215,8 +217,19 @@ class PosReceiptCreateView(APIView):
 
         pos_id = request.data.get("pos_id")
         warehouse_rm_id = request.data.get("warehouse_id")
+        device_id = str(request.data.get("device_id", "") or "").strip()
 
         pos = Pos.objects.filter(id=pos_id).first() if pos_id else None
+        if not pos and device_id:
+            # TouchPOS typically knows its device_id; resolve the POS/warehouse from PosDevice mapping.
+            device = (
+                PosDevice.objects.select_related("pos", "pos__warehouse")
+                .filter(device_id=device_id, is_active=True, pos__is_active=True)
+                .first()
+            )
+            if device:
+                pos = device.pos
+
         if warehouse_rm_id:
             warehouse = WarehouseId.objects.filter(rm_id=warehouse_rm_id).first()
         elif pos and pos.warehouse_id:
@@ -241,16 +254,22 @@ class PosReceiptCreateView(APIView):
                 invoice_count=0,
                 invoice_ids=[],
             )
-        opening = turnover.cash_handovers.filter(kind=ShiftCashHandover.Kind.OPENING).order_by("-created_at").first()
-        if not opening:
-            return Response(
-                {
-                    "detail": "Preuzimanje blagajne je obavezno prije rada.",
-                    "opening_required": True,
-                    "turnover_id": turnover.id,
-                },
-                status=status.HTTP_423_LOCKED,
+        # Cash handover/opening enforcement can be enabled later; keep it behind a flag for now.
+        if os.getenv("POS_REQUIRE_OPENING", "false").lower() in ("1", "true", "yes", "on"):
+            opening = (
+                turnover.cash_handovers.filter(kind=ShiftCashHandover.Kind.OPENING)
+                .order_by("-created_at")
+                .first()
             )
+            if not opening:
+                return Response(
+                    {
+                        "detail": "Preuzimanje blagajne je obavezno prije rada.",
+                        "opening_required": True,
+                        "turnover_id": turnover.id,
+                    },
+                    status=status.HTTP_423_LOCKED,
+                )
 
         try:
             receipt = create_pos_receipt(

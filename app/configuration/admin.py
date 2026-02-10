@@ -1,3 +1,4 @@
+from django import forms
 from django.contrib import admin, messages
 from django.http import HttpResponseRedirect
 from django.urls import path, reverse
@@ -260,6 +261,84 @@ class PaymentTypeAdmin(admin.ModelAdmin):
 class CompanyProfileAdmin(admin.ModelAdmin):
     list_display = ("name", "oib", "email", "phone")
     search_fields = ("name", "oib", "email", "phone", "city")
+    readonly_fields = (
+        "fiscal_cert_filename",
+        "fiscal_cert_subject",
+        "fiscal_cert_issuer",
+        "fiscal_cert_valid_from",
+        "fiscal_cert_valid_to",
+    )
+
+    class form(forms.ModelForm):
+        fiscal_cert_upload = forms.FileField(
+            required=False,
+            label="Fiskalni certifikat (.p12/.pfx)",
+            help_text="Upload certifikata. Sprema se u bazu (nije dostupan kroz /media).",
+        )
+        fiscal_cert_clear = forms.BooleanField(
+            required=False,
+            label="Obrisi fiskalni certifikat",
+        )
+
+        class Meta:
+            model = CompanyProfile
+            fields = "__all__"
+            widgets = {
+                "fiscal_cert_pass": forms.PasswordInput(render_value=False),
+            }
+
+        def clean_fiscal_cert_pass(self):
+            # Keep existing password if user leaves it blank.
+            value = (self.cleaned_data.get("fiscal_cert_pass") or "").strip()
+            if not value and getattr(self.instance, "fiscal_cert_pass", ""):
+                return self.instance.fiscal_cert_pass
+            return value
+
+        def clean(self):
+            cleaned = super().clean()
+            upload = cleaned.get("fiscal_cert_upload")
+            clear = cleaned.get("fiscal_cert_clear")
+            pwd = (cleaned.get("fiscal_cert_pass") or "").strip()
+
+            if upload and clear:
+                raise forms.ValidationError("Ne mozes istovremeno uploadati i obrisati certifikat.")
+            if upload and not pwd and not getattr(self.instance, "fiscal_cert_pass", ""):
+                raise forms.ValidationError("Lozinka certifikata je obavezna pri uploadu.")
+            return cleaned
+
+        def save(self, commit=True):
+            obj: CompanyProfile = super().save(commit=False)
+            upload = self.cleaned_data.get("fiscal_cert_upload")
+            clear = self.cleaned_data.get("fiscal_cert_clear")
+
+            if clear:
+                obj.fiscal_cert_p12 = None
+                obj.fiscal_cert_filename = ""
+                obj.fiscal_cert_subject = ""
+                obj.fiscal_cert_issuer = ""
+                obj.fiscal_cert_valid_from = None
+                obj.fiscal_cert_valid_to = None
+
+            if upload:
+                data = upload.read()
+                obj.fiscal_cert_p12 = data
+                obj.fiscal_cert_filename = getattr(upload, "name", "") or "uploaded.p12"
+
+                # Parse metadata to show in admin.
+                from cryptography.hazmat.primitives.serialization.pkcs12 import load_key_and_certificates
+
+                pwd = (obj.fiscal_cert_pass or "").encode("utf-8") if obj.fiscal_cert_pass else None
+                _key, cert, _add = load_key_and_certificates(data, pwd)
+                if cert:
+                    obj.fiscal_cert_subject = cert.subject.rfc4514_string()
+                    obj.fiscal_cert_issuer = cert.issuer.rfc4514_string()
+                    obj.fiscal_cert_valid_from = cert.not_valid_before_utc
+                    obj.fiscal_cert_valid_to = cert.not_valid_after_utc
+
+            if commit:
+                obj.save()
+                self.save_m2m()
+            return obj
 
 
 @admin.register(OrderEmailTemplate)

@@ -1,0 +1,18 @@
+{% extends "admin/change_form.html" %}
+{% load i18n admin_urls %}
+
+{# Adds a POS-friendly action button on the change form. #}
+{% block object-tools-items %}
+  {{ block.super }}
+  {% if change and not is_popup %}
+    <li>
+      <form action="{{ pos_receipt_fiscalize_url }}" method="post" style="display:inline;">
+        {% csrf_token %}
+        <button type="submit" class="button">
+          Fiskaliziraj ovaj račun
+        </button>
+      </form>
+    </li>
+  {% endif %}
+{% endblock %}
+

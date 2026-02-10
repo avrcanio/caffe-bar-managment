@@ -1,6 +1,7 @@
 from django import forms
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from django.contrib import admin, messages
+from django.contrib.admin.widgets import AdminDateWidget
 from django.urls import reverse
 from django.utils.html import format_html
 from django.core.exceptions import ValidationError
@@ -18,9 +19,120 @@ from stock.services import get_stock_accounting_config
 
 
 class SupplierInvoiceAdminForm(forms.ModelForm):
+    _money_input_attrs = {
+        "inputmode": "decimal",  # mobile numeric keypad
+        "pattern": r"[0-9]+([,][0-9]{0,2})?",
+        "class": "js-decimal-comma",
+        "autocomplete": "off",
+    }
+
+    invoice_date = forms.DateField(
+        required=True,
+        input_formats=[
+            "%d.%m.%Y",
+            "%Y-%m-%d",            
+        ],
+        widget=AdminDateWidget(format="%d.%m.%Y"),
+    )
+    received_at = forms.DateField(
+        required=False,
+        input_formats=["%d.%m.%Y", "%Y-%m-%d"],
+        widget=AdminDateWidget(format="%d.%m.%Y"),
+    )
+    due_date = forms.DateField(
+        required=False,
+        input_formats=["%d.%m.%Y", "%Y-%m-%d"],
+        widget=AdminDateWidget(format="%d.%m.%Y"),
+    )
+    paid_at = forms.DateField(
+        required=False,
+        input_formats=["%d.%m.%Y", "%Y-%m-%d"],
+        widget=AdminDateWidget(format="%d.%m.%Y"),
+    )
+    deposit_total = forms.DecimalField(
+        required=False,
+        max_digits=12,
+        decimal_places=2,
+        localize=True,
+        initial=Decimal("0.00"),
+        widget=forms.TextInput(attrs=_money_input_attrs),
+    )
+    total_net = forms.DecimalField(
+        required=False,
+        max_digits=12,
+        decimal_places=2,
+        localize=True,
+        initial=Decimal("0.00"),
+        widget=forms.TextInput(attrs=_money_input_attrs),
+    )
+    total_vat = forms.DecimalField(
+        required=False,
+        max_digits=12,
+        decimal_places=2,
+        localize=True,
+        initial=Decimal("0.00"),
+        widget=forms.TextInput(attrs=_money_input_attrs),
+    )
+    total_gross = forms.DecimalField(
+        required=False,
+        max_digits=12,
+        decimal_places=2,
+        localize=True,
+        initial=Decimal("0.00"),
+        widget=forms.TextInput(attrs=_money_input_attrs),
+    )
+    paid_amount = forms.DecimalField(
+        required=False,
+        max_digits=12,
+        decimal_places=2,
+        localize=True,
+        initial=Decimal("0.00"),
+        widget=forms.TextInput(attrs=_money_input_attrs),
+    )
+
     class Meta:
         model = SupplierInvoice
         fields = "__all__"
+
+    def _clean_money_field(self, field_name: str) -> Decimal:
+        # Accept both "123,45" and "123.45" from numeric keypad inputs.
+        raw = (self.data.get(self.add_prefix(field_name), "") or "").strip()
+        if raw == "":
+            val = self.cleaned_data.get(field_name)
+            return (val if val is not None else Decimal("0.00")).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+        raw = raw.replace(" ", "").replace(".", ",")
+        # keep only digits and a single comma
+        out = []
+        comma = False
+        for ch in raw:
+            if ch.isdigit():
+                out.append(ch)
+            elif ch == "," and not comma:
+                out.append(ch)
+                comma = True
+        norm = "".join(out).replace(",", ".")
+        try:
+            val = Decimal(norm)
+        except (InvalidOperation, ValueError):
+            raise ValidationError("Unesi broj (npr. 12,34).")
+        return val.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    def clean_deposit_total(self):
+        return self._clean_money_field("deposit_total")
+
+    def clean_total_net(self):
+        return self._clean_money_field("total_net")
+
+    def clean_total_vat(self):
+        return self._clean_money_field("total_vat")
+
+    def clean_total_gross(self):
+        return self._clean_money_field("total_gross")
+
+    def clean_paid_amount(self):
+        return self._clean_money_field("paid_amount")
 
     def clean(self):
         cleaned = super().clean()
@@ -68,6 +180,7 @@ class SupplierInvoiceAdmin(admin.ModelAdmin):
         "cash_account",
         "deposit_account",
         "ap_account",
+        "payment_account",
     )
     filter_horizontal = ("inputs",)
     actions = ["post_supplier_invoice"]
@@ -231,9 +344,7 @@ class SupplierInvoiceAdmin(admin.ModelAdmin):
                     level=messages.ERROR,
                 )
                 continue
-            if (linked_receipt and invoice.payment_terms == invoice.PaymentTerms.DEFERRED) or (
-                invoice.payment_terms == invoice.PaymentTerms.DEFERRED and not invoice.ap_account_id
-            ):
+            if invoice.payment_terms == invoice.PaymentTerms.DEFERRED and not invoice.ap_account_id:
                 failed += 1
                 self.message_user(
                     request,

@@ -21,7 +21,12 @@ class ConfigurationConfig(AppConfig):
                 continue
             if auditlog.contains(model):
                 continue
-            auditlog.register(model)
+            # Avoid crashing audit log diffing on binary fields (e.g. fiscal certificates)
+            # and avoid logging secrets like certificate passwords.
+            exclude_fields: list[str] = []
+            if model._meta.app_label == "configuration" and model.__name__ == "CompanyProfile":
+                exclude_fields = ["fiscal_cert_p12", "fiscal_cert_pass"]
+            auditlog.register(model, exclude_fields=exclude_fields or None)
 
         if getattr(ModelAdmin, "_mozzart_date_format_patched", False):
             return

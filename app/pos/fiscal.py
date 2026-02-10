@@ -20,14 +20,19 @@ def _is_mock_enabled() -> bool:
 
 
 def _load_private_key():
-    cert_path = os.getenv("FISCAL_CERT_PATH", "")
-    cert_pass = os.getenv("FISCAL_CERT_PASS", "")
-    if not cert_path:
-        raise ValueError("FISCAL_CERT_PATH nije postavljen.")
+    company = CompanyProfile.objects.first()
+    cert_pass = (getattr(company, "fiscal_cert_pass", "") or "").strip() or os.getenv("FISCAL_CERT_PASS", "")
     if not cert_pass:
         raise ValueError("FISCAL_CERT_PASS nije postavljen.")
-    with open(cert_path, "rb") as fh:
-        p12_data = fh.read()
+    p12_data = None
+    if company and getattr(company, "fiscal_cert_p12", None):
+        p12_data = bytes(company.fiscal_cert_p12)
+    else:
+        cert_path = os.getenv("FISCAL_CERT_PATH", "")
+        if not cert_path:
+            raise ValueError("FISCAL_CERT_PATH nije postavljen (nema certifikata u bazi).")
+        with open(cert_path, "rb") as fh:
+            p12_data = fh.read()
     key, _cert, _additional = load_key_and_certificates(
         p12_data, cert_pass.encode("utf-8")
     )

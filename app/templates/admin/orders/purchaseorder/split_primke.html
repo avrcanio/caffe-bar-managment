@@ -1,0 +1,73 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+  <div id="content-main">
+    <p>
+      Narudžba: <strong>#{{ order.id }}</strong>,
+      Dobavljač: <strong>{{ order.supplier }}</strong>
+    </p>
+
+    {% if form.non_field_errors %}
+      <ul class="errorlist">
+        {% for err in form.non_field_errors %}
+          <li>{{ err }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+
+    <form method="post" novalidate>
+      {% csrf_token %}
+
+      <fieldset class="module aligned">
+        <h2>Podaci primke</h2>
+        <div class="form-row">
+          <div>{{ form.date.errors }}<label>Datum:</label> {{ form.date }}</div>
+        </div>
+        <div class="form-row">
+          <div>{{ form.invoice_code.errors }}<label>Broj računa:</label> {{ form.invoice_code }}</div>
+        </div>
+        <div class="form-row">
+          <div>{{ form.delivery_note.errors }}<label>Broj otpremnice:</label> {{ form.delivery_note }}</div>
+        </div>
+      </fieldset>
+
+      <fieldset class="module">
+        <h2>Stavke (odaberi što ide na ovu primku)</h2>
+        <div class="results">
+          <table>
+            <thead>
+              <tr>
+                <th>Odaberi</th>
+                <th>Artikl</th>
+                <th>Naručeno</th>
+                <th>Već zaprimljeno</th>
+                <th>Preostalo</th>
+                <th>JM</th>
+                <th>Količina na primci</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in rows %}
+                <tr>
+                  <td>{{ r.sel }}</td>
+                  <td>{{ r.item.artikl }}</td>
+                  <td>{{ r.ordered|default:r.item.quantity }}</td>
+                  <td>{{ r.received|default:"0" }}</td>
+                  <td>{{ r.remaining|default:"0" }}</td>
+                  <td>{{ r.item.unit_of_measure }}</td>
+                  <td>{{ r.qty.errors }}{{ r.qty }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </fieldset>
+
+      <div class="submit-row">
+        <input type="submit" value="Kreiraj primku" class="default" />
+        <a class="button cancel-link" href="{% url 'admin:orders_purchaseorder_change' order.id %}">{% trans "Cancel" %}</a>
+      </div>
+    </form>
+  </div>
+{% endblock %}

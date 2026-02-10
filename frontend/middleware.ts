@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-const PUBLIC_PATHS = ["/login", "/download"];
+const PUBLIC_PATHS = ["/login", "/download", "/inventory"];
 const AUTH_COOKIE_NAME = "sessionid";
 
 export function middleware(request: NextRequest) {

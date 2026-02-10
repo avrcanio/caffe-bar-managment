@@ -27,6 +27,7 @@ export default function AiChatPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
   const canSend = input.trim().length > 0 && !loading;
 
@@ -81,6 +82,30 @@ export default function AiChatPage() {
           if (line.trim() === "") {
             return <div key={`line-${lineIndex}`} className="h-3" />;
           }
+          if (!line.includes("](")) {
+            const listMatch = line.match(/^-\s+(.+?)\s+\((id|ID)\s*[:]*\s*\d+[^)]*\)/i);
+            if (listMatch) {
+              const name = listMatch[1].trim();
+              const nameStart = line.indexOf(name);
+              const nameEnd = nameStart + name.length;
+              return (
+                <div key={`line-${lineIndex}`} className="whitespace-pre-wrap">
+                  {line.slice(0, nameStart)}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setInput(name);
+                      inputRef.current?.focus();
+                    }}
+                    className="underline underline-offset-2"
+                  >
+                    {name}
+                  </button>
+                  {line.slice(nameEnd)}
+                </div>
+              );
+            }
+          }
           const parts: Array<string | JSX.Element> = [];
           let lastIndex = 0;
           let match: RegExpExecArray | null;
@@ -90,7 +115,22 @@ export default function AiChatPage() {
             }
             const text = match[1];
             const href = match[2];
-            if (href.startsWith("/")) {
+            if (href.startsWith("fill:")) {
+              const value = href.slice("fill:".length);
+              parts.push(
+                <button
+                  key={`link-${lineIndex}-${match.index}`}
+                  type="button"
+                  onClick={() => {
+                    setInput(value);
+                    inputRef.current?.focus();
+                  }}
+                  className="underline underline-offset-2"
+                >
+                  {text}
+                </button>
+              );
+            } else if (href.startsWith("/")) {
               parts.push(
                 <Link
                   key={`link-${lineIndex}-${match.index}`}
@@ -195,6 +235,7 @@ export default function AiChatPage() {
               ) : null}
               <div className="flex flex-col gap-3 sm:flex-row">
                 <input
+                  ref={inputRef}
                   value={input}
                   onChange={(event) => setInput(event.target.value)}
                   onKeyDown={(event) => {

@@ -64,6 +64,24 @@ class CompanyProfile(models.Model):
     email = models.EmailField(blank=True, default="", verbose_name="email")
     phone = models.CharField(max_length=50, blank=True, default="", verbose_name="telefon")
     logo = models.ImageField(upload_to="branding/", blank=True, null=True, verbose_name="logo")
+    # Fiskalizacija: keep certificate bytes in DB to avoid exposing it via /media.
+    fiscal_cert_p12 = models.BinaryField(null=True, blank=True, editable=False)
+    fiscal_cert_filename = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name="fiskalni certifikat (datoteka)",
+    )
+    fiscal_cert_pass = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name="fiskalni certifikat (lozinka)",
+    )
+    fiscal_cert_subject = models.CharField(max_length=512, blank=True, default="", editable=False)
+    fiscal_cert_issuer = models.CharField(max_length=512, blank=True, default="", editable=False)
+    fiscal_cert_valid_from = models.DateTimeField(null=True, blank=True, editable=False)
+    fiscal_cert_valid_to = models.DateTimeField(null=True, blank=True, editable=False)
     lgu = models.ForeignKey(
         "LocalGovernmentUnit",
         on_delete=models.PROTECT,
