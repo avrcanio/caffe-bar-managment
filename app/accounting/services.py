@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
+from types import SimpleNamespace
 from typing import Iterable
 
 from django.core.exceptions import ValidationError
@@ -766,6 +767,129 @@ def post_purchase_invoice_close_receipt(
             debit=Decimal("0.00"),
             credit=totals.payable_total,
             description="Dobavljac",
+        )
+
+    entry.post(user=posted_by)
+    return entry
+
+
+def post_supplier_return_charge_from_input(
+    *,
+    supplier_invoice,
+    warehouse_input: WarehouseInput,
+    line_quantities_by_item_id: dict[int, Decimal] | None = None,
+    description: str = "",
+    posted_by=None,
+) -> JournalEntry:
+    if not supplier_invoice.journal_entry_id:
+        raise ValidationError("Ulazni račun nije proknjižen.")
+    if not supplier_invoice.document_type_id:
+        raise ValidationError("Ulazni račun nema document_type.")
+
+    document_type = supplier_invoice.document_type
+    if not document_type.counterpart_account_id:
+        raise ValidationError("DocumentType nema postavljen konto protustavke.")
+
+    items = list(warehouse_input.items.all())
+    if not items:
+        raise ValidationError("Primka nema stavki.")
+    calc_items = []
+    if line_quantities_by_item_id:
+        for it in items:
+            qty = Decimal(str(line_quantities_by_item_id.get(it.id) or Decimal("0.0000")))
+            if qty <= Decimal("0.0000"):
+                continue
+            src_qty = Decimal(str(it.quantity or Decimal("0.0000")))
+            if src_qty <= Decimal("0.0000"):
+                raise ValidationError(f"Stavka primke {it.id} ima neispravnu količinu.")
+            if qty > src_qty:
+                raise ValidationError(f"Stavka primke {it.id}: povrat ne može biti veći od količine primke.")
+            if it.total is None:
+                raise ValidationError(f"Stavka primke {it.id} nema total.")
+            unit_net = Decimal(str(it.total)) / src_qty
+            line_net = q2(unit_net * qty)
+            calc_items.append(
+                SimpleNamespace(
+                    id=it.id,
+                    artikl_id=it.artikl_id,
+                    artikl=it.artikl,
+                    quantity=qty,
+                    total=line_net,
+                    tax_group=getattr(it, "tax_group", None),
+                    tax_rate=getattr(it, "tax_rate", None),
+                )
+            )
+        if not calc_items:
+            raise ValidationError("Nema stavki za financijsko terećenje povrata.")
+    else:
+        calc_items = items
+
+    totals = compute_purchase_totals_from_items(calc_items, deposit_total=None)
+    if totals.payable_total <= Decimal("0.00"):
+        raise ValidationError("Iznos povrata mora biti > 0.")
+
+    ledger = document_type.ledger or get_single_ledger()
+    counterpart_account = _resolve_account_by_code(
+        ledger=ledger,
+        code=document_type.counterpart_account.code,
+        label="counterpart_account",
+    )
+
+    if supplier_invoice.payment_terms == supplier_invoice.PaymentTerms.DEFERRED:
+        settlement_account = supplier_invoice.ap_account
+        settlement_label = "Dobavljac (umanjenje obveze)"
+    else:
+        settlement_account = supplier_invoice.cash_account or supplier_invoice.ap_account
+        settlement_label = "Gotovina / povrat od dobavljaca"
+
+    if not settlement_account or not settlement_account.is_postable:
+        raise ValidationError("Nedostaje validan konto za terećenje povrata (AP/cash).")
+
+    if totals.vat_total != Decimal("0.00") and not document_type.vat_input_account_id:
+        raise ValidationError("Imamo PDV na stavkama, ali DocumentType nema vat_input_account.")
+    if totals.deposit_total != Decimal("0.00"):
+        if not supplier_invoice.deposit_account_id or not supplier_invoice.deposit_account.is_postable:
+            raise ValidationError("Povrat ima depozit, ali ulazni račun nema validan deposit_account.")
+
+    entry = JournalEntry.objects.create(
+        ledger=ledger,
+        number=_next_entry_number(ledger),
+        date=warehouse_input.date,
+        description=description or f"Financijsko terecenje povrata primke #{warehouse_input.id}",
+        status=JournalEntry.Status.DRAFT,
+    )
+
+    JournalItem.objects.create(
+        entry=entry,
+        account=settlement_account,
+        debit=totals.payable_total,
+        credit=Decimal("0.00"),
+        description=settlement_label,
+    )
+    JournalItem.objects.create(
+        entry=entry,
+        account=counterpart_account,
+        debit=Decimal("0.00"),
+        credit=totals.net_total,
+        description="Storno zatvaranja primke (osnovica)",
+    )
+
+    if totals.vat_total != Decimal("0.00"):
+        JournalItem.objects.create(
+            entry=entry,
+            account=document_type.vat_input_account,
+            debit=Decimal("0.00"),
+            credit=totals.vat_total,
+            description="Storno pretporeza (PDV ulaz)",
+        )
+
+    if totals.deposit_total != Decimal("0.00"):
+        JournalItem.objects.create(
+            entry=entry,
+            account=supplier_invoice.deposit_account,
+            debit=Decimal("0.00"),
+            credit=totals.deposit_total,
+            description="Storno povratne naknade",
         )
 
     entry.post(user=posted_by)

@@ -31,7 +31,12 @@ from stock.models import (
     WarehouseTransfer,
     WarehouseTransferItem,
 )
-from stock.services import post_stock_transfer, replenish_to_sale_warehouse, refresh_internal_warehouse_stock
+from stock.services import (
+    clone_inventory_without_counts,
+    post_stock_transfer,
+    replenish_to_sale_warehouse,
+    refresh_internal_warehouse_stock,
+)
 
 
 @admin.action(description="Import stanje skladišta from Remaris", permissions=["change"])
@@ -623,6 +628,9 @@ def create_transfer_for_inventory_shortage(modeladmin, request, queryset):
             "items__artikl",
             "items__unit",
         ):
+            if inventory.status == Inventory.Status.CLOSED:
+                skipped += 1
+                continue
             if not inventory.warehouse_id:
                 skipped += 1
                 continue
@@ -630,13 +638,13 @@ def create_transfer_for_inventory_shortage(modeladmin, request, queryset):
             shortage_note = (
                 "Inventura manjak: inventory_id={id}, inventory_date={date}".format(
                     id=inventory.id,
-                    date=inventory.date.strftime("%Y-%m-%d %H:%M"),
+                    date=timezone.localtime(inventory.date).strftime("%Y-%m-%d %H:%M"),
                 )
             )
             overage_note = (
                 "Inventura visak: inventory_id={id}, inventory_date={date}".format(
                     id=inventory.id,
-                    date=inventory.date.strftime("%Y-%m-%d %H:%M"),
+                    date=timezone.localtime(inventory.date).strftime("%Y-%m-%d %H:%M"),
                 )
             )
 
@@ -654,7 +662,13 @@ def create_transfer_for_inventory_shortage(modeladmin, request, queryset):
                     warehouse_id_id=inventory.warehouse_id,
                     product_id=item.artikl_id,
                 ).first()
-                stock_qty = stock_row.quantity if stock_row else Decimal("0")
+                # Inventory adjustment must use internal stock state (FIFO-based),
+                # not imported external quantity.
+                stock_qty = (
+                    stock_row.internal_quantity
+                    if stock_row and stock_row.internal_quantity is not None
+                    else Decimal("0")
+                )
                 diff_qty = stock_qty - item.quantity
 
                 if diff_qty > 0:
@@ -910,8 +924,8 @@ class InventoryAdmin(admin.ModelAdmin):
             fields = "__all__"
 
     form = InventoryAdminForm
-    list_display = ("id", "warehouse", "date", "status", "created_by")
-    search_fields = ("warehouse__name", "created_by__username")
+    list_display = ("id", "name", "warehouse", "date", "status", "created_by")
+    search_fields = ("name", "note", "warehouse__name", "created_by__username")
     list_filter = ("status", "warehouse")
     autocomplete_fields = ("warehouse", "counted_by")
     readonly_fields = (
@@ -924,6 +938,8 @@ class InventoryAdmin(admin.ModelAdmin):
         "public_link_status",
     )
     fields = (
+        "name",
+        "note",
         "warehouse",
         "date",
         "opens_at",
@@ -997,11 +1013,47 @@ class InventoryAdmin(admin.ModelAdmin):
         updated = queryset.update(public_token_digest="", public_token_created_at=None)
         self.message_user(request, f"Uklonjeno linkova: {updated}", level=messages.SUCCESS)
 
+    @admin.action(
+        description="Kreiraj novu inventuru iz odabrane (kopiraj stavke bez kolicina)",
+        permissions=["add"],
+    )
+    def clone_inventory_items_without_counts(self, request, queryset):
+        if queryset.count() != 1:
+            self.message_user(
+                request,
+                "Odaberi tocno 1 inventuru.",
+                level=messages.WARNING,
+            )
+            return
+
+        source = queryset.select_related("warehouse").first()
+        if not source:
+            self.message_user(request, "Inventura nije pronađena.", level=messages.ERROR)
+            return
+
+        try:
+            new_inv, created, skipped = clone_inventory_without_counts(
+                source=source,
+                created_by=request.user,
+            )
+        except Exception as exc:
+            self.message_user(request, f"Greška: {exc}", level=messages.ERROR)
+            return
+
+        url = reverse("admin:stock_inventory_change", args=[new_inv.id])
+        self.message_user(
+            request,
+            f"Kreirana inventura #{new_inv.id} (stavki kopirano={created}, preskoceno={skipped}). "
+            f"Otvori: {url}",
+            level=messages.SUCCESS,
+        )
+
     actions = [
         create_transfer_for_inventory_shortage,
         generate_public_link,
         reopen_for_correction,
         clear_public_link,
+        clone_inventory_items_without_counts,
     ]
 
     def save_model(self, request, obj, form, change):

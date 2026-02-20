@@ -1,0 +1,88 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block content %}
+  <div id="content-main">
+    <p>Odabrane primke za povrat dobavljaču:</p>
+    <ul>
+      {% for wi in inputs %}
+        <li>
+          Primka <strong>#{{ wi.id }}</strong> |
+          Dobavljač: <strong>{{ wi.supplier }}</strong> |
+          Skladište: <strong>{{ wi.warehouse }}</strong> |
+          Datum: <strong>{{ wi.date }}</strong>
+        </li>
+      {% endfor %}
+    </ul>
+
+    {% if form.non_field_errors %}
+      <ul class="errorlist">
+        {% for err in form.non_field_errors %}
+          <li>{{ err }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+
+    <form method="post" novalidate>
+      {% csrf_token %}
+      <input type="hidden" name="ids" value="{{ ids }}" />
+
+      {% for grp in input_rows %}
+        <fieldset class="module">
+          <h2>Primka #{{ grp.wi.id }} - Stavke za povrat</h2>
+          <div class="results">
+            <table>
+              <thead>
+                <tr>
+                  <th>Artikl</th>
+                  <th>Original količina</th>
+                  <th>Stanje interno po skladištu</th>
+                  <th>Ukupno interno</th>
+                  <th>Količine za povrat po skladištu</th>
+                  <th>JM</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in grp.rows %}
+                  <tr>
+                    <td>{{ row.item.artikl }}</td>
+                    <td>{{ row.max_qty }}</td>
+                    <td>
+                      {% if row.stock_by_wh %}
+                        {% for wh in row.stock_by_wh %}
+                          {{ wh.0 }}: {{ wh.1 }}{% if not forloop.last %}<br>{% endif %}
+                        {% endfor %}
+                      {% else %}
+                        -
+                      {% endif %}
+                    </td>
+                    <td>{{ row.stock_total }}</td>
+                    <td>
+                      {% if row.warehouse_fields %}
+                        {% for wf in row.warehouse_fields %}
+                          <div style="margin-bottom:6px;">
+                            <label style="display:inline-block; min-width:130px;">{{ wf.wh_name }}:</label>
+                            {{ wf.field.errors }}{{ wf.field }}
+                            <span style="margin-left:6px; color:#666;">(max {{ wf.available }})</span>
+                          </div>
+                        {% endfor %}
+                      {% else %}
+                        -
+                      {% endif %}
+                    </td>
+                    <td>{{ row.item.unit_of_measure|default:"-" }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </fieldset>
+      {% endfor %}
+
+      <div class="submit-row">
+        <input type="submit" value="Kreiraj povrat" class="default" />
+        <a class="button cancel-link" href="{% url 'admin:orders_warehouseinput_changelist' %}">{% trans "Cancel" %}</a>
+      </div>
+    </form>
+  </div>
+{% endblock %}

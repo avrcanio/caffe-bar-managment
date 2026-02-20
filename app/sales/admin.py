@@ -442,7 +442,9 @@ class SalesInvoiceAdmin(admin.ModelAdmin):
 
     @admin.display(description="issued at", ordering="issued_at")
     def issued_at_display(self, obj):
-        return obj.issued_at.strftime("%d.%m.%Y %H:%M") if obj.issued_at else ""
+        if not obj.issued_at:
+            return ""
+        return timezone.localtime(obj.issued_at).strftime("%d.%m.%Y %H:%M")
 
     @admin.display(boolean=True, description="u Z", ordering="_z_included")
     def z_included(self, obj):

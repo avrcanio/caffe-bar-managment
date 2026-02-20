@@ -38,6 +38,8 @@ class InventorySerializer(serializers.ModelSerializer):
         model = Inventory
         fields = [
             "id",
+            "name",
+            "note",
             "warehouse",
             "warehouse_name",
             "date",
@@ -116,6 +118,34 @@ class InventoryItemListCreateView(generics.ListCreateAPIView):
     serializer_class = InventoryItemSerializer
     permission_classes = [IsAuthenticated]
 
+    def get_queryset(self):
+        qs = super().get_queryset().select_related("artikl", "unit", "inventory")
+
+        # Optional filtering: /api/inventory-items/?inventory=26 or ?inventory=26&inventory=32
+        # Keep default behavior (no filter) for existing callers.
+        raw_ids = self.request.query_params.getlist("inventory") or self.request.query_params.getlist("inventory_id")
+        if not raw_ids:
+            raw_single = self.request.query_params.get("inventory")
+            if raw_single:
+                raw_ids = [raw_single]
+
+        inv_ids = []
+        for raw in raw_ids:
+            if not raw:
+                continue
+            # Support comma-separated list: inventory=26,32
+            parts = [p.strip() for p in str(raw).split(",") if p.strip()]
+            for p in parts:
+                try:
+                    inv_ids.append(int(p))
+                except (TypeError, ValueError):
+                    continue
+
+        if inv_ids:
+            qs = qs.filter(inventory_id__in=sorted(set(inv_ids)))
+
+        return qs
+
 
 class InventoryItemDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = InventoryItem.objects.all()
@@ -165,6 +195,7 @@ class PublicInventorySerializer(serializers.ModelSerializer):
         model = Inventory
         fields = [
             "id",
+            "name",
             "warehouse_rm_id",
             "warehouse_name",
             "date",

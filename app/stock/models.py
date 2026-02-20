@@ -147,6 +147,8 @@ class Inventory(models.Model):
         related_name="inventories",
     )
     date = models.DateTimeField()
+    name = models.CharField(max_length=200, blank=True, default="", verbose_name="Naziv")
+    note = models.TextField(blank=True, default="", verbose_name="Napomena")
     opens_at = models.DateTimeField(null=True, blank=True)
     closes_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(
@@ -211,6 +213,9 @@ class Inventory(models.Model):
 
     def __str__(self) -> str:
         warehouse_name = self.warehouse.name if self.warehouse else "Skladiste ?"
+        prefix = self.name.strip() if self.name else ""
+        if prefix:
+            return f"{prefix} ({warehouse_name}) @ {self.date:%Y-%m-%d %H:%M}"
         return f"{warehouse_name} @ {self.date:%Y-%m-%d %H:%M}"
 
     class Meta:

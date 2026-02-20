@@ -21,12 +21,16 @@ from django.urls import reverse, path
 import requests
 
 from configuration.models import CompanyProfile, OrderEmailTemplate
-from accounting.services import compute_purchase_totals_from_items, post_warehouse_input_to_journal
+from accounting.services import (
+    compute_purchase_totals_from_items,
+    post_supplier_return_charge_from_input,
+    post_warehouse_input_to_journal,
+)
 from artikli.remaris_connector import RemarisConnector
 from purchases.models import SupplierInvoice
-from stock.models import WarehouseId, WarehouseTransfer, WarehouseTransferItem
+from stock.models import WarehouseId, WarehouseStock, WarehouseTransfer, WarehouseTransferItem
 from stock.services import get_stock_accounting_config
-from stock.services import post_warehouse_input_to_stock
+from stock.services import post_stock_out_multi_warehouse, post_warehouse_input_to_stock
 
 from .models import (
     PurchaseOrder,
@@ -56,18 +60,24 @@ def _fmt_decimal(value, places="0.00"):
 def _fmt_date(value):
     if not value:
         return ""
+    if timezone.is_aware(value):
+        value = timezone.localtime(value)
     return value.strftime("%-d.%-m.%Y.")
 
 
 def _fmt_datetime(value):
     if not value:
         return ""
+    if timezone.is_aware(value):
+        value = timezone.localtime(value)
     return value.strftime("%-d.%-m.%Y. %H:%M:%S")
 
 
 def _fmt_date_time_zero(value):
     if not value:
         return ""
+    if timezone.is_aware(value):
+        value = timezone.localtime(value)
     return value.strftime("%-d.%-m.%Y. 0:00:00")
 
 
@@ -387,6 +397,7 @@ class WarehouseInputAdmin(admin.ModelAdmin):
     actions = [
         "send_warehouse_input_to_remaris",
         "post_warehouse_input_to_stock_action",
+        "create_supplier_return_from_inputs",
         "create_supplier_invoice_from_inputs",
         "create_supplier_pricelist_from_input",
         "create_warehouse_transfer_from_inputs",
@@ -399,6 +410,234 @@ class WarehouseInputAdmin(admin.ModelAdmin):
     @admin.display(boolean=True, description="ulazni racun", ordering="supplier_invoices")
     def has_supplier_invoice(self, obj):
         return obj.supplier_invoices.exists()
+
+    @admin.action(description="Kreiraj povrat dobavljacu", permissions=["change"])
+    def create_supplier_return_from_inputs(self, request, queryset):
+        input_ids = list(queryset.values_list("id", flat=True))
+        if not input_ids:
+            self.message_user(request, "Nema odabranih primki.", level=messages.WARNING)
+            return None
+        url = reverse("admin:orders_warehouseinput_supplier_return")
+        return HttpResponseRedirect(f"{url}?ids={','.join(str(i) for i in input_ids)}")
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom = [
+            path(
+                "supplier-return/",
+                self.admin_site.admin_view(self.supplier_return_view),
+                name="orders_warehouseinput_supplier_return",
+            ),
+        ]
+        return custom + urls
+
+    def supplier_return_view(self, request):
+        ids_csv = (request.GET.get("ids") or request.POST.get("ids") or "").strip()
+        input_ids: list[int] = []
+        for token in ids_csv.split(","):
+            token = token.strip()
+            if token.isdigit():
+                input_ids.append(int(token))
+
+        if not input_ids:
+            self.message_user(request, "Nema odabranih primki za povrat.", level=messages.ERROR)
+            return HttpResponseRedirect(reverse("admin:orders_warehouseinput_changelist"))
+
+        inputs = list(
+            WarehouseInput.objects.filter(id__in=input_ids)
+            .select_related("warehouse")
+            .prefetch_related(
+                "items__artikl",
+                "supplier_invoices__document_type",
+                "supplier_invoices__journal_entry",
+                "supplier_invoices__ap_account",
+                "supplier_invoices__cash_account",
+                "supplier_invoices__deposit_account",
+            )
+            .order_by("id")
+        )
+        if not inputs:
+            self.message_user(request, "Primke nisu pronađene.", level=messages.ERROR)
+            return HttpResponseRedirect(reverse("admin:orders_warehouseinput_changelist"))
+
+        form = CreateSupplierReturnSelectionForm(
+            data=request.POST or None,
+            inputs=inputs,
+        )
+        if request.method == "POST" and form.is_valid():
+            self._execute_supplier_return_from_inputs(
+                request=request,
+                inputs=inputs,
+                line_quantities_by_input_id=form.line_quantities_by_input_id,
+                warehouse_quantities_by_input_id=form.warehouse_quantities_by_input_id,
+            )
+            return HttpResponseRedirect(reverse("admin:orders_warehouseinput_changelist"))
+
+        rows_by_input: dict[int, list[dict]] = {}
+
+        for row in form.rows:
+            wi = row["warehouse_input"]
+            rows_by_input.setdefault(wi.id, []).append(
+                {
+                    "item": row["item"],
+                    "max_qty": row["max_qty"],
+                    "stock_by_wh": row["stock_by_wh"],
+                    "stock_total": row["stock_total"],
+                    "warehouse_fields": [
+                        {
+                            "wh_name": w["wh_name"],
+                            "available": w["available"],
+                            "field": form[w["field_name"]],
+                        }
+                        for w in row["warehouse_fields"]
+                    ],
+                }
+            )
+
+        input_rows = [{"wi": wi, "rows": rows_by_input.get(wi.id, [])} for wi in inputs]
+
+        context = {
+            **self.admin_site.each_context(request),
+            "opts": self.model._meta,
+            "title": "Povrat dobavljaču - odabir količina",
+            "form": form,
+            "inputs": inputs,
+            "input_rows": input_rows,
+            "ids": ids_csv,
+        }
+        return TemplateResponse(
+            request,
+            "admin/orders/warehouseinput/supplier_return_form.html",
+            context,
+        )
+
+    def _execute_supplier_return_from_inputs(
+        self,
+        *,
+        request,
+        inputs,
+        line_quantities_by_input_id,
+        warehouse_quantities_by_input_id,
+    ):
+        created_stock = 0
+        created_finance = 0
+        skipped = 0
+        failed = 0
+
+        for warehouse_input in inputs:
+            if warehouse_input.supplier_return_stock_move_id:
+                skipped += 1
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id}: povrat je već napravljen.",
+                    level=messages.WARNING,
+                )
+                continue
+            if not warehouse_input.stock_move_id:
+                skipped += 1
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id}: nije proknjižena u skladište.",
+                    level=messages.WARNING,
+                )
+                continue
+            if not warehouse_input.warehouse_id:
+                skipped += 1
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id}: nema skladište.",
+                    level=messages.WARNING,
+                )
+                continue
+
+            input_quantities = line_quantities_by_input_id.get(warehouse_input.id) or {}
+            input_wh_quantities = warehouse_quantities_by_input_id.get(warehouse_input.id) or {}
+            item_map = {it.id: it for it in warehouse_input.items.all()}
+            wh_ids = {
+                wh_id
+                for per_item in input_wh_quantities.values()
+                for wh_id, qty in per_item.items()
+                if qty and qty > 0
+            }
+            warehouses = {w.rm_id: w for w in WarehouseId.objects.filter(rm_id__in=wh_ids)}
+            items_payload = []
+            for item_id, per_wh in input_wh_quantities.items():
+                it = item_map.get(item_id)
+                if not it or not it.artikl_id:
+                    continue
+                for wh_id, qty in per_wh.items():
+                    if not qty or qty <= 0:
+                        continue
+                    wh_obj = warehouses.get(wh_id)
+                    if not wh_obj:
+                        continue
+                    items_payload.append(
+                        {"warehouse": wh_obj, "artikl": it.artikl, "quantity": qty}
+                    )
+            if not items_payload:
+                skipped += 1
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id}: nema stavki za povrat.",
+                    level=messages.WARNING,
+                )
+                continue
+
+            posted_invoices = list(
+                warehouse_input.supplier_invoices.filter(journal_entry__isnull=False).order_by("id")
+            )
+            if len(posted_invoices) > 1:
+                failed += 1
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id}: vezana je na više proknjiženih ulaznih računa.",
+                    level=messages.ERROR,
+                )
+                continue
+
+            try:
+                with transaction.atomic():
+                    move = post_stock_out_multi_warehouse(
+                        items=items_payload,
+                        move_date=timezone.now(),
+                        reference=f"Povrat dobavljaču primka #{warehouse_input.id}",
+                        note=f"Povrat dobavljaču za primku {warehouse_input.id}",
+                    )
+                    warehouse_input.supplier_return_stock_move = move
+                    created_stock += 1
+
+                    update_fields = ["supplier_return_stock_move"]
+                    if posted_invoices:
+                        entry = post_supplier_return_charge_from_input(
+                            supplier_invoice=posted_invoices[0],
+                            warehouse_input=warehouse_input,
+                            line_quantities_by_item_id=input_quantities,
+                            description=f"Financijsko terecenje povrata primke #{warehouse_input.id}",
+                            posted_by=request.user,
+                        )
+                        warehouse_input.supplier_return_journal_entry = entry
+                        update_fields.append("supplier_return_journal_entry")
+                        created_finance += 1
+
+                    warehouse_input.save(update_fields=update_fields)
+            except Exception as exc:
+                failed += 1
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id}: greška kod povrata ({exc}).",
+                    level=messages.ERROR,
+                )
+
+        if created_stock:
+            self.message_user(
+                request,
+                f"Kreirano povrata: {created_stock}. Financijskih terećenja: {created_finance}.",
+                level=messages.SUCCESS,
+            )
+        if skipped:
+            self.message_user(request, f"Preskočeno: {skipped}.", level=messages.WARNING)
+        if failed:
+            self.message_user(request, f"Greške: {failed}.", level=messages.ERROR)
 
     @admin.action(description="Kreiraj međuskladišnicu iz primki", permissions=["change"])
     def create_warehouse_transfer_from_inputs(self, request, queryset):
@@ -1233,6 +1472,126 @@ class CreateWarehouseInputFromPoSelectionForm(forms.Form):
         WarehouseInputItem.objects.bulk_create(lines)
         wi.recalculate_total(persist=True)
         return wi
+
+
+class CreateSupplierReturnSelectionForm(forms.Form):
+    def __init__(self, *args, inputs: list[WarehouseInput], **kwargs):
+        super().__init__(*args, **kwargs)
+        self.inputs = inputs
+        self.rows: list[dict] = []
+        self.line_quantities_by_input_id: dict[int, dict[int, Decimal]] = {}
+        self.warehouse_quantities_by_input_id: dict[int, dict[int, dict[int, Decimal]]] = {}
+
+        artikl_rm_ids = {
+            it.artikl.rm_id
+            for wi in inputs
+            for it in wi.items.select_related("artikl").all()
+            if it.artikl_id and getattr(it.artikl, "rm_id", None) is not None
+        }
+        stock_rows = (
+            WarehouseStock.objects.filter(product_id__in=artikl_rm_ids)
+            .values("product_id", "warehouse_id_id", "warehouse_id__name", "internal_quantity")
+            .order_by("product_id", "warehouse_id__name", "warehouse_id_id")
+        )
+        stock_by_rm: dict[int, list[dict]] = {}
+        stock_total_by_rm: dict[int, Decimal] = {}
+        for sr in stock_rows:
+            product_id = sr["product_id"]
+            wh_id = sr["warehouse_id_id"]
+            if product_id is None or wh_id is None:
+                continue
+            wh_name = sr["warehouse_id__name"] or f"Skladište {wh_id}"
+            qty = sr["internal_quantity"] or Decimal("0.0000")
+            stock_by_rm.setdefault(product_id, []).append(
+                {"wh_id": wh_id, "wh_name": wh_name, "available": qty}
+            )
+            stock_total_by_rm[product_id] = stock_total_by_rm.get(product_id, Decimal("0.0000")) + qty
+
+        for wi in inputs:
+            wi_items = list(wi.items.select_related("artikl", "unit_of_measure").order_by("id"))
+            for it in wi_items:
+                if not it.artikl_id:
+                    continue
+                max_qty = Decimal(str(it.quantity or Decimal("0.0000")))
+                artikl_rm_id = getattr(it.artikl, "rm_id", None)
+                wh_defs = stock_by_rm.get(artikl_rm_id, [])
+                warehouse_fields: list[dict] = []
+                for wh in wh_defs:
+                    field_name = f"qty_{it.id}_wh_{wh['wh_id']}"
+                    max_wh_qty = Decimal(str(wh["available"] or Decimal("0.0000")))
+                    self.fields[field_name] = forms.DecimalField(
+                        required=False,
+                        min_value=Decimal("0.0000"),
+                        max_value=max_wh_qty,
+                        decimal_places=4,
+                        max_digits=12,
+                        initial=Decimal("0.0000"),
+                        localize=True,
+                    )
+                    warehouse_fields.append(
+                        {
+                            "field_name": field_name,
+                            "wh_id": wh["wh_id"],
+                            "wh_name": wh["wh_name"],
+                            "available": max_wh_qty,
+                        }
+                    )
+                self.rows.append(
+                    {
+                        "warehouse_input": wi,
+                        "item": it,
+                        "max_qty": max_qty,
+                        "stock_by_wh": [(w["wh_name"], w["available"]) for w in wh_defs],
+                        "stock_total": stock_total_by_rm.get(artikl_rm_id, Decimal("0.0000")),
+                        "warehouse_fields": warehouse_fields,
+                    }
+                )
+
+    def clean(self):
+        cleaned = super().clean()
+        out: dict[int, dict[int, Decimal]] = {}
+        out_wh: dict[int, dict[int, dict[int, Decimal]]] = {}
+        has_any = False
+
+        for row in self.rows:
+            wi = row["warehouse_input"]
+            it = row["item"]
+            max_qty = row["max_qty"]
+            total_qty = Decimal("0.0000")
+            item_wh: dict[int, Decimal] = {}
+
+            for whf in row["warehouse_fields"]:
+                field_name = whf["field_name"]
+                qty = cleaned.get(field_name)
+                if qty is None:
+                    qty = Decimal("0.0000")
+                qty = Decimal(str(qty))
+                if qty < Decimal("0.0000"):
+                    self.add_error(field_name, "Količina ne može biti negativna.")
+                    continue
+                if qty > whf["available"]:
+                    self.add_error(field_name, f"Maksimalno {whf['available']}.")
+                    continue
+                if qty > 0:
+                    item_wh[whf["wh_id"]] = qty
+                total_qty += qty
+
+            if total_qty > max_qty:
+                self.add_error(None, f"Stavka '{it.artikl}': zbroj po skladištima ne može biti veći od {max_qty}.")
+                continue
+            if total_qty <= Decimal("0.0000"):
+                continue
+
+            has_any = True
+            out.setdefault(wi.id, {})[it.id] = total_qty
+            out_wh.setdefault(wi.id, {})[it.id] = item_wh
+
+        if not has_any:
+            self.add_error(None, "Unesi barem jednu količinu za povrat (veću od 0).")
+
+        self.line_quantities_by_input_id = out
+        self.warehouse_quantities_by_input_id = out_wh
+        return cleaned
 
 
 @admin.action(description="Rastavi narudžbu u više primki", permissions=["change"])

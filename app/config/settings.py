@@ -192,7 +192,9 @@ AUTHENTICATION_BACKENDS = [
 LANGUAGE_CODE = 'hr'
 FORMAT_MODULE_PATH = ["config.formats"]
 
-TIME_ZONE = 'UTC'
+# Business runs in Sibenik, Croatia.
+# Keep USE_TZ=True (store UTC in DB) but present/interpret datetimes in local time.
+TIME_ZONE = os.getenv("DJANGO_TIME_ZONE", "Europe/Zagreb")
 
 USE_I18N = True
 

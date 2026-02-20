@@ -15,6 +15,8 @@ from configuration.models import DocumentType
 from artikli.remaris_connector import RemarisConnector
 from orders.models import WarehouseInput
 from stock.models import (
+    Inventory,
+    InventoryItem,
     StockAllocation,
     StockAccountingConfig,
     StockLot,
@@ -297,6 +299,99 @@ def post_stock_out(
             inventory_account=inventory_account,
             posted_by=posted_by,
         )
+
+    return move
+
+
+@transaction.atomic
+def post_stock_out_multi_warehouse(
+    *,
+    items,
+    move_date=None,
+    reference: str = "",
+    note: str = "",
+) -> StockMove:
+    if not items:
+        raise ValidationError("Nema stavki za izlaz.")
+
+    move_date = move_date or timezone.now()
+    move = StockMove.objects.create(
+        move_type=StockMove.MoveType.OUT,
+        date=_as_aware_datetime(move_date),
+        reference=reference or "Izlaz iz skladista",
+        note=note,
+        purpose="",
+    )
+
+    for item in items:
+        warehouse = item.get("warehouse")
+        artikl = item.get("artikl")
+        qty_raw = item.get("quantity")
+        if not warehouse or not artikl or qty_raw is None:
+            raise ValidationError("Stavka mora imati skladište, artikl i količinu.")
+
+        qty = Decimal(str(qty_raw))
+        if qty <= 0:
+            raise ValidationError("Kolicina mora biti > 0.")
+
+        on_hand = (
+            StockLot.objects.select_for_update()
+            .filter(warehouse=warehouse, artikl=artikl)
+            .aggregate(total=Sum("qty_remaining", default=Decimal("0.00")))
+        )["total"] or Decimal("0.00")
+        reserved = (
+            StockReservation.objects.select_for_update()
+            .filter(warehouse=warehouse, artikl=artikl, released_at__isnull=True)
+            .aggregate(total=Sum("quantity", default=Decimal("0.00")))["total"]
+            or Decimal("0.00")
+        )
+        available = on_hand - reserved
+        if available < qty:
+            raise ValidationError("Nema dovoljno dostupne zalihe (stanje - rezervirano).")
+
+        lots = list(
+            StockLot.objects.select_for_update()
+            .filter(warehouse=warehouse, artikl=artikl, qty_remaining__gt=0)
+            .only("id", "qty_remaining", "unit_cost", "received_at")
+            .order_by("received_at", "id")
+        )
+        fifo_available = sum((lot.qty_remaining for lot in lots), Decimal("0.00"))
+        if fifo_available < qty:
+            raise ValidationError("Nema dovoljno zalihe za FIFO izlaz.")
+
+        move_line = StockMoveLine.objects.create(
+            move=move,
+            warehouse=warehouse,
+            artikl=artikl,
+            quantity=qty,
+            unit_cost=None,
+        )
+
+        remaining = qty
+        total_cost = Decimal("0.00")
+
+        for lot in lots:
+            if remaining <= 0:
+                break
+            take = min(remaining, lot.qty_remaining)
+            lot.qty_remaining = _q4(lot.qty_remaining - take)
+            lot.save(update_fields=["qty_remaining"])
+
+            StockAllocation.objects.create(
+                move_line=move_line,
+                lot=lot,
+                qty=_q4(take),
+                unit_cost=lot.unit_cost,
+            )
+            total_cost += _q4(take) * lot.unit_cost
+            remaining -= take
+
+        if remaining > 0:
+            raise ValidationError("FIFO alokacija nije pokrila cijelu kolicinu.")
+
+        avg_cost = _q4(total_cost / qty) if qty else Decimal("0.0000")
+        move_line.unit_cost = avg_cost
+        move_line.save(update_fields=["unit_cost"])
 
     return move
 
@@ -887,3 +982,55 @@ def replenish_to_sale_warehouse(*, lines):
         move_date=timezone.now(),
         reference="Replenish Glavno -> Sank",
     )
+
+
+@transaction.atomic
+def clone_inventory_without_counts(
+    *,
+    source: Inventory,
+    created_by,
+    date: datetime | None = None,
+) -> tuple[Inventory, int, int]:
+    """
+    Create a new inventory for the same warehouse, copying only the item list
+    (artikl/unit/note), but leaving quantities empty (NULL) for fresh counting.
+
+    Returns: (new_inventory, items_created, items_skipped)
+    """
+    if not source.warehouse_id:
+        raise ValidationError("Inventura nema skladiste.")
+
+    new_inv = Inventory.objects.create(
+        warehouse=source.warehouse,
+        date=date or timezone.now(),
+        opens_at=None,
+        closes_at=None,
+        status=Inventory.Status.OPEN,
+        created_by=created_by,
+        counted_by=None,
+    )
+
+    created = 0
+    skipped = 0
+    seen_artikl_ids: set[int] = set()
+
+    for it in source.items.select_related("artikl", "unit").all():
+        if not it.artikl_id:
+            skipped += 1
+            continue
+        if it.artikl_id in seen_artikl_ids:
+            skipped += 1
+            continue
+        seen_artikl_ids.add(it.artikl_id)
+
+        # Use .create() (not bulk_create) so InventoryItem.save() can auto-fill unit if needed.
+        InventoryItem.objects.create(
+            inventory=new_inv,
+            artikl_id=it.artikl_id,
+            unit_id=it.unit_id,
+            quantity=None,
+            note=it.note or "",
+        )
+        created += 1
+
+    return new_inv, created, skipped

@@ -1,4 +1,5 @@
 import { DM_Serif_Display } from "next/font/google";
+import type { ReactNode } from "react";
 
 const dmSerif = DM_Serif_Display({ subsets: ["latin"], weight: "400" });
 
@@ -29,7 +30,7 @@ const steps = [
     primaryHref: "/download/Blagajna.appinstaller",
     secondaryLabel: "Preuzmi MSIX",
     secondaryHref:
-      "https://mozart.sibenik1983.hr/download/Blagajna_1.0.3.0_x64.msix",
+      "https://mozart.sibenik1983.hr/download/Blagajna_1.0.4.0_x64.msix",
     note: "",
     details: [
       "Ako nemas App Installer, preuzmi ga iz Microsoft Store.",
@@ -38,14 +39,26 @@ const steps = [
   },
 ];
 
-const faq = [
+const faq: { question: string; answer: ReactNode }[] = [
   {
     question: "Sto ako MSIX javlja gresku o certifikatu?",
     answer: "Certifikat nije trustan. Instaliraj ga u Trusted Root i Trusted Publishers.",
   },
   {
     question: "Sto ako nema App Installer?",
-    answer: "Preuzmi App Installer iz Microsoft Store.",
+    answer: (
+      <>
+        Preuzmi App Installer iz Microsoft Store:{" "}
+        <a
+          className="underline underline-offset-4"
+          href="https://aka.ms/getwinget"
+          target="_blank"
+          rel="noreferrer"
+        >
+          https://aka.ms/getwinget
+        </a>
+      </>
+    ),
   },
 ];
 

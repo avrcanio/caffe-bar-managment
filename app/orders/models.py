@@ -391,6 +391,22 @@ class WarehouseInput(models.Model):
         related_name="warehouse_input",
         verbose_name="skladisno kretanje",
     )
+    supplier_return_stock_move = models.OneToOneField(
+        "stock.StockMove",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="supplier_return_input",
+        verbose_name="povrat dobavljacu (skladiste)",
+    )
+    supplier_return_journal_entry = models.ForeignKey(
+        "accounting.JournalEntry",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="supplier_return_inputs",
+        verbose_name="financijsko terecenje povrata",
+    )
 
     def clean(self) -> None:
         invoice_code = (self.invoice_code or "").strip()

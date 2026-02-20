@@ -8,11 +8,31 @@ services:
       POSTGRES_DB: mozzart_db
     ports:
       - "127.0.0.1:5432:5432"
-      - "0.0.0.0:5433:5432"
     volumes:
       - postgis_postgis_data16:/var/lib/postgresql/data
     networks:
       - hetzner_net
+  tailscale-postgis:
+    image: tailscale/tailscale:latest
+    container_name: tailscale-postgis
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY_POSTGIS}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      TS_EXTRA_ARGS: >-
+        --login-server=https://hs-control.qubitsecured.online
+        --hostname=tailscale-postgis
+    volumes:
+      - tailscale_postgis_state:/var/lib/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    depends_on:
+      - postgis
+    restart: unless-stopped
+    network_mode: service:postgis
   redis:
     image: redis:7-alpine
     container_name: mozzart-redis
@@ -87,17 +107,30 @@ services:
       - web
     networks:
       - hetzner_net
-  tailscale:
-    image: tailscale/tailscale:latest
-    container_name: tailscale
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    devices:
-      - /dev/net/tun:/dev/net/tun
+  webterm:
+    build: ./webterm
+    container_name: mozzart-webterm
+    command: ["ttyd", "-p", "7681", "-b", "/api/webterm", "-W", "-w", "/workspace", "/bin/bash"]
+    environment:
+      HISTFILE: /tmp/.bash_history
+      HOME: /home/codex
     volumes:
-      - tailscale_state:/var/lib/tailscale
-    network_mode: host
+      - /srv/mozzart:/workspace
+      - webterm_home:/home/codex
+    working_dir: /workspace
+    expose:
+      - "7681"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+    networks:
+      - hetzner_net
 
 networks:
   hetzner_net:
@@ -106,4 +139,5 @@ networks:
 volumes:
   postgis_postgis_data16:
     external: true
-  tailscale_state:
+  tailscale_postgis_state:
+  webterm_home:

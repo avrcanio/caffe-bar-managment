@@ -333,7 +333,11 @@ def import_sales_invoices(
     with transaction.atomic():
         for invoice in invoices:
             issued_at = invoice.issued_at
-            if timezone.is_naive(issued_at):
+            # Remaris Excel export contains local clock time (no reliable tz). Treat whatever we
+            # get as local time in current TZ, even if some library attached UTC tzinfo.
+            if issued_at and timezone.is_aware(issued_at):
+                issued_at = issued_at.replace(tzinfo=None)
+            if issued_at and timezone.is_naive(issued_at):
                 issued_at = timezone.make_aware(issued_at, tz)
 
             ledger = Ledger.objects.filter(external_organization_id=organization_id).first() or Ledger.objects.first()
