@@ -10,7 +10,17 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from artikli.models import Artikl, DrinkCategory
-from barion.models import Check, CheckItem, Layout, LayoutTable, Table, TableState, UserLayoutAccess, Zone
+from barion.models import (
+    Check,
+    CheckItem,
+    Layout,
+    LayoutTable,
+    ProductPopularitySnapshot,
+    Table,
+    TableState,
+    UserLayoutAccess,
+    Zone,
+)
 from configuration.models import TaxGroup
 from pos.models import PosProfile, PosReceipt
 from sales.models import SalesPriceItem, SalesPriceList
@@ -1113,6 +1123,23 @@ class PosProductSearchApiTests(TestCase):
         response = self.client.get("/api/pos/products/search/?limit=1", secure=True)
         self.assertEqual(response.status_code, 200, response.content)
         self.assertEqual(len(response.json()), 1)
+
+    def test_default_sort_uses_popularity_desc(self):
+        ProductPopularitySnapshot.objects.create(artikl=self.espresso, sold_qty_30d="50.0000")
+        ProductPopularitySnapshot.objects.create(artikl=self.cola, sold_qty_30d="500.0000")
+        ProductPopularitySnapshot.objects.create(artikl=self.water, sold_qty_30d="150.0000")
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/pos/products/search/", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual([row["id"] for row in payload[:3]], [self.cola.id, self.water.id, self.espresso.id])
+        self.assertEqual(float(payload[0]["popularity_score"]), 500.0)
+
+    def test_invalid_sort_returns_400(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/pos/products/search/?sort=bad", secure=True)
+        self.assertEqual(response.status_code, 400, response.content)
 
     def test_excludes_products_without_active_sales_price(self):
         no_price = Artikl.objects.create(

@@ -1,9 +1,14 @@
+from decimal import Decimal
+
+from django.core.management import call_command
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from artikli.models import Artikl, DrinkCategory
 from configuration.models import TaxGroup
+from sales.models import SalesInvoice, SalesInvoiceItem
 
 
 class DrinkCategoryApiTests(TestCase):
@@ -139,3 +144,99 @@ class ArtiklListFilterApiTests(TestCase):
         self.client.force_authenticate(user=self.user)
         response = self.client.get("/api/artikli/?is_sellable=maybe", secure=True)
         self.assertEqual(response.status_code, 400, response.content)
+
+
+class DrinkCategorySortOrderBySalesCommandTests(TestCase):
+    def setUp(self):
+        self.tax_group = TaxGroup.objects.create(name="PDV 25", code="PDV25", rate="0.2500")
+
+        root_drinks = DrinkCategory.objects.create(name="Napitci", sort_order=10)
+        self.lvl2_hot = DrinkCategory.objects.create(name="Topli napici", parent=root_drinks, sort_order=10)
+        self.lvl2_soft = DrinkCategory.objects.create(name="Hladni napici", parent=root_drinks, sort_order=20)
+        self.lvl3_coffee = DrinkCategory.objects.create(name="Kave", parent=self.lvl2_hot, sort_order=10)
+        lvl3_soda = DrinkCategory.objects.create(name="Gazirana pića", parent=self.lvl2_soft, sort_order=10)
+
+        root_alcohol = DrinkCategory.objects.create(name="Alkoholna pića", sort_order=30)
+        self.lvl2_beer = DrinkCategory.objects.create(name="Pivo", parent=root_alcohol, sort_order=30)
+        self.lvl3_light_beer = DrinkCategory.objects.create(
+            name="Svijetlo pivo",
+            parent=self.lvl2_beer,
+            sort_order=10,
+        )
+
+        self.art_1163 = Artikl.objects.create(
+            name="KAVA SA MLIJEKOM VELIKA",
+            code="1163",
+            tax_group=self.tax_group,
+            drink_category=DrinkCategory.objects.create(
+                name="Kava sa mlijekom velika",
+                parent=DrinkCategory.objects.create(
+                    name="Kava sa mlijekom",
+                    parent=self.lvl3_coffee,
+                    sort_order=10,
+                ),
+                sort_order=10,
+            ),
+        )
+        self.art_1162 = Artikl.objects.create(
+            name="KAVA ESPRESSO",
+            code="1162",
+            tax_group=self.tax_group,
+            drink_category=DrinkCategory.objects.create(
+                name="Kava espresso",
+                parent=self.lvl3_coffee,
+                sort_order=20,
+            ),
+        )
+        self.art_169 = Artikl.objects.create(
+            name="Ožujsko pivo 0,33l",
+            code="169",
+            tax_group=self.tax_group,
+            drink_category=DrinkCategory.objects.create(
+                name="Ožujsko pivo 0,33l",
+                parent=self.lvl3_light_beer,
+                sort_order=10,
+            ),
+        )
+
+        invoice = SalesInvoice.objects.create(
+            rm_number=1001,
+            issued_on=timezone.localdate(),
+            issued_at=timezone.now(),
+        )
+        SalesInvoiceItem.objects.create(
+            invoice=invoice,
+            artikl=self.art_1163,
+            product_name=self.art_1163.name,
+            quantity=Decimal("1782.0000"),
+            amount=Decimal("0.00"),
+        )
+        SalesInvoiceItem.objects.create(
+            invoice=invoice,
+            artikl=self.art_1162,
+            product_name=self.art_1162.name,
+            quantity=Decimal("895.0000"),
+            amount=Decimal("0.00"),
+        )
+        SalesInvoiceItem.objects.create(
+            invoice=invoice,
+            artikl=self.art_169,
+            product_name=self.art_169.name,
+            quantity=Decimal("633.0000"),
+            amount=Decimal("0.00"),
+        )
+
+    def test_command_orders_level2_categories_by_sales(self):
+        call_command("reorder_drink_categories_by_sales", days=30)
+
+        self.lvl2_hot.refresh_from_db()
+        self.lvl3_coffee.refresh_from_db()
+        self.lvl3_light_beer.refresh_from_db()
+        self.lvl2_soft.refresh_from_db()
+
+        self.assertEqual(self.lvl3_coffee.sort_order, 1)
+        self.assertEqual(self.lvl3_light_beer.sort_order, 2)
+        # Kategorija bez prodaje ostaje kako je bila.
+        self.assertEqual(self.lvl2_soft.sort_order, 20)
+        # Level 1 kategorija ne smije biti target kod target_level=2.
+        self.assertEqual(self.lvl2_hot.sort_order, 10)

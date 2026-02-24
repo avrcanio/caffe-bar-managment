@@ -3,8 +3,9 @@ import os
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Case, DecimalField, IntegerField, Max, OuterRef, Q, Subquery, Value, When
+from django.db.models import Case, DecimalField, F, IntegerField, Max, OuterRef, Q, Subquery, Value, When
 from django.db.models import Sum
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django.utils.http import parse_etags, quote_etag
 from drf_spectacular.utils import OpenApiExample, OpenApiParameter, OpenApiResponse, extend_schema
@@ -211,6 +212,7 @@ class PosProductSearchItemSerializer(serializers.Serializer):
     drink_category_name = serializers.CharField(allow_null=True)
     unit_price = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True)
     tax_rate = serializers.DecimalField(max_digits=5, decimal_places=4, allow_null=True)
+    popularity_score = serializers.DecimalField(max_digits=14, decimal_places=4, allow_null=True)
 
 
 class PosDrinkCategoryDisplayItemSerializer(serializers.Serializer):
@@ -1724,6 +1726,13 @@ class PosProductSearchView(APIView):
                 location=OpenApiParameter.QUERY,
                 description="Max results, default 20, max 100.",
             ),
+            OpenApiParameter(
+                name="sort",
+                type=str,
+                required=False,
+                location=OpenApiParameter.QUERY,
+                description="Sort mode: popular (default), name, code.",
+            ),
         ],
         responses={
             200: PosProductSearchItemSerializer(many=True),
@@ -1756,6 +1765,21 @@ class PosProductSearchView(APIView):
             )
 
         q = (request.query_params.get("q") or "").strip()
+        sort_mode = (request.query_params.get("sort") or "popular").strip().lower()
+        if sort_mode not in {"popular", "name", "code"}:
+            return Response(
+                {"detail": "sort mora biti jedan od: popular, name, code."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        qs = qs.annotate(
+            popularity_score=Coalesce(
+                F("barion_popularity_snapshot__sold_qty_30d"),
+                Value(Decimal("0.0000")),
+                output_field=DecimalField(max_digits=14, decimal_places=4),
+            )
+        )
+
         if q:
             query = Q(code__icontains=q) | Q(name__icontains=q)
             for term in [term for term in q.split(" ") if term]:
@@ -1770,9 +1794,20 @@ class PosProductSearchView(APIView):
                     default=Value(4),
                     output_field=IntegerField(),
                 )
-            ).order_by("rank", "name", "id")
+            )
+            if sort_mode == "name":
+                qs = qs.order_by("rank", "name", "id")
+            elif sort_mode == "code":
+                qs = qs.order_by("rank", "code", "name", "id")
+            else:
+                qs = qs.order_by("rank", "-popularity_score", "name", "id")
         else:
-            qs = qs.order_by("name", "id")
+            if sort_mode == "name":
+                qs = qs.order_by("name", "id")
+            elif sort_mode == "code":
+                qs = qs.order_by("code", "name", "id")
+            else:
+                qs = qs.order_by("-popularity_score", "name", "id")
 
         rows = []
         for artikl in qs[:limit]:
@@ -1791,6 +1826,7 @@ class PosProductSearchView(APIView):
                     "drink_category_name": artikl.drink_category.name if artikl.drink_category_id else None,
                     "unit_price": artikl.active_unit_price,
                     "tax_rate": artikl.tax_group.rate if artikl.tax_group_id else None,
+                    "popularity_score": artikl.popularity_score,
                 }
             )
         return Response(rows)

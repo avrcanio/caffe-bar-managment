@@ -373,3 +373,25 @@ class CheckItem(models.Model):
         self.net_amount = net
         self.vat_amount = vat
         super().save(*args, **kwargs)
+
+
+class ProductPopularitySnapshot(models.Model):
+    artikl = models.OneToOneField(
+        "artikli.Artikl",
+        on_delete=models.CASCADE,
+        related_name="barion_popularity_snapshot",
+    )
+    sold_qty_30d = models.DecimalField(max_digits=14, decimal_places=4, default=Decimal("0.0000"))
+    window_days = models.PositiveIntegerField(default=30)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Product popularity snapshot"
+        verbose_name_plural = "Product popularity snapshots"
+        indexes = [
+            models.Index(fields=["-sold_qty_30d"], name="idx_barion_pop_qty_desc"),
+            models.Index(fields=["updated_at"], name="idx_barion_pop_updated"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.artikl_id}: {self.sold_qty_30d}"
