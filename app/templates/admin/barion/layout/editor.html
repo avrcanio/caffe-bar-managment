@@ -1,0 +1,72 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'barion_admin/layout_editor.css' %}?v=20260224-1">
+{% endblock %}
+
+{% block extrahead %}
+  {{ block.super }}
+  <script defer src="{% static 'barion_admin/layout_editor.js' %}?v=20260224-1"></script>
+{% endblock %}
+
+{% block content %}
+  <div id="barion-layout-editor"
+       data-layout-id="{{ layout.id }}"
+       data-data-url="{{ editor_data_url }}"
+       data-save-url="{{ editor_save_url }}">
+    <div class="ble-topbar">
+      <div>
+        <h1>Layout editor: {{ layout.name }}</h1>
+        <p>ID: {{ layout.id }}{% if layout.is_active %} | Active{% endif %}</p>
+      </div>
+      <div class="ble-actions">
+        <button type="button" class="button default" id="ble-save-btn">Save</button>
+        <a class="button" href="{{ layout_change_url }}">Back to layout</a>
+      </div>
+    </div>
+
+    <div id="ble-status" class="ble-status">Loading...</div>
+
+    <div class="ble-controls">
+      <div class="ble-zone-tabs" id="ble-zone-tabs"></div>
+      <div class="ble-add-row">
+        <label for="ble-add-table">Add table to selected zone:</label>
+        <select id="ble-add-table"></select>
+        <button type="button" class="button" id="ble-add-table-btn">Add</button>
+      </div>
+      <div class="ble-toggle-row">
+        <label>
+          <input type="checkbox" id="ble-snap-toggle" checked>
+          Snap to grid (10)
+        </label>
+      </div>
+    </div>
+
+    <div class="ble-main">
+      <div class="ble-canvas-wrap">
+        <div class="ble-canvas-grid"></div>
+        <div class="ble-canvas" id="ble-canvas"></div>
+      </div>
+
+      <div class="ble-sidebar">
+        <h3>Selected table</h3>
+        <p id="ble-selected-label">None</p>
+        <label>X <input type="number" id="ble-field-x" min="0" max="1000"></label>
+        <label>Y <input type="number" id="ble-field-y" min="0" max="1000"></label>
+        <label>W <input type="number" id="ble-field-w" min="1" max="1000"></label>
+        <label>H <input type="number" id="ble-field-h" min="1" max="1000"></label>
+        <label>Rotation <input type="number" id="ble-field-rotation" min="-360" max="360"></label>
+        <label>Zone
+          <select id="ble-field-zone"></select>
+        </label>
+        <label>
+          <input type="checkbox" id="ble-field-enabled">
+          Enabled
+        </label>
+        <button type="button" class="button" id="ble-apply-fields-btn">Apply</button>
+      </div>
+    </div>
+  </div>
+{% endblock %}

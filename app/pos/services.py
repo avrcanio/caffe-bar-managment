@@ -83,7 +83,7 @@ def create_pos_receipt(
 
         quantity = Decimal(str(row.get("quantity", "0")))
         unit_price = Decimal(str(row.get("unit_price", "0")))
-        if quantity <= 0 or unit_price < 0:
+        if quantity == 0 or unit_price < 0:
             raise ValueError("Neispravna količina ili cijena.")
 
         vat_rate = artikl.tax_group.rate if artikl.tax_group_id else Decimal("0.0000")

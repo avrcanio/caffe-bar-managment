@@ -1,0 +1,11 @@
+{% extends "admin/change_form.html" %}
+{% load i18n %}
+
+{% block object-tools-items %}
+  {{ block.super }}
+  {% if change and not is_popup and layout_editor_url %}
+    <li>
+      <a href="{{ layout_editor_url }}">Open editor</a>
+    </li>
+  {% endif %}
+{% endblock %}
