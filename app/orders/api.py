@@ -1,3 +1,5 @@
+from decimal import Decimal, ROUND_HALF_UP
+
 from django.db import transaction
 from django.conf import settings
 from django.core.mail import EmailMessage
@@ -11,11 +13,20 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
+from drf_spectacular.utils import extend_schema
 
 from configuration.models import CompanyProfile, OrderEmailTemplate
-from .models import PurchaseOrder, PurchaseOrderItem, SupplierPriceItem
+from .models import (
+    PurchaseOrder,
+    PurchaseOrderItem,
+    PurchaseOrderItemPriceAudit,
+    WarehouseInput,
+    WarehouseInputItem,
+    SupplierPriceItem,
+    SupplierPriceList,
+)
 from .pdf import build_order_pdf
-from stock.models import WarehouseStock
+from stock.models import WarehouseStock, WarehouseId
 
 
 class PurchaseOrderItemSerializer(serializers.ModelSerializer):
@@ -25,6 +36,8 @@ class PurchaseOrderItemSerializer(serializers.ModelSerializer):
         source="unit_of_measure.name", read_only=True
     )
     order = serializers.PrimaryKeyRelatedField(read_only=True)
+    received_quantity = serializers.SerializerMethodField()
+    remaining_quantity = serializers.SerializerMethodField()
 
     class Meta:
         model = PurchaseOrderItem
@@ -38,12 +51,26 @@ class PurchaseOrderItemSerializer(serializers.ModelSerializer):
             "unit_of_measure",
             "unit_name",
             "price",
+            "received_quantity",
+            "remaining_quantity",
         ]
 
     def get_base_group(self, obj):
         detail = getattr(obj.artikl, "detail", None)
         base_group = getattr(detail, "base_group", None)
         return getattr(base_group, "name", None)
+
+    def get_received_quantity(self, obj):
+        info = (self.context.get("remaining_by_item_id") or {}).get(obj.id)
+        if not info:
+            return None
+        return info.get("received")
+
+    def get_remaining_quantity(self, obj):
+        info = (self.context.get("remaining_by_item_id") or {}).get(obj.id)
+        if not info:
+            return None
+        return info.get("remaining")
 
 
 class PurchaseOrderSerializer(serializers.ModelSerializer):
@@ -197,6 +224,20 @@ class PurchaseOrderDetailView(generics.RetrieveUpdateAPIView):
     serializer_class = PurchaseOrderSerializer
     permission_classes = [IsAuthenticated]
 
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        po_items = list(instance.items.all().order_by("id"))
+        received_by_artikl = _po_received_by_artikl(instance)
+        remaining_by_item_id = _po_item_remaining_map(po_items, received_by_artikl)
+        serializer = self.get_serializer(
+            instance,
+            context={
+                **self.get_serializer_context(),
+                "remaining_by_item_id": remaining_by_item_id,
+            },
+        )
+        return Response(serializer.data)
+
 
 class PurchaseOrderItemListCreateView(generics.ListCreateAPIView):
     serializer_class = PurchaseOrderItemSerializer
@@ -239,6 +280,393 @@ class PurchaseOrderItemDetailView(generics.RetrieveUpdateDestroyAPIView):
     )
     serializer_class = PurchaseOrderItemSerializer
     permission_classes = [IsAuthenticated]
+
+
+class PurchaseOrderItemPriceUpdateSerializer(serializers.Serializer):
+    price = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.00"))
+    currency = serializers.CharField(required=False, default="EUR")
+    reason = serializers.CharField()
+
+    def validate_currency(self, value):
+        if (value or "").upper() != "EUR":
+            raise serializers.ValidationError("Podržana valuta je samo EUR.")
+        return "EUR"
+
+    def validate_reason(self, value):
+        reason = (value or "").strip()
+        if not reason:
+            raise serializers.ValidationError("Razlog promjene cijene je obavezan.")
+        return reason
+
+
+class PurchaseOrderItemPriceUpdateResponseSerializer(serializers.Serializer):
+    purchase_order_item_id = serializers.IntegerField()
+    old_price = serializers.CharField()
+    new_price = serializers.CharField()
+    audit = serializers.DictField()
+    po_totals = serializers.DictField()
+
+
+class PurchaseOrderItemPriceUpdateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        request=PurchaseOrderItemPriceUpdateSerializer,
+        responses={200: PurchaseOrderItemPriceUpdateResponseSerializer},
+    )
+    @transaction.atomic
+    def patch(self, request, pk):
+        serializer = PurchaseOrderItemPriceUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        item = (
+            PurchaseOrderItem.objects.select_for_update()
+            .select_related("order__supplier", "artikl", "unit_of_measure")
+            .filter(pk=pk)
+            .first()
+        )
+        if not item:
+            return Response({"detail": "Stavka narudzbe ne postoji."}, status=404)
+
+        old_price = Decimal(item.price or Decimal("0.00")).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+        new_price = Decimal(serializer.validated_data["price"]).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+        if old_price == new_price:
+            return Response(
+                {"detail": "Nova cijena je ista kao postojeca."},
+                status=400,
+            )
+
+        PurchaseOrderItem.objects.filter(pk=item.pk).update(price=new_price)
+        item.price = new_price
+        item.order.recalculate_totals()
+
+        audit = PurchaseOrderItemPriceAudit.objects.create(
+            purchase_order=item.order,
+            purchase_order_item=item,
+            artikl=item.artikl,
+            supplier=item.order.supplier,
+            old_price=old_price,
+            new_price=new_price,
+            changed_by=request.user if request.user.is_authenticated else None,
+            reason=serializer.validated_data["reason"],
+        )
+
+        price_list = SupplierPriceList.objects.create(
+            supplier=item.order.supplier,
+            valid_from=timezone.localdate(),
+            valid_to=None,
+            is_active=True,
+        )
+        SupplierPriceItem.objects.update_or_create(
+            price_list=price_list,
+            artikl=item.artikl,
+            defaults={
+                "unit_of_measure": item.unit_of_measure,
+                "price": new_price,
+            },
+        )
+
+        item.order.refresh_from_db(fields=["total_net", "total_gross", "total_deposit"])
+        user = request.user
+        full_name = user.get_full_name().strip() if hasattr(user, "get_full_name") else ""
+        return Response(
+            {
+                "purchase_order_item_id": item.id,
+                "old_price": f"{old_price:.2f}",
+                "new_price": f"{new_price:.2f}",
+                "audit": {
+                    "changed_at": audit.changed_at,
+                    "changed_by": {
+                        "id": user.id if user and user.is_authenticated else None,
+                        "username": user.get_username() if user and user.is_authenticated else "",
+                        "full_name": full_name or (user.get_username() if user and user.is_authenticated else ""),
+                    },
+                    "reason": audit.reason,
+                },
+                "po_totals": {
+                    "total_net": f"{Decimal(item.order.total_net or 0):.2f}",
+                    "total_gross": f"{Decimal(item.order.total_gross or 0):.2f}",
+                    "total_deposit": f"{Decimal(item.order.total_deposit or 0):.2f}",
+                },
+            }
+        )
+
+
+def _q2(value: Decimal | int | float | str | None) -> Decimal:
+    return Decimal(value or 0).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _po_received_by_artikl(order: PurchaseOrder) -> dict[int, Decimal]:
+    rows = (
+        WarehouseInputItem.objects.filter(warehouse_input__purchase_order_id=order.id)
+        .values("artikl_id")
+        .annotate(q=Sum("quantity"))
+    )
+    return {r["artikl_id"]: (r["q"] or Decimal("0")) for r in rows if r["artikl_id"]}
+
+
+def _po_item_remaining_map(
+    items: list[PurchaseOrderItem], received_by_artikl: dict[int, Decimal]
+) -> dict[int, dict[str, Decimal]]:
+    received_left = {k: Decimal(v) for k, v in received_by_artikl.items()}
+    out: dict[int, dict[str, Decimal]] = {}
+    for it in items:
+        ordered = it.quantity or Decimal("0")
+        a_id = it.artikl_id
+        left = received_left.get(a_id, Decimal("0"))
+        received_line = min(ordered, left) if ordered > 0 and left > 0 else Decimal("0")
+        remaining = ordered - received_line
+        if a_id:
+            received_left[a_id] = max(left - received_line, Decimal("0"))
+        out[it.id] = {
+            "ordered": ordered,
+            "received": received_line,
+            "remaining": max(remaining, Decimal("0")),
+        }
+    return out
+
+
+class PurchaseOrderWarehouseInputItemCreateSerializer(serializers.Serializer):
+    purchase_order_item_id = serializers.IntegerField()
+    received_quantity = serializers.DecimalField(max_digits=12, decimal_places=4, min_value=Decimal("0"))
+    confirmed = serializers.BooleanField(required=False, default=False)
+    expected_unit_price = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0"))
+
+
+class PurchaseOrderWarehouseInputCreateSerializer(serializers.Serializer):
+    document_date = serializers.DateField(required=False)
+    warehouse_id = serializers.IntegerField()
+    invoice_code = serializers.CharField(required=False, allow_blank=True, default="")
+    delivery_note = serializers.CharField(required=False, allow_blank=True, default="")
+    currency = serializers.CharField(required=False, default="EUR")
+    expected_total_net = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        min_value=Decimal("0"),
+        required=False,
+    )
+    items = PurchaseOrderWarehouseInputItemCreateSerializer(many=True)
+
+    def validate_currency(self, value):
+        if (value or "").upper() != "EUR":
+            raise serializers.ValidationError("Podrzana valuta je samo EUR.")
+        return "EUR"
+
+    def validate(self, attrs):
+        if not (attrs.get("invoice_code", "").strip() or attrs.get("delivery_note", "").strip()):
+            raise serializers.ValidationError("Unesi broj racuna ili broj otpremnice.")
+        items = attrs.get("items") or []
+        if not items:
+            raise serializers.ValidationError("Nedostaju stavke za primku.")
+        confirmed_items = [row for row in items if bool(row.get("confirmed"))]
+        if not confirmed_items:
+            raise serializers.ValidationError("Potvrdi barem jednu stavku za zaprimanje.")
+        if not any(Decimal(row.get("received_quantity") or 0) > 0 for row in confirmed_items):
+            raise serializers.ValidationError(
+                "Barem jedna potvrdena stavka mora imati kolicinu vecu od 0."
+            )
+        return attrs
+
+
+class PurchaseOrderWarehouseInputCreateResponseSerializer(serializers.Serializer):
+    warehouse_input = serializers.DictField()
+    purchase_order = serializers.DictField()
+
+
+class PurchaseOrderWarehouseInputCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        request=PurchaseOrderWarehouseInputCreateSerializer,
+        responses={201: PurchaseOrderWarehouseInputCreateResponseSerializer},
+    )
+    @transaction.atomic
+    def post(self, request, pk):
+        serializer = PurchaseOrderWarehouseInputCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        order = (
+            PurchaseOrder.objects.select_for_update()
+            .select_related("supplier")
+            .prefetch_related("items__artikl__tax_group", "items__unit_of_measure")
+            .filter(pk=pk)
+            .first()
+        )
+        if not order:
+            return Response({"detail": "Narudzba ne postoji."}, status=404)
+        if order.status not in (
+            PurchaseOrder.STATUS_CONFIRMED,
+            PurchaseOrder.STATUS_RECEIVED,
+        ):
+            return Response(
+                {
+                    "detail": (
+                        "Primka se moze kreirati samo za potvrdenu "
+                        "ili djelomicno zaprimljenu narudzbu."
+                    )
+                },
+                status=400,
+            )
+
+        warehouse = (
+            WarehouseId.objects.filter(id=data["warehouse_id"]).first()
+            or WarehouseId.objects.filter(rm_id=data["warehouse_id"]).first()
+        )
+        if not warehouse:
+            return Response({"detail": "Skladiste nije pronadeno."}, status=400)
+
+        po_items = list(order.items.all().order_by("id"))
+        po_item_map = {it.id: it for it in po_items}
+        request_items = data["items"]
+        request_item_ids = [int(row["purchase_order_item_id"]) for row in request_items]
+        if len(set(request_item_ids)) != len(request_item_ids):
+            return Response({"detail": "Stavke se ne smiju ponavljati."}, status=400)
+        po_item_ids = {it.id for it in po_items}
+        if any(item_id not in po_item_ids for item_id in request_item_ids):
+            return Response({"detail": "Neke stavke ne pripadaju ovoj narudzbi."}, status=400)
+
+        received_by_artikl_before = _po_received_by_artikl(order)
+        remaining_map_before = _po_item_remaining_map(po_items, received_by_artikl_before)
+
+        lines: list[WarehouseInputItem] = []
+        req_by_id = {int(row["purchase_order_item_id"]): row for row in request_items}
+        computed_total_net = Decimal("0.00")
+        ordinal = 0
+        for req in request_items:
+            po_item = po_item_map[int(req["purchase_order_item_id"])]
+            if not bool(req.get("confirmed")):
+                continue
+            expected_price = _q2(req["expected_unit_price"])
+            actual_price = _q2(po_item.price)
+            if actual_price != expected_price:
+                return Response(
+                    {
+                        "detail": (
+                            f"Cijena stavke {po_item.id} ne odgovara narudzbi "
+                            f"({actual_price:.2f} != {expected_price:.2f})."
+                        )
+                    },
+                    status=400,
+                )
+
+            qty = Decimal(req["received_quantity"] or 0)
+            if qty <= 0:
+                continue
+            remaining = (remaining_map_before.get(po_item.id) or {}).get(
+                "remaining", Decimal("0")
+            )
+            if remaining <= 0:
+                return Response(
+                    {
+                        "detail": (
+                            f"Stavka {po_item.id} je vec u potpunosti zaprimljena."
+                        )
+                    },
+                    status=400,
+                )
+            if qty > remaining:
+                return Response(
+                    {
+                        "detail": (
+                            f"Kolicina za stavku {po_item.id} ({qty}) prelazi preostalo ({remaining})."
+                        )
+                    },
+                    status=400,
+                )
+            ordinal += 1
+            line_total = (actual_price * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            tax_rate = (
+                po_item.artikl.tax_group.rate
+                if po_item.artikl and getattr(po_item.artikl, "tax_group", None)
+                else Decimal("0")
+            )
+            gross = (line_total * (Decimal("1") + Decimal(tax_rate))).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            computed_total_net += line_total
+            lines.append(
+                WarehouseInputItem(
+                    artikl=po_item.artikl,
+                    product_id=po_item.artikl.rm_id if po_item.artikl else None,
+                    product_name=po_item.artikl.name if po_item.artikl else "",
+                    unit_of_measure=po_item.unit_of_measure,
+                    unit_name=po_item.unit_of_measure.name if po_item.unit_of_measure else "",
+                    quantity=qty,
+                    price=actual_price,
+                    total=line_total,
+                    buying_price=actual_price,
+                    gross_price=gross,
+                    tax_rate=tax_rate,
+                    calculate_tax=True,
+                    ordinal=ordinal,
+                )
+            )
+
+        if not lines:
+            return Response(
+                {
+                    "detail": (
+                        "Nema potvrdenih stavki s dostupnom preostalom kolicinom za zaprimanje."
+                    )
+                },
+                status=400,
+            )
+
+        wi = WarehouseInput.objects.create(
+            order=order,
+            supplier=order.supplier,
+            payment_type=order.payment_type,
+            date=data.get("document_date") or timezone.localdate(),
+            total=Decimal("0.00"),
+            purchase_order=order,
+            document_type_id=1,
+            warehouse=warehouse,
+            invoice_code=(data.get("invoice_code") or "").strip(),
+            delivery_note=(data.get("delivery_note") or "").strip(),
+        )
+        for line in lines:
+            line.warehouse_input = wi
+        WarehouseInputItem.objects.bulk_create(lines)
+        wi.recalculate_total(persist=True)
+
+        received_by_artikl = _po_received_by_artikl(order)
+        remaining_map = _po_item_remaining_map(po_items, received_by_artikl)
+        if all(v["remaining"] == Decimal("0") for v in remaining_map.values()):
+            order.status = PurchaseOrder.STATUS_RECEIVED_ALL
+        else:
+            order.status = PurchaseOrder.STATUS_RECEIVED
+        if not order.primka_created:
+            order.primka_created = True
+            order.save(update_fields=["status", "primka_created"])
+        else:
+            order.save(update_fields=["status"])
+
+        return Response(
+            {
+                "warehouse_input": {
+                    "id": wi.id,
+                    "document_date": wi.date,
+                    "warehouse_id": warehouse.id,
+                    "delivery_note": wi.delivery_note,
+                    "invoice_code": wi.invoice_code,
+                    "total_net": f"{_q2(wi.total):.2f}",
+                },
+                "purchase_order": {
+                    "id": order.id,
+                    "status_code": order.status,
+                    "status_label": order.get_status_display(),
+                    "primka_created": order.primka_created,
+                },
+            },
+            status=201,
+        )
 
 
 def _safe_format(template, context):

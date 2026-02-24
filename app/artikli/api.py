@@ -3,10 +3,14 @@ import logging
 
 from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404
+from django.db.models import Q
 from rest_framework import generics, serializers
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from PIL import Image, ImageOps
 
 from .models import Artikl, DrinkCategory
@@ -127,6 +131,74 @@ class ArtiklListView(generics.ListCreateAPIView):
     queryset = Artikl.objects.all().order_by("id")
     serializer_class = ArtiklSerializer
 
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="drink_category_id",
+                type=int,
+                required=False,
+                location=OpenApiParameter.QUERY,
+                description="Filtriraj artikle po drink kategoriji.",
+            ),
+            OpenApiParameter(
+                name="q",
+                type=str,
+                required=False,
+                location=OpenApiParameter.QUERY,
+                description="Pretraga po nazivu ili šifri artikla.",
+            ),
+            OpenApiParameter(
+                name="is_sellable",
+                type=bool,
+                required=False,
+                location=OpenApiParameter.QUERY,
+                description="Filtriraj po prodajnom artiklu (true/false).",
+            ),
+            OpenApiParameter(
+                name="is_stock_item",
+                type=bool,
+                required=False,
+                location=OpenApiParameter.QUERY,
+                description="Filtriraj po skladišnom artiklu (true/false).",
+            ),
+        ]
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+
+        raw_category_id = self.request.query_params.get("drink_category_id")
+        if raw_category_id not in (None, ""):
+            try:
+                category_id = int(raw_category_id)
+            except (TypeError, ValueError):
+                raise ValidationError({"drink_category_id": "drink_category_id mora biti cijeli broj."})
+            qs = qs.filter(drink_category_id=category_id)
+
+        q = str(self.request.query_params.get("q", "")).strip()
+        if q:
+            qs = qs.filter(Q(name__icontains=q) | Q(code__icontains=q))
+
+        def parse_bool(value: str, field_name: str):
+            normalized = str(value).strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+            raise ValidationError({field_name: f"{field_name} mora biti true/false ili 1/0."})
+
+        raw_is_sellable = self.request.query_params.get("is_sellable")
+        if raw_is_sellable not in (None, ""):
+            qs = qs.filter(is_sellable=parse_bool(raw_is_sellable, "is_sellable"))
+
+        raw_is_stock_item = self.request.query_params.get("is_stock_item")
+        if raw_is_stock_item not in (None, ""):
+            qs = qs.filter(is_stock_item=parse_bool(raw_is_stock_item, "is_stock_item"))
+
+        return qs
+
 
 class ArtiklDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Artikl.objects.all()
@@ -165,6 +237,7 @@ class DrinkCategorySerializer(serializers.ModelSerializer):
         required=False,
     )
     parent_name = serializers.CharField(source="parent.name", read_only=True)
+    level = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = DrinkCategory
@@ -173,6 +246,7 @@ class DrinkCategorySerializer(serializers.ModelSerializer):
             "name",
             "parent_id",
             "parent_name",
+            "level",
             "is_active",
             "sort_order",
         ]
@@ -181,6 +255,48 @@ class DrinkCategorySerializer(serializers.ModelSerializer):
 class DrinkCategoryListView(generics.ListCreateAPIView):
     queryset = DrinkCategory.objects.all().order_by("tree_id", "lft")
     serializer_class = DrinkCategorySerializer
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="include_inactive",
+                type=int,
+                required=False,
+                location=OpenApiParameter.QUERY,
+                description="Ako je 1, vraća i neaktivne kategorije (samo staff).",
+            ),
+            OpenApiParameter(
+                name="level",
+                type=int,
+                required=False,
+                location=OpenApiParameter.QUERY,
+                description="Filtriraj po razini stabla (npr. 1, 2, 3).",
+            ),
+        ]
+    )
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        include_inactive = str(self.request.query_params.get("include_inactive", "")).strip().lower()
+        wants_inactive = include_inactive in {"1", "true", "yes", "on"}
+        if wants_inactive:
+            if not self.request.user.is_staff:
+                raise PermissionDenied("Samo staff korisnici mogu tražiti neaktivne kategorije.")
+        else:
+            qs = qs.filter(is_active=True)
+
+        raw_level = self.request.query_params.get("level")
+        if raw_level not in (None, ""):
+            try:
+                level = int(raw_level)
+            except (TypeError, ValueError):
+                raise ValidationError({"level": "level mora biti cijeli broj."})
+            if level < 0:
+                raise ValidationError({"level": "level mora biti >= 0."})
+            qs = qs.filter(level=level)
+        return qs
 
 
 class DrinkCategoryDetailView(generics.RetrieveUpdateDestroyAPIView):

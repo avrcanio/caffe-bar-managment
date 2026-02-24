@@ -139,11 +139,19 @@ def import_sales_invoices_action(modeladmin, request, queryset):
     date_to = date_from
 
     defaults = load_import_defaults()
-    created, updated, skipped = import_sales_invoices(
-        date_from=date_from,
-        date_to=date_to,
-        **defaults,
-    )
+    try:
+        created, updated, skipped = import_sales_invoices(
+            date_from=date_from,
+            date_to=date_to,
+            **defaults,
+        )
+    except Exception as exc:
+        modeladmin.message_user(
+            request,
+            f"Import nije uspio: {exc}",
+            level=messages.ERROR,
+        )
+        return
     mapped = 0
     for invoice in SalesInvoice.objects.filter(issued_on__gte=date_from, issued_on__lte=date_to, user__isnull=True):
         user = resolve_waiter_user(invoice.waiter_name)

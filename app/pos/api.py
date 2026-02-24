@@ -32,6 +32,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 from pos.services import create_pos_receipt, create_pos_storno
 from pos.fiscal import fiscalize_pos_receipt
 from pos.models import PosReceipt, Pos, PosDevice
+from pos.security import is_recent_pin_verified, mark_pin_verified, pin_verify_ttl_seconds
 from rest_framework.authtoken.models import Token
 from sales.remaris_importer import import_sales_invoices, load_import_defaults
 from sales.services import resolve_waiter_user
@@ -61,6 +62,29 @@ class PosDeviceSerializer(serializers.ModelSerializer):
 class PosPinVerifyView(APIView):
     permission_classes = [IsAuthenticated]
 
+    class VerifyRequestSerializer(serializers.Serializer):
+        pin = serializers.CharField(required=True, trim_whitespace=True)
+
+    class VerifySuccessSerializer(serializers.Serializer):
+        ok = serializers.BooleanField()
+        verified_for_seconds = serializers.IntegerField()
+
+    class VerifyErrorSerializer(serializers.Serializer):
+        detail = serializers.CharField()
+        cooldown_seconds = serializers.IntegerField(required=False)
+
+    @extend_schema(
+        description=(
+            "Verify PIN for currently authenticated user. "
+            "Used for step-up confirmation in sensitive POS actions."
+        ),
+        request=VerifyRequestSerializer,
+        responses={
+            200: VerifySuccessSerializer,
+            400: VerifyErrorSerializer,
+            423: VerifyErrorSerializer,
+        },
+    )
     def post(self, request):
         pin = str(request.data.get("pin", "")).strip()
         if not pin:
@@ -90,13 +114,57 @@ class PosPinVerifyView(APIView):
             profile.pin_fail_count = 0
             profile.pin_locked_until = None
             profile.save(update_fields=["pin_fail_count", "pin_locked_until"])
-        return Response({"ok": True})
+        mark_pin_verified(profile)
+        return Response({"ok": True, "verified_for_seconds": pin_verify_ttl_seconds()})
+
+
+def _require_recent_pin_verify(request):
+    ok, remaining = is_recent_pin_verified(request.user)
+    if ok:
+        return None
+    return Response(
+        {
+            "detail": "Potrebna je PIN potvrda za ovu akciju.",
+            "pin_verify_required": True,
+            "pin_verify_endpoint": "/api/pos/pin/verify/",
+            "pin_verify_ttl_seconds": pin_verify_ttl_seconds(),
+            "pin_verify_remaining_seconds": remaining,
+        },
+        status=428,
+    )
 
 
 class PosPinLoginView(APIView):
     permission_classes = [AllowAny]
     # Token-based login endpoint: disable session auth to avoid CSRF requirements when browser has a session cookie.
     authentication_classes = []
+
+    class LoginRequestSerializer(serializers.Serializer):
+        pin = serializers.CharField(required=True, trim_whitespace=True)
+        username = serializers.CharField(required=False, allow_blank=True)
+        device_id = serializers.CharField(required=False, allow_blank=True)
+
+    class LoginSuccessSerializer(serializers.Serializer):
+        token = serializers.CharField()
+        user_id = serializers.IntegerField()
+        username = serializers.CharField()
+
+    class LoginErrorSerializer(serializers.Serializer):
+        detail = serializers.CharField()
+        cooldown_seconds = serializers.IntegerField(required=False)
+
+    @extend_schema(
+        description=(
+            "PIN login for POS devices. Uses DRF token auth and does not require CSRF."
+        ),
+        request=LoginRequestSerializer,
+        responses={
+            200: LoginSuccessSerializer,
+            400: LoginErrorSerializer,
+            403: LoginErrorSerializer,
+            423: LoginErrorSerializer,
+        },
+    )
 
     def post(self, request):
         pin = str(request.data.get("pin", "")).strip()
@@ -143,7 +211,7 @@ class PosPinLoginView(APIView):
                 profile.pin_locked_until = None
                 profile.save(update_fields=["pin_fail_count", "pin_locked_until"])
             token, _ = Token.objects.get_or_create(user=user)
-            return Response({"token": token.key, "user_id": user.id})
+            return Response({"token": token.key, "user_id": user.id, "username": user.username})
 
         try:
             from pos.models import PosProfile
@@ -170,7 +238,13 @@ class PosPinLoginView(APIView):
                     profile.pin_locked_until = None
                     profile.save(update_fields=["pin_fail_count", "pin_locked_until"])
                 token, _ = Token.objects.get_or_create(user=profile.user)
-                return Response({"token": token.key, "user_id": profile.user_id})
+                return Response(
+                    {
+                        "token": token.key,
+                        "user_id": profile.user_id,
+                        "username": profile.user.username,
+                    }
+                )
 
         return Response({"detail": "Neispravan PIN."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -207,6 +281,10 @@ class PosReceiptCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        verify_error = _require_recent_pin_verify(request)
+        if verify_error:
+            return verify_error
+
         items = request.data.get("items") or []
         if not isinstance(items, list) or not items:
             return Response({"detail": "items su obavezne."}, status=status.HTTP_400_BAD_REQUEST)
@@ -302,6 +380,10 @@ class PosReceiptFiscalizeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, receipt_id: int):
+        verify_error = _require_recent_pin_verify(request)
+        if verify_error:
+            return verify_error
+
         receipt = PosReceipt.objects.filter(id=receipt_id).first()
         if not receipt:
             return Response({"detail": "Račun ne postoji."}, status=status.HTTP_404_NOT_FOUND)
@@ -325,6 +407,10 @@ class PosReceiptStornoView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, receipt_id: int):
+        verify_error = _require_recent_pin_verify(request)
+        if verify_error:
+            return verify_error
+
         original = PosReceipt.objects.filter(id=receipt_id).first()
         if not original:
             return Response({"detail": "Račun ne postoji."}, status=status.HTTP_404_NOT_FOUND)
@@ -557,6 +643,10 @@ class PosShiftCloseView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        verify_error = _require_recent_pin_verify(request)
+        if verify_error:
+            return verify_error
+
         issued_on_raw = request.data.get("issued_on")
         warehouse_id = request.data.get("warehouse_id")
         pos_id = request.data.get("pos_id")

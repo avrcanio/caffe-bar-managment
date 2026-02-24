@@ -11,8 +11,7 @@ from django.utils import timezone
 from accounting.models import Account, JournalEntry, Ledger
 from contacts.models import Supplier
 from orders.admin import WarehouseInputAdmin
-from orders.models import PurchaseOrder, WarehouseInput, WarehouseInputItem
-from purchases.models import SupplierInvoice
+from orders.models import PurchaseOrder, SupplierInvoice, WarehouseInput, WarehouseInputItem
 from stock.models import StockMove, WarehouseId
 from artikli.models import Artikl
 from configuration.models import DocumentType

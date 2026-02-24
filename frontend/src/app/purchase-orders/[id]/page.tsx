@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DM_Serif_Display } from "next/font/google";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { apiGetJson, apiPostJson } from "@/lib/api";
+import { apiGetJson, apiPatchJson, apiPostJson } from "@/lib/api";
 import { formatDate, formatEuro } from "@/lib/format";
 import EmptyState from "@/components/EmptyState";
 import LoadingCard from "@/components/LoadingCard";
@@ -15,6 +15,40 @@ import {
 } from "@/lib/mappers";
 
 const dmSerif = DM_Serif_Display({ subsets: ["latin"], weight: "400" });
+
+type WarehouseDTO = {
+  rm_id: number;
+  name: string;
+};
+
+type ReceiptLineState = {
+  itemId: number;
+  quantity: string;
+  confirmed: boolean;
+  expectedUnitPrice: string;
+};
+
+type PricePatchResponse = {
+  purchase_order_item_id: number;
+  old_price: string;
+  new_price: string;
+  audit: {
+    changed_at: string;
+    changed_by?: {
+      full_name?: string;
+      username?: string;
+    };
+    reason: string;
+  };
+};
+
+type PriceAuditState = {
+  oldPrice: string;
+  newPrice: string;
+  changedAt: string;
+  changedBy: string;
+  reason: string;
+};
 
 export default function PurchaseOrderDetailPage() {
   const params = useParams();
@@ -28,6 +62,26 @@ export default function PurchaseOrderDetailPage() {
   const [showStatusPrompt, setShowStatusPrompt] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
+  const [showReceiptPrompt, setShowReceiptPrompt] = useState(false);
+  const [warehouses, setWarehouses] = useState<WarehouseDTO[]>([]);
+  const [loadingWarehouses, setLoadingWarehouses] = useState(false);
+  const [creatingReceipt, setCreatingReceipt] = useState(false);
+  const [receiptError, setReceiptError] = useState("");
+  const [showPartialConfirmAlert, setShowPartialConfirmAlert] = useState(false);
+  const [selectedWarehouseId, setSelectedWarehouseId] = useState("");
+  const [receiptInvoiceCode, setReceiptInvoiceCode] = useState("");
+  const [receiptDeliveryNote, setReceiptDeliveryNote] = useState("");
+  const [receiptDocumentDate, setReceiptDocumentDate] = useState(
+    new Date().toISOString().slice(0, 10)
+  );
+  const [receiptLines, setReceiptLines] = useState<ReceiptLineState[]>([]);
+  const [editingPriceItemId, setEditingPriceItemId] = useState<number | null>(null);
+  const [priceDraftByItemId, setPriceDraftByItemId] = useState<Record<number, string>>({});
+  const [priceReasonByItemId, setPriceReasonByItemId] = useState<Record<number, string>>({});
+  const [priceErrorByItemId, setPriceErrorByItemId] = useState<Record<number, string>>({});
+  const [priceSavingItemId, setPriceSavingItemId] = useState<number | null>(null);
+  const [priceAuditByItemId, setPriceAuditByItemId] = useState<Record<number, PriceAuditState>>({});
+  const [priceEditedItemId, setPriceEditedItemId] = useState<Record<number, boolean>>({});
 
   const loadOrder = useCallback(async () => {
     if (!id) {
@@ -50,6 +104,24 @@ export default function PurchaseOrderDetailPage() {
   useEffect(() => {
     loadOrder();
   }, [loadOrder]);
+
+  useEffect(() => {
+    if (!showReceiptPrompt) {
+      return;
+    }
+    const run = async () => {
+      try {
+        setLoadingWarehouses(true);
+        const data = await apiGetJson<WarehouseDTO[]>("/api/warehouses/");
+        setWarehouses(data || []);
+      } catch (err) {
+        setWarehouses([]);
+      } finally {
+        setLoadingWarehouses(false);
+      }
+    };
+    run();
+  }, [showReceiptPrompt]);
 
   const groupedItems = useMemo(() => {
     const items = order?.items || [];
@@ -103,6 +175,84 @@ export default function PurchaseOrderDetailPage() {
 
   const activeGroupLabel =
     (groupedItems[activeGroupIndex]?.[0] as string) || "Ostalo";
+  const normalizedStatusCode = (order?.statusCode || "").trim().toLowerCase();
+  const normalizedStatusLabel = (order?.statusLabel || "").trim().toLowerCase();
+  const canSendOrder = normalizedStatusCode === "created";
+  const canCreateReceipt =
+    normalizedStatusCode === "confirmed" ||
+    normalizedStatusCode === "received" ||
+    normalizedStatusLabel === "potvrđena" ||
+    normalizedStatusLabel === "djelomično zaprimljena";
+  const isStatusActionEnabled = Boolean(canSendOrder || canCreateReceipt);
+  const hasOpenPriceEdit = editingPriceItemId !== null;
+  const receiptTotalNet = useMemo(() => {
+    const byId = new Map((order?.items || []).map((item) => [item.id, item]));
+    return receiptLines.reduce((sum, line) => {
+      if (!line.confirmed) {
+        return sum;
+      }
+      const poItem = byId.get(line.itemId);
+      if (!poItem) {
+        return sum;
+      }
+      const qty = Number(line.quantity || 0);
+      const price = Number(line.expectedUnitPrice || 0);
+      if (Number.isNaN(qty) || Number.isNaN(price)) {
+        return sum;
+      }
+      return sum + qty * price;
+    }, 0);
+  }, [receiptLines, order?.items]);
+  const receiptEligibleItems = useMemo(
+    () => (order?.items || []).filter((item) => item.remainingQuantity > 0),
+    [order?.items]
+  );
+
+  const submitReceipt = useCallback(async () => {
+    if (!order) {
+      return;
+    }
+    setCreatingReceipt(true);
+    setReceiptError("");
+    try {
+      await apiPostJson(
+        `/api/purchase-orders/${order.id}/warehouse-inputs/`,
+        {
+          document_date: receiptDocumentDate,
+          warehouse_id: Number(selectedWarehouseId),
+          invoice_code: receiptInvoiceCode.trim(),
+          delivery_note: receiptDeliveryNote.trim(),
+          currency: "EUR",
+          expected_total_net: receiptTotalNet.toFixed(2),
+          items: receiptLines.map((line) => ({
+            purchase_order_item_id: line.itemId,
+            received_quantity: line.quantity || "0",
+            confirmed: line.confirmed,
+            expected_unit_price: line.expectedUnitPrice || "0.00",
+          })),
+        },
+        { csrf: true }
+      );
+      setShowReceiptPrompt(false);
+      setShowPartialConfirmAlert(false);
+      await loadOrder();
+    } catch (err) {
+      setReceiptError(
+        err instanceof Error ? err.message : "Kreiranje primke nije uspjelo."
+      );
+    } finally {
+      setCreatingReceipt(false);
+    }
+  }, [
+    loadOrder,
+    order,
+    receiptDeliveryNote,
+    receiptDocumentDate,
+    receiptInvoiceCode,
+    receiptLines,
+    receiptTotalNet,
+    selectedWarehouseId,
+  ]);
 
   return (
     <main className="min-h-screen bg-[#f2ebe0] text-[#121212]">
@@ -141,7 +291,8 @@ export default function PurchaseOrderDetailPage() {
                 {
                   label: "Status",
                   value: order.statusLabel,
-                  clickable: order.statusCode === "created",
+                  hint: canCreateReceipt ? "Kreiraj primku" : "",
+                  clickable: isStatusActionEnabled,
                 },
                 {
                   label: "Tip placanja",
@@ -161,7 +312,36 @@ export default function PurchaseOrderDetailPage() {
                     key={card.label}
                     type="button"
                     onClick={() => {
-                      if (isClickable) {
+                      if (card.label === "Status" && canCreateReceipt && order) {
+                        if (hasOpenPriceEdit) {
+                          setError(
+                            "Prvo spremi ili odustani od otvorene izmjene cijene."
+                          );
+                          return;
+                        }
+                        if (receiptEligibleItems.length === 0) {
+                          setError("Nema preostalih količina za novu primku.");
+                          return;
+                        }
+                        setError("");
+                        setReceiptError("");
+                        setSelectedWarehouseId("");
+                        setReceiptInvoiceCode("");
+                        setReceiptDeliveryNote("");
+                        setReceiptDocumentDate(new Date().toISOString().slice(0, 10));
+                        setReceiptLines(
+                          receiptEligibleItems.map((item) => ({
+                            itemId: item.id,
+                            quantity: String(item.remainingQuantity),
+                            confirmed: false,
+                            expectedUnitPrice: item.price !== null ? item.price.toFixed(2) : "0.00",
+                          }))
+                        );
+                        setShowPartialConfirmAlert(false);
+                        setShowReceiptPrompt(true);
+                        return;
+                      }
+                      if (isClickable && canSendOrder) {
                         setShowStatusPrompt(true);
                         setSendError("");
                       }
@@ -177,6 +357,11 @@ export default function PurchaseOrderDetailPage() {
                       {card.label}
                     </p>
                     <p className="mt-3 text-lg font-semibold">{card.value}</p>
+                    {"hint" in card && card.hint ? (
+                      <p className="mt-1 text-[10px] uppercase tracking-[0.2em] text-[#f27323]">
+                        {card.hint}
+                      </p>
+                    ) : null}
                   </button>
                 );
               })}
@@ -243,13 +428,147 @@ export default function PurchaseOrderDetailPage() {
                       {items.map((item) => (
                         <div
                           key={item.id}
-                          className="rounded-2xl border border-black/10 bg-white/70 px-4 py-3"
+                          className={`rounded-2xl border border-black/10 px-4 py-3 ${
+                            priceEditedItemId[item.id] ? "bg-red-50/80" : "bg-white/70"
+                          }`}
                         >
                           <p className="text-sm font-semibold">{item.name}</p>
-                          <p className="text-xs text-black/60">
-                            {item.quantity} {item.unitName || ""} ·{" "}
-                            {formatEuro(item.price)}
-                          </p>
+                          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-black/60">
+                            <span>
+                              {item.quantity} {item.unitName || ""}
+                            </span>
+                            <span>·</span>
+                            <span>{formatEuro(item.price)}</span>
+                            {priceAuditByItemId[item.id] ? (
+                              <span
+                                title={`Stara: ${priceAuditByItemId[item.id].oldPrice} | Nova: ${priceAuditByItemId[item.id].newPrice} | Tko: ${priceAuditByItemId[item.id].changedBy} | Kada: ${new Date(priceAuditByItemId[item.id].changedAt).toLocaleString("hr-HR")} | Razlog: ${priceAuditByItemId[item.id].reason}`}
+                                className="rounded-full border border-black/20 px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] text-black/70"
+                              >
+                                Audit
+                              </span>
+                            ) : null}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingPriceItemId(item.id);
+                                setPriceDraftByItemId((prev) => ({
+                                  ...prev,
+                                  [item.id]:
+                                    prev[item.id] !== undefined
+                                      ? prev[item.id]
+                                      : item.price !== null
+                                      ? item.price.toFixed(2)
+                                      : "0.00",
+                                }));
+                              }}
+                              className="rounded-full border border-black/20 bg-white/80 px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] text-black/70"
+                            >
+                              Uredi cijenu
+                            </button>
+                          </div>
+                          {editingPriceItemId === item.id ? (
+                            <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-[0.8fr_1.4fr_auto_auto]">
+                              <input
+                                type="number"
+                                step="0.01"
+                                value={priceDraftByItemId[item.id] ?? ""}
+                                onChange={(event) => {
+                                  const value = event.target.value;
+                                  setPriceDraftByItemId((prev) => ({
+                                    ...prev,
+                                    [item.id]: value,
+                                  }));
+                                }}
+                                className="rounded-full border border-black/20 bg-white px-3 py-1 text-xs text-black/70"
+                              />
+                              <input
+                                value={priceReasonByItemId[item.id] ?? ""}
+                                onChange={(event) => {
+                                  const value = event.target.value;
+                                  setPriceReasonByItemId((prev) => ({
+                                    ...prev,
+                                    [item.id]: value,
+                                  }));
+                                }}
+                                placeholder="Razlog promjene"
+                                className="rounded-full border border-black/20 bg-white px-3 py-1 text-xs text-black/70"
+                              />
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  setPriceSavingItemId(item.id);
+                                  setPriceErrorByItemId((prev) => ({
+                                    ...prev,
+                                    [item.id]: "",
+                                  }));
+                                  try {
+                                    const payload = await apiPatchJson<PricePatchResponse>(
+                                      `/api/purchase-order-items/${item.id}/price/`,
+                                      {
+                                        price: priceDraftByItemId[item.id] ?? "0.00",
+                                        currency: "EUR",
+                                        reason: (priceReasonByItemId[item.id] ?? "").trim(),
+                                      },
+                                      { csrf: true }
+                                    );
+                                    const by = (
+                                      payload.audit?.changed_by?.full_name ||
+                                      payload.audit?.changed_by?.username ||
+                                      "Korisnik"
+                                    ).trim();
+                                    setPriceAuditByItemId((prev) => ({
+                                      ...prev,
+                                      [item.id]: {
+                                        oldPrice: payload.old_price,
+                                        newPrice: payload.new_price,
+                                        changedAt: payload.audit.changed_at,
+                                        changedBy: by,
+                                        reason: payload.audit.reason,
+                                      },
+                                    }));
+                                    setPriceEditedItemId((prev) => ({
+                                      ...prev,
+                                      [item.id]: true,
+                                    }));
+                                    setEditingPriceItemId(null);
+                                    await loadOrder();
+                                  } catch (err) {
+                                    setPriceErrorByItemId((prev) => ({
+                                      ...prev,
+                                      [item.id]:
+                                        err instanceof Error
+                                          ? err.message
+                                          : "Promjena cijene nije uspjela.",
+                                    }));
+                                  } finally {
+                                    setPriceSavingItemId(null);
+                                  }
+                                }}
+                                disabled={priceSavingItemId === item.id}
+                                className="rounded-full border border-black/20 bg-white px-3 py-1 text-[10px] uppercase tracking-[0.12em] text-black/70 disabled:opacity-60"
+                              >
+                                {priceSavingItemId === item.id ? "Spremam..." : "Spremi"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingPriceItemId(null);
+                                  setPriceErrorByItemId((prev) => ({
+                                    ...prev,
+                                    [item.id]: "",
+                                  }));
+                                }}
+                                className="rounded-full border border-black/20 bg-white px-3 py-1 text-[10px] uppercase tracking-[0.12em] text-black/70"
+                              >
+                                Odustani
+                              </button>
+                              {priceErrorByItemId[item.id] ? (
+                                <p className="md:col-span-4 text-xs text-red-600">
+                                  {priceErrorByItemId[item.id]}
+                                </p>
+                              ) : null}
+                            </div>
+                          ) : null}
                           <p className="mt-1 text-xs text-black/60">
                             Ukupno:{" "}
                             {item.price !== null
@@ -348,6 +667,197 @@ export default function PurchaseOrderDetailPage() {
                 className="flex-1 rounded-full bg-[#f27323] px-4 py-2 text-xs uppercase tracking-[0.2em] text-black shadow-[0_12px_24px_rgba(242,115,35,0.35)] disabled:opacity-60"
               >
                 {sending ? "Slanje..." : "Pošalji"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {showReceiptPrompt && order ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-6 py-6">
+          <div className="max-h-[90vh] w-full max-w-3xl overflow-auto rounded-3xl border border-black/15 bg-white p-6 shadow-[0_30px_60px_rgba(10,10,10,0.3)]">
+            <h3 className={`${dmSerif.className} text-2xl`}>Kreiraj primku</h3>
+            <p className="mt-2 text-sm text-black/60">
+              Prikazuju se samo stavke s preostalom količinom. Confirmed je pomoćna kontrola po stavci.
+            </p>
+            {receiptError ? (
+              <p className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
+                {receiptError}
+              </p>
+            ) : null}
+            <div className="mt-4 grid gap-3 md:grid-cols-4">
+              <input
+                type="date"
+                value={receiptDocumentDate}
+                onChange={(event) => setReceiptDocumentDate(event.target.value)}
+                className="rounded-full border border-black/20 bg-white px-4 py-2 text-xs uppercase tracking-[0.15em] text-black/70"
+              />
+              <select
+                value={selectedWarehouseId}
+                onChange={(event) => setSelectedWarehouseId(event.target.value)}
+                className="rounded-full border border-black/20 bg-white px-4 py-2 text-xs uppercase tracking-[0.15em] text-black/70"
+              >
+                <option value="">Odaberi skladište</option>
+                {warehouses.map((warehouse) => (
+                  <option key={warehouse.rm_id} value={warehouse.rm_id}>
+                    {warehouse.name}
+                  </option>
+                ))}
+              </select>
+              <input
+                value={receiptInvoiceCode}
+                onChange={(event) => setReceiptInvoiceCode(event.target.value)}
+                placeholder="Broj računa"
+                className="rounded-full border border-black/20 bg-white px-4 py-2 text-xs uppercase tracking-[0.15em] text-black/70"
+              />
+              <input
+                value={receiptDeliveryNote}
+                onChange={(event) => setReceiptDeliveryNote(event.target.value)}
+                placeholder="Broj otpremnice"
+                className="rounded-full border border-black/20 bg-white px-4 py-2 text-xs uppercase tracking-[0.15em] text-black/70"
+              />
+            </div>
+            {loadingWarehouses ? (
+              <p className="mt-3 text-xs text-black/60">Učitavam skladišta...</p>
+            ) : null}
+            <div className="mt-4 space-y-2">
+              {receiptEligibleItems.map((item) => {
+                const line = receiptLines.find((value) => value.itemId === item.id);
+                return (
+                  <div
+                    key={item.id}
+                    className="grid grid-cols-1 gap-2 rounded-2xl border border-black/10 bg-white/70 px-3 py-3 md:grid-cols-[1.4fr_0.8fr_0.8fr_0.8fr_auto]"
+                  >
+                    <p className="text-sm font-semibold">{item.name}</p>
+                    <input
+                      type="number"
+                      step="0.0001"
+                      value={line?.quantity || "0"}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setReceiptLines((prev) =>
+                          prev.map((row) =>
+                            row.itemId === item.id ? { ...row, quantity: value } : row
+                          )
+                        );
+                      }}
+                      className="rounded-full border border-black/20 bg-white px-3 py-1 text-xs text-black/70"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={line?.expectedUnitPrice || "0.00"}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setReceiptLines((prev) =>
+                          prev.map((row) =>
+                            row.itemId === item.id
+                              ? { ...row, expectedUnitPrice: value }
+                              : row
+                          )
+                        );
+                      }}
+                      className="rounded-full border border-black/20 bg-white px-3 py-1 text-xs text-black/70"
+                    />
+                    <label className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.12em] text-black/60">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(line?.confirmed)}
+                        onChange={(event) => {
+                          const checked = event.target.checked;
+                          setReceiptLines((prev) =>
+                            prev.map((row) =>
+                              row.itemId === item.id ? { ...row, confirmed: checked } : row
+                            )
+                          );
+                        }}
+                      />
+                      Confirmed
+                    </label>
+                    <p className="text-xs text-black/60 md:text-right">
+                      PO: {formatEuro(item.price)} • Preostalo: {item.remainingQuantity}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="mt-4 text-sm font-semibold">
+              Neto (stavke): {formatEuro(receiptTotalNet)}
+            </p>
+            <p className="text-xs text-black/60">
+              Neto (narudžba): {formatEuro(order.totalNet)}
+            </p>
+            <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+              <button
+                onClick={() => setShowReceiptPrompt(false)}
+                className="flex-1 rounded-full border border-black/20 px-4 py-2 text-xs uppercase tracking-[0.2em] text-black/70"
+              >
+                Zatvori
+              </button>
+              <button
+                onClick={async () => {
+                  if (hasOpenPriceEdit) {
+                    setReceiptError(
+                      "Prvo spremi ili odustani od otvorene izmjene cijene."
+                    );
+                    return;
+                  }
+                  if (receiptEligibleItems.length === 0) {
+                    setReceiptError("Nema preostalih količina za zaprimanje.");
+                    return;
+                  }
+                  const confirmedWithQty = receiptLines.filter(
+                    (line) => line.confirmed && Number(line.quantity || 0) > 0
+                  );
+                  if (!confirmedWithQty.length) {
+                    setReceiptError(
+                      "Potvrdi barem jednu stavku s količinom većom od 0."
+                    );
+                    return;
+                  }
+                  const hasUnconfirmed = receiptLines.some(
+                    (line) =>
+                      !line.confirmed && Number(line.quantity || 0) > 0
+                  );
+                  if (hasUnconfirmed) {
+                    setShowPartialConfirmAlert(true);
+                    return;
+                  }
+                  await submitReceipt();
+                }}
+                disabled={creatingReceipt || hasOpenPriceEdit}
+                className="flex-1 rounded-full bg-[#f27323] px-4 py-2 text-xs uppercase tracking-[0.2em] text-black shadow-[0_12px_24px_rgba(242,115,35,0.35)] disabled:opacity-60"
+              >
+                {creatingReceipt ? "Kreiram..." : "Kreiraj primku"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {showPartialConfirmAlert ? (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/55 px-6">
+          <div className="w-full max-w-md rounded-3xl border border-black/15 bg-white p-6 shadow-[0_30px_60px_rgba(10,10,10,0.3)]">
+            <h4 className={`${dmSerif.className} text-xl`}>Upozorenje</h4>
+            <p className="mt-2 text-sm text-black/70">
+              Nisu potvrđene sve stavke. Kreirat će se primka samo za potvrđene
+              stavke.
+            </p>
+            <div className="mt-5 flex flex-col gap-3 sm:flex-row">
+              <button
+                type="button"
+                onClick={() => setShowPartialConfirmAlert(false)}
+                className="flex-1 rounded-full border border-black/20 px-4 py-2 text-xs uppercase tracking-[0.2em] text-black/70"
+              >
+                Vrati nazad
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  setShowPartialConfirmAlert(false);
+                  await submitReceipt();
+                }}
+                className="flex-1 rounded-full bg-[#f27323] px-4 py-2 text-xs uppercase tracking-[0.2em] text-black shadow-[0_12px_24px_rgba(242,115,35,0.35)]"
+              >
+                Prihvati
               </button>
             </div>
           </div>

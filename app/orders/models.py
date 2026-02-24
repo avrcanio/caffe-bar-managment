@@ -18,7 +18,7 @@ class PurchaseOrder(models.Model):
         (STATUS_CREATED, "Kreirana"),
         (STATUS_SENT, "Poslana"),
         (STATUS_CONFIRMED, "Potvrđena"),
-        (STATUS_RECEIVED, "Zaprimljena"),
+        (STATUS_RECEIVED, "Djelomično zaprimljena"),
         (STATUS_RECEIVED_ALL, "Sve stavke s narudžbe su zaprimljene"),
         (STATUS_CANCELED, "Otkazana"),
     )
@@ -253,6 +253,45 @@ class PurchaseOrderItem(models.Model):
         super().delete(*args, **kwargs)
         if order and order.pk:
             order.recalculate_totals()
+
+
+class PurchaseOrderItemPriceAudit(models.Model):
+    purchase_order = models.ForeignKey(
+        "PurchaseOrder",
+        on_delete=models.CASCADE,
+        related_name="price_audits",
+    )
+    purchase_order_item = models.ForeignKey(
+        "PurchaseOrderItem",
+        on_delete=models.CASCADE,
+        related_name="price_audits",
+    )
+    artikl = models.ForeignKey(
+        "artikli.Artikl",
+        on_delete=models.PROTECT,
+        related_name="purchase_order_price_audits",
+    )
+    supplier = models.ForeignKey(
+        "contacts.Supplier",
+        on_delete=models.PROTECT,
+        related_name="purchase_order_price_audits",
+    )
+    old_price = models.DecimalField(max_digits=12, decimal_places=2)
+    new_price = models.DecimalField(max_digits=12, decimal_places=2)
+    changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="purchase_order_item_price_audits",
+    )
+    changed_at = models.DateTimeField(auto_now_add=True)
+    reason = models.TextField()
+
+    class Meta:
+        verbose_name = "Audit promjene cijene stavke narudzbe"
+        verbose_name_plural = "Audit promjene cijena stavki narudzbe"
+        ordering = ("-changed_at", "-id")
 
 
 class SupplierPriceList(models.Model):
@@ -533,3 +572,103 @@ class WarehouseInputItem(models.Model):
     class Meta:
         verbose_name = "Stavka primke"
         verbose_name_plural = "Stavke primke"
+
+
+class SupplierInvoice(models.Model):
+    class PaymentTerms(models.TextChoices):
+        CASH = "cash", "Gotovina"
+        DEFERRED = "deferred", "Odgoda"
+
+    class PaymentStatus(models.TextChoices):
+        UNPAID = "unpaid", "Neplaceno"
+        PARTIAL = "partial", "Djelomicno"
+        PAID = "paid", "Placeno"
+
+    supplier = models.ForeignKey(
+        "contacts.Supplier",
+        on_delete=models.PROTECT,
+        related_name="supplier_invoices",
+    )
+    invoice_number = models.CharField(max_length=50)
+    invoice_date = models.DateField()
+    received_at = models.DateField(null=True, blank=True)
+    due_date = models.DateField(null=True, blank=True)
+    payment_terms = models.CharField(
+        max_length=20,
+        choices=PaymentTerms.choices,
+        default=PaymentTerms.CASH,
+    )
+    payment_status = models.CharField(
+        max_length=20,
+        choices=PaymentStatus.choices,
+        default=PaymentStatus.UNPAID,
+    )
+    deposit_total = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    total_net = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    total_vat = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    total_gross = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    notes = models.TextField(blank=True, default="")
+
+    inputs = models.ManyToManyField(
+        "WarehouseInput",
+        related_name="supplier_invoices",
+        blank=True,
+    )
+    journal_entry = models.OneToOneField(
+        "accounting.JournalEntry",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="supplier_invoice",
+    )
+    document_type = models.ForeignKey(
+        "configuration.DocumentType",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="supplier_invoices",
+    )
+    cash_account = models.ForeignKey(
+        "accounting.Account",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    ap_account = models.ForeignKey(
+        "accounting.Account",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    deposit_account = models.ForeignKey(
+        "accounting.Account",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    paid_cash = models.BooleanField(default=False)
+    paid_at = models.DateField(null=True, blank=True)
+    paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    payment_account = models.ForeignKey(
+        "accounting.Account",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+
+    class Meta:
+        verbose_name = "Ulazni račun"
+        verbose_name_plural = "Ulazni računi"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["supplier", "invoice_number"],
+                name="uq_orders_supplier_invoice_number",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.supplier} #{self.invoice_number}"

@@ -27,7 +27,6 @@ from accounting.services import (
     post_warehouse_input_to_journal,
 )
 from artikli.remaris_connector import RemarisConnector
-from purchases.models import SupplierInvoice
 from stock.models import WarehouseId, WarehouseStock, WarehouseTransfer, WarehouseTransferItem
 from stock.services import get_stock_accounting_config
 from stock.services import post_stock_out_multi_warehouse, post_warehouse_input_to_stock
@@ -35,11 +34,14 @@ from stock.services import post_stock_out_multi_warehouse, post_warehouse_input_
 from .models import (
     PurchaseOrder,
     PurchaseOrderItem,
+    SupplierInvoice,
     SupplierPriceItem,
     SupplierPriceList,
     WarehouseInput,
     WarehouseInputItem,
 )
+from . import supplier_invoice_admin  # noqa: F401
+
 from .pdf import build_order_pdf
 
 
@@ -1064,7 +1066,7 @@ class WarehouseInputAdmin(admin.ModelAdmin):
             f"Ulazni racun kreiran (ID: {invoice.id}).",
             level=messages.SUCCESS,
         )
-        url = reverse("admin:purchases_supplierinvoice_change", args=[invoice.id])
+        url = reverse("admin:orders_supplierinvoice_change", args=[invoice.id])
         messages.success(
             request,
             format_html(

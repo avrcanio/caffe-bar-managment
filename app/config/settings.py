@@ -93,10 +93,10 @@ INSTALLED_APPS = [
     'orders',
     'mailbox_app',
     'accounting',
-    'purchases',
     'sales',
     'operations',
     'pos',
+    'barion',
     'ai',
 ]
 

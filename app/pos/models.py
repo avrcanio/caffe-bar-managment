@@ -45,6 +45,7 @@ class PosProfile(models.Model):
     pin_hash = models.CharField(max_length=128, blank=True, default="")
     pin_fail_count = models.PositiveIntegerField(default=0)
     pin_locked_until = models.DateTimeField(null=True, blank=True)
+    pin_verified_at = models.DateTimeField(null=True, blank=True)
     is_registered = models.BooleanField(default=False, verbose_name="registriran")
     registered_device_id = models.CharField(max_length=128, blank=True, default="")
     registered_at = models.DateTimeField(null=True, blank=True)

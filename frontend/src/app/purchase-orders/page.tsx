@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { DM_Serif_Display } from "next/font/google";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { apiGetJson } from "@/lib/api";
 import { formatDate, formatEuro } from "@/lib/format";
 import EmptyState from "@/components/EmptyState";
@@ -26,16 +26,26 @@ const STATUS_OPTIONS = [
   { value: "created", label: "Kreirana" },
   { value: "sent", label: "Poslana" },
   { value: "confirmed", label: "Potvrđena" },
-  { value: "received", label: "Zaprimljena" },
+  { value: "received", label: "Djelomično zaprimljena" },
+  { value: "received_all", label: "Sve stavke zaprimljene" },
   { value: "canceled", label: "Otkazana" },
 ];
 
 export default function PurchaseOrdersPage() {
+  return (
+    <Suspense fallback={<main className="min-h-screen bg-[#f2ebe0] text-[#121212]" />}>
+      <PurchaseOrdersPageContent />
+    </Suspense>
+  );
+}
+
+function PurchaseOrdersPageContent() {
   const [orders, setOrders] = useState<PurchaseOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [statusFilter, setStatusFilter] = useState("");
+  const [statusReady, setStatusReady] = useState(false);
   const [supplierFilter, setSupplierFilter] = useState("");
   const [orderedFrom, setOrderedFrom] = useState("");
   const [orderedTo, setOrderedTo] = useState("");
@@ -44,8 +54,27 @@ export default function PurchaseOrdersPage() {
   const [sendOrderId, setSendOrderId] = useState<number | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   useEffect(() => {
+    if (!searchParams) {
+      return;
+    }
+    const nextStatus = searchParams.get("status") || "";
+    const isKnownStatus = STATUS_OPTIONS.some(
+      (option) => option.value === nextStatus
+    );
+    const normalizedStatus = isKnownStatus ? nextStatus : "";
+    setStatusFilter((current) =>
+      current === normalizedStatus ? current : normalizedStatus
+    );
+    setStatusReady(true);
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (!statusReady) {
+      return;
+    }
     const run = async () => {
       try {
         setLoading(true);
@@ -74,7 +103,7 @@ export default function PurchaseOrdersPage() {
       }
     };
     run();
-  }, [statusFilter, supplierFilter, orderedFrom, orderedTo, refreshKey]);
+  }, [statusReady, statusFilter, supplierFilter, orderedFrom, orderedTo, refreshKey]);
 
   useEffect(() => {
     const run = async () => {

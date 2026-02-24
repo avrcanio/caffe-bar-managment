@@ -15,8 +15,12 @@ def _assign_default_warehouse(apps, schema_editor):
     preferred_wh = WarehouseId.objects.filter(name="Šank Gornji").first()
     default_wh = preferred_wh or WarehouseId.objects.order_by("rm_id").first()
     if not default_wh:
-        # Fresh installs / test DBs may not have warehouses yet; create a placeholder.
-        default_wh = WarehouseId.objects.create(rm_id=1, name="Default")
+        # Fresh installs / test DBs may not have warehouses yet; create a placeholder
+        # with a high rm_id to avoid clashes with test fixtures that use rm_id=1.
+        default_wh, _ = WarehouseId.objects.get_or_create(
+            rm_id=999999,
+            defaults={"name": "Default"},
+        )
 
     for pos in Pos.objects.all():
         warehouse = None

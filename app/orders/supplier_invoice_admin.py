@@ -186,8 +186,8 @@ class SupplierInvoiceAdmin(admin.ModelAdmin):
     actions = ["post_supplier_invoice"]
 
     class Media:
-        js = ("purchases/js/supplier_invoice_admin.js",)
-        css = {"all": ("purchases/css/supplier_invoice_admin.css",)}
+        js = ("orders/js/supplier_invoice_admin.js",)
+        css = {"all": ("orders/css/supplier_invoice_admin.css",)}
 
     def save_model(self, request, obj, form, change):
         if change:

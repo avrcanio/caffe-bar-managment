@@ -166,10 +166,7 @@ export default function Home() {
         </header>
 
         <section className="grid gap-4 md:grid-cols-[1.3fr_0.7fr]">
-          <Link
-            href="/purchase-orders"
-            className="rounded-2xl border border-black/15 bg-white/80 p-5 shadow-[0_18px_40px_rgba(10,10,10,0.18)] backdrop-blur transition hover:border-black/40"
-          >
+          <div className="rounded-2xl border border-black/15 bg-white/80 p-5 shadow-[0_18px_40px_rgba(10,10,10,0.18)] backdrop-blur">
             <p className="text-xs uppercase tracking-[0.2em] text-black/50">
               Statusi narudžbi
             </p>
@@ -179,9 +176,10 @@ export default function Home() {
                 { key: "sent", label: "POSLANA" },
                 { key: "confirmed", label: "POTVRĐENA" },
               ].map((item) => (
-                <div
+                <Link
                   key={item.key}
-                  className="rounded-2xl border border-black/10 bg-white/70 px-4 py-3"
+                  href={`/purchase-orders?status=${item.key}`}
+                  className="rounded-2xl border border-black/10 bg-white/70 px-4 py-3 transition hover:border-black/35"
                 >
                   <p className="text-xs uppercase tracking-[0.2em] text-black/50">
                     {item.label}
@@ -197,10 +195,10 @@ export default function Home() {
                         )
                       : "-"}
                   </p>
-                </div>
+                </Link>
               ))}
             </div>
-          </Link>
+          </div>
           <Link
             href="/mailbox"
             className="rounded-2xl border border-black/15 bg-white/80 p-5 shadow-[0_18px_40px_rgba(10,10,10,0.18)] backdrop-blur transition hover:border-black/40"

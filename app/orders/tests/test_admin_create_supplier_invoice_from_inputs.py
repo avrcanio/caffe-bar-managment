@@ -8,8 +8,7 @@ from django.utils import timezone
 
 from contacts.models import Supplier
 from orders.admin import WarehouseInputAdmin
-from orders.models import PurchaseOrder, WarehouseInput, WarehouseInputItem
-from purchases.models import SupplierInvoice
+from orders.models import PurchaseOrder, SupplierInvoice, WarehouseInput, WarehouseInputItem
 from accounting.models import Account, Ledger
 from stock.models import StockAccountingConfig
 from stock.models import WarehouseId

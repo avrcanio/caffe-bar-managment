@@ -17,6 +17,8 @@ export type PurchaseOrderItemDTO = {
   unit_name?: string | null;
   unit_of_measure: number;
   price?: string | null;
+  received_quantity?: string | null;
+  remaining_quantity?: string | null;
 };
 
 export type PurchaseOrderDTO = {
@@ -56,6 +58,8 @@ export type PurchaseOrderItem = {
   unitName: string;
   unitId: number;
   price: number | null;
+  receivedQuantity: number;
+  remainingQuantity: number;
 };
 
 export type PurchaseOrder = {
@@ -92,6 +96,8 @@ export const mapPurchaseOrderItem = (
   unitName: item.unit_name || "",
   unitId: item.unit_of_measure,
   price: item.price === null || item.price === undefined ? null : toNumber(item.price, 0),
+  receivedQuantity: toNumber(item.received_quantity, 0),
+  remainingQuantity: toNumber(item.remaining_quantity, toNumber(item.quantity, 0)),
 });
 
 export const mapPurchaseOrder = (order: PurchaseOrderDTO): PurchaseOrder => ({
