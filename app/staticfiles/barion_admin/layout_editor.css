@@ -1,0 +1,163 @@
+#barion-layout-editor {
+  --ble-border: #d9d9d9;
+  --ble-bg: #fff;
+  --ble-muted: #666;
+  --ble-accent: #0b57d0;
+}
+
+.ble-topbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.ble-topbar h1 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.ble-topbar p {
+  margin: 4px 0 0;
+  color: var(--ble-muted);
+}
+
+.ble-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.ble-status {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--ble-border);
+  background: #f8f8f8;
+}
+
+.ble-controls {
+  margin-bottom: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.ble-zone-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ble-zone-tab {
+  border: 1px solid var(--ble-border);
+  background: var(--ble-bg);
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.ble-zone-tab.is-active {
+  border-color: var(--ble-accent);
+  color: var(--ble-accent);
+  font-weight: 600;
+}
+
+.ble-add-row,
+.ble-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ble-main {
+  display: grid;
+  grid-template-columns: minmax(700px, 1fr) 260px;
+  gap: 14px;
+}
+
+.ble-canvas-wrap {
+  position: relative;
+  width: 1000px;
+  height: 2000px;
+  max-width: 100%;
+  max-height: 72vh;
+  overflow: auto;
+  border: 1px solid var(--ble-border);
+  background: #fbfbfb;
+}
+
+.ble-canvas-grid,
+.ble-canvas {
+  position: absolute;
+  inset: 0;
+  width: 1000px;
+  height: 2000px;
+}
+
+.ble-canvas-grid {
+  background-image:
+    linear-gradient(to right, rgba(0, 0, 0, 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(0, 0, 0, 0.05) 1px, transparent 1px);
+  background-size: 50px 50px;
+}
+
+.ble-table {
+  position: absolute;
+  border: 2px solid #1f4f99;
+  background: #dbe8ff;
+  overflow: hidden;
+  box-sizing: border-box;
+  user-select: none;
+  cursor: move;
+}
+
+.ble-table.is-disabled {
+  opacity: 0.45;
+  filter: grayscale(1);
+}
+
+.ble-table.is-selected {
+  outline: 3px solid #f57c00;
+  z-index: 9999 !important;
+}
+
+.ble-table-label {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+
+.ble-table-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 12px;
+  height: 12px;
+  cursor: nwse-resize;
+  background: #1f4f99;
+}
+
+.ble-sidebar {
+  border: 1px solid var(--ble-border);
+  padding: 10px;
+  background: var(--ble-bg);
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+
+.ble-sidebar h3 {
+  margin: 0;
+}
+
+.ble-sidebar label {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.ble-sidebar input[type="number"],
+.ble-sidebar select {
+  width: 100%;
+}
