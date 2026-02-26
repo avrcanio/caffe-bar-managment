@@ -1,8 +1,11 @@
 import hashlib
 import os
-from decimal import Decimal
+from pathlib import Path
+from decimal import Decimal, ROUND_HALF_UP
 
-from django.db import transaction
+from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 from django.db.models import Case, DecimalField, F, IntegerField, Max, OuterRef, Q, Subquery, Value, When
 from django.db.models import Sum
 from django.db.models.functions import Coalesce
@@ -22,11 +25,31 @@ from pos.security import is_recent_pin_verified, pin_verify_ttl_seconds
 from pos.services import create_pos_receipt
 from sales.models import ShiftCashHandover, ShiftTurnover
 
-from .models import Check, CheckItem, Layout, LayoutTable, Table, TableState, UserLayoutAccess
+from .models import (
+    BarionRuntimeMode,
+    Check,
+    CheckItem,
+    Layout,
+    LayoutTable,
+    SettlementPart,
+    Table,
+    TableState,
+    UserLayoutAccess,
+)
 
 
 class ErrorSerializer(serializers.Serializer):
     detail = serializers.CharField()
+
+
+class RuntimeModeSerializer(serializers.Serializer):
+    active_mode = serializers.ChoiceField(choices=BarionRuntimeMode.Mode.choices)
+    updated_at = serializers.DateTimeField()
+    updated_by_id = serializers.IntegerField(allow_null=True)
+
+
+class RuntimeModeUpdateRequestSerializer(serializers.Serializer):
+    active_mode = serializers.ChoiceField(choices=BarionRuntimeMode.Mode.choices, required=True)
 
 
 class ActiveLayoutLayoutSerializer(serializers.Serializer):
@@ -83,6 +106,8 @@ class CheckSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     table_id = serializers.IntegerField()
     status = serializers.CharField()
+    settlement_status = serializers.CharField(required=False)
+    payment_status = serializers.CharField(required=False)
     pos_receipt_id = serializers.IntegerField(allow_null=True)
     opened_at = serializers.DateTimeField(allow_null=True)
     closed_at = serializers.DateTimeField(allow_null=True)
@@ -148,6 +173,13 @@ class CheckItemsResponseSerializer(serializers.Serializer):
     totals = CheckItemsTotalsSerializer()
 
 
+def _ensure_whole_piece_quantity(value: Decimal) -> Decimal:
+    qty = Decimal(str(value)).quantize(Decimal("0.0001"))
+    if qty != qty.quantize(Decimal("1")):
+        raise serializers.ValidationError("quantity mora biti cijeli broj komada.")
+    return qty
+
+
 class CreateCheckItemRequestSerializer(serializers.Serializer):
     artikl_id = serializers.IntegerField(required=True)
     quantity = serializers.DecimalField(max_digits=12, decimal_places=4, min_value=Decimal("0.0001"))
@@ -160,6 +192,9 @@ class CreateCheckItemRequestSerializer(serializers.Serializer):
         max_value=Decimal("0.9999"),
     )
     note = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate_quantity(self, value):
+        return _ensure_whole_piece_quantity(value)
 
 
 class UpdateCheckItemRequestSerializer(serializers.Serializer):
@@ -185,6 +220,9 @@ class UpdateCheckItemRequestSerializer(serializers.Serializer):
     )
     note = serializers.CharField(required=False, allow_blank=True)
 
+    def validate_quantity(self, value):
+        return _ensure_whole_piece_quantity(value)
+
 
 class CheckItemActionRequestSerializer(serializers.Serializer):
     quantity = serializers.DecimalField(
@@ -200,6 +238,9 @@ class CheckItemActionRequestSerializer(serializers.Serializer):
         default="",
         help_text="Opcionalni razlog akcije (audit napomena).",
     )
+
+    def validate_quantity(self, value):
+        return _ensure_whole_piece_quantity(value)
 
 
 class PosProductSearchItemSerializer(serializers.Serializer):
@@ -220,6 +261,7 @@ class PosDrinkCategoryDisplayItemSerializer(serializers.Serializer):
     name = serializers.CharField()
     parent_id = serializers.IntegerField(allow_null=True)
     sort_order = serializers.IntegerField()
+    popularity_score = serializers.DecimalField(max_digits=14, decimal_places=4, allow_null=True)
 
 
 class PosDrinkCategoryDisplayResponseSerializer(serializers.Serializer):
@@ -240,6 +282,9 @@ class IssueCheckReceiptRequestSerializer(serializers.Serializer):
 
 class IssueCheckReceiptResponseSerializer(serializers.Serializer):
     check_id = serializers.IntegerField()
+    check_status = serializers.CharField(required=False)
+    settlement_status = serializers.CharField(required=False)
+    payment_status = serializers.CharField(required=False)
     receipt_id = serializers.IntegerField()
     receipt_number = serializers.IntegerField()
     status = serializers.CharField()
@@ -247,6 +292,9 @@ class IssueCheckReceiptResponseSerializer(serializers.Serializer):
     zki = serializers.CharField()
     jir = serializers.CharField()
     qr = serializers.CharField()
+    parts = serializers.JSONField(required=False)
+    totals = serializers.JSONField(required=False)
+    actions = serializers.JSONField(required=False)
 
 
 class SendCheckToBarResponseSerializer(serializers.Serializer):
@@ -255,6 +303,168 @@ class SendCheckToBarResponseSerializer(serializers.Serializer):
     sent_items_count = serializers.IntegerField()
     sent_at = serializers.DateTimeField()
     ticket = serializers.JSONField()
+
+
+class SettlementPartRequestSerializer(serializers.Serializer):
+    method = serializers.ChoiceField(choices=SettlementPart.Method.choices)
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    tip_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=Decimal("0.00"))
+
+
+class PrepareSettlementRequestSerializer(serializers.Serializer):
+    parts = SettlementPartRequestSerializer(many=True)
+    ready_for_issue = serializers.BooleanField(required=False, default=False)
+
+
+class SettlementPartResponseSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    method = serializers.ChoiceField(choices=SettlementPart.Method.choices)
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    tip_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    total_charged = serializers.DecimalField(max_digits=12, decimal_places=2)
+    fiscal_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    status = serializers.ChoiceField(choices=SettlementPart.Status.choices)
+    provider_ref = serializers.CharField(allow_blank=True)
+
+
+class SettlementTotalsResponseSerializer(serializers.Serializer):
+    check_total = serializers.DecimalField(max_digits=12, decimal_places=2)
+    allocated_total = serializers.DecimalField(max_digits=12, decimal_places=2)
+    confirmed_total = serializers.DecimalField(max_digits=12, decimal_places=2)
+    remaining_total = serializers.DecimalField(max_digits=12, decimal_places=2)
+
+
+class SettlementActionsResponseSerializer(serializers.Serializer):
+    can_confirm_card = serializers.BooleanField()
+    can_issue_receipt = serializers.BooleanField()
+    can_close_check = serializers.BooleanField()
+
+
+class PrepareSettlementResponseSerializer(serializers.Serializer):
+    check_id = serializers.IntegerField()
+    settlement_status = serializers.CharField()
+    payment_status = serializers.CharField()
+    parts = SettlementPartResponseSerializer(many=True)
+    totals = SettlementTotalsResponseSerializer()
+    actions = SettlementActionsResponseSerializer()
+
+
+class SettlementStateResponseSerializer(serializers.Serializer):
+    check_id = serializers.IntegerField()
+    check_status = serializers.CharField()
+    settlement_status = serializers.CharField()
+    payment_status = serializers.CharField()
+    pos_receipt_id = serializers.IntegerField(allow_null=True)
+    pos_receipt_ids = serializers.ListField(child=serializers.IntegerField(), required=False)
+    receipts = serializers.JSONField(required=False)
+    issued_receipt_id = serializers.IntegerField(allow_null=True)
+    receipt_pdf_url = serializers.URLField(allow_null=True)
+    parts = SettlementPartResponseSerializer(many=True)
+    items = serializers.JSONField(required=False)
+    totals = SettlementTotalsResponseSerializer()
+    actions = SettlementActionsResponseSerializer()
+    updated_at = serializers.DateTimeField()
+
+
+class RoundStatePaidLineSerializer(serializers.Serializer):
+    line_type = serializers.CharField()
+    quantity = serializers.CharField()
+    unit_price = serializers.CharField()
+    total_amount = serializers.CharField()
+    ui_color = serializers.CharField()
+
+
+class RoundStateItemSerializer(serializers.Serializer):
+    item_id = serializers.IntegerField()
+    check_id = serializers.IntegerField()
+    artikl_id = serializers.IntegerField()
+    artikl_name = serializers.CharField()
+    round_number = serializers.IntegerField(allow_null=True)
+    source_quantity = serializers.CharField()
+    sold_quantity = serializers.CharField()
+    storno_quantity = serializers.CharField()
+    gratis_quantity = serializers.CharField()
+    otpis_quantity = serializers.CharField()
+    remaining_quantity = serializers.CharField()
+    strike_main = serializers.BooleanField()
+    paid_line = RoundStatePaidLineSerializer(allow_null=True)
+
+
+class RoundStateResponseSerializer(serializers.Serializer):
+    check_id = serializers.IntegerField()
+    status = serializers.CharField()
+    items = RoundStateItemSerializer(many=True)
+    updated_at = serializers.DateTimeField()
+
+
+class PayCardConfirmRequestSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0.01"))
+    external_txn_id = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    issue_receipt = serializers.BooleanField(required=False, default=False)
+
+
+class SettlementPartPayCashItemSerializer(serializers.Serializer):
+    item_id = serializers.IntegerField(required=True)
+    quantity = serializers.DecimalField(max_digits=12, decimal_places=4, min_value=Decimal("0.0001"))
+
+    def validate_quantity(self, value):
+        return _ensure_whole_piece_quantity(value)
+
+
+class SettlementPartPayCashRequestSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+        min_value=Decimal("0.00"),
+    )
+    items = SettlementPartPayCashItemSerializer(many=True, required=False)
+
+    def validate(self, attrs):
+        amount = attrs.get("amount")
+        items = attrs.get("items")
+        if amount is None and not items:
+            raise serializers.ValidationError("Potrebno je poslati amount ili items.")
+        if amount is not None and amount <= Decimal("0.00"):
+            if items:
+                attrs["amount"] = None
+            else:
+                raise serializers.ValidationError({"amount": "amount mora biti veći od 0.00."})
+        return attrs
+
+
+class SettlementPartPayCardConfirmRequestSerializer(serializers.Serializer):
+    approved = serializers.BooleanField(required=True)
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0.01"))
+    tip_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0.00"))
+    external_txn_id = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    provider_ref = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    issue_receipt = serializers.BooleanField(required=False, default=False)
+
+
+class PayCardConfirmResponseSerializer(serializers.Serializer):
+    check_id = serializers.IntegerField()
+    settlement_status = serializers.CharField()
+    payment_status = serializers.CharField()
+    card_confirmed = serializers.BooleanField()
+    issued_receipt_id = serializers.IntegerField(allow_null=True)
+    pos_receipt_ids = serializers.ListField(child=serializers.IntegerField(), required=False)
+    receipts = serializers.JSONField(required=False)
+    receipt_pdf_url = serializers.URLField(allow_null=True)
+    remaining_total = serializers.DecimalField(max_digits=12, decimal_places=2)
+    check_closed = serializers.BooleanField()
+    action = serializers.CharField()
+    parts = SettlementPartResponseSerializer(many=True, required=False)
+    totals = SettlementTotalsResponseSerializer(required=False)
+    actions = SettlementActionsResponseSerializer(required=False)
+
+
+def _resolve_effective_mode(*, requested_mode: str | None) -> tuple[str, BarionRuntimeMode]:
+    _ = requested_mode  # Client-provided mode is intentionally ignored; backend runtime mode is authoritative.
+    runtime_mode = BarionRuntimeMode.get_solo()
+    effective_mode = runtime_mode.active_mode or BarionRuntimeMode.Mode.DAY
+    return effective_mode, runtime_mode
 
 
 def _allowed_layout_assignments_qs(user):
@@ -297,6 +507,584 @@ def _resolve_layout_for_user(user, requested_layout_id: int | None):
     if default_assignment:
         return default_assignment.layout, "default", None
     return assignments[0].layout, "fallback", None
+
+
+def _check_total_amount(check: Check) -> Decimal:
+    total = Decimal("0.00")
+    for item in check.items.all():
+        if item.line_type != CheckItem.LineType.NORMAL:
+            continue
+        chargeable_qty = _chargeable_qty_for_item(item)
+        if chargeable_qty <= Decimal("0.0000"):
+            continue
+        line_total = (chargeable_qty * Decimal(str(item.unit_price or "0.0000"))).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+        total = (total + line_total).quantize(Decimal("0.01"))
+    return total
+
+
+def _check_paid_amount(check: Check) -> Decimal:
+    paid_parts_total = (
+        check.settlement_parts.filter(status=SettlementPart.Status.PAID)
+        .aggregate(total=Sum("amount"))
+        .get("total")
+    )
+    if paid_parts_total is not None:
+        return Decimal(str(paid_parts_total)).quantize(Decimal("0.01"))
+    paid_items_total = (
+        check.items.filter(line_type=CheckItem.LineType.NORMAL)
+        .aggregate(total=Sum("paid_amount"))
+        .get("total")
+    )
+    return Decimal(str(paid_items_total or "0.00")).quantize(Decimal("0.01"))
+
+
+def _check_remaining_amount(check: Check) -> Decimal:
+    remaining = (_check_total_amount(check) - _check_paid_amount(check)).quantize(Decimal("0.01"))
+    if remaining < Decimal("0.00"):
+        return Decimal("0.00")
+    return remaining
+
+
+def _money_str(value: Decimal | str | int | float) -> str:
+    return str(Decimal(str(value)).quantize(Decimal("0.01")))
+
+
+def _qty_str(value: Decimal | str | int | float) -> str:
+    return str(Decimal(str(value)).quantize(Decimal("0.0001")))
+
+
+def _applied_qty_by_marker(*, check_id: int, item_id: int, line_type: str, marker_prefix: str) -> Decimal:
+    marker = f"[{marker_prefix}_of:{item_id}]"
+    applied_sum = (
+        CheckItem.objects.filter(
+            barion_check_id=check_id,
+            line_type=line_type,
+            note__startswith=marker,
+        ).aggregate(total=Sum("quantity"))["total"]
+        or Decimal("0.0000")
+    )
+    return abs(Decimal(str(applied_sum)).quantize(Decimal("0.0001")))
+
+
+def _storno_applied_qty_for_item(*, check_id: int, item_id: int) -> Decimal:
+    return _applied_qty_by_marker(
+        check_id=check_id,
+        item_id=item_id,
+        line_type=CheckItem.LineType.STORNO,
+        marker_prefix="storno",
+    )
+
+
+def _gratis_applied_qty_for_item(*, check_id: int, item_id: int) -> Decimal:
+    return _applied_qty_by_marker(
+        check_id=check_id,
+        item_id=item_id,
+        line_type=CheckItem.LineType.GRATIS,
+        marker_prefix="gratis",
+    )
+
+
+def _otpis_applied_qty_for_item(*, check_id: int, item_id: int) -> Decimal:
+    return _applied_qty_by_marker(
+        check_id=check_id,
+        item_id=item_id,
+        line_type=CheckItem.LineType.OTPIS,
+        marker_prefix="otpis",
+    )
+
+
+def _source_qty_for_item(*, check_id: int, item_id: int, stored_qty: Decimal | str | int | float) -> Decimal:
+    # Source quantity must stay equal to stored NORMAL quantity.
+    # Deductions are applied via STORNO/GRATIS/OTPIS/PAID against this base.
+    return Decimal(str(stored_qty)).quantize(Decimal("0.0001"))
+
+
+def _chargeable_qty_for_item(item: CheckItem) -> Decimal:
+    if item.line_type != CheckItem.LineType.NORMAL:
+        return Decimal("0.0000")
+    source_qty = _source_qty_for_item(
+        check_id=item.barion_check_id,
+        item_id=item.id,
+        stored_qty=item.quantity,
+    )
+    chargeable_qty = (
+        source_qty
+        - _storno_applied_qty_for_item(check_id=item.barion_check_id, item_id=item.id)
+        - _gratis_applied_qty_for_item(check_id=item.barion_check_id, item_id=item.id)
+        - _otpis_applied_qty_for_item(check_id=item.barion_check_id, item_id=item.id)
+    ).quantize(Decimal("0.0001"))
+    if chargeable_qty < Decimal("0.0000"):
+        return Decimal("0.0000")
+    return chargeable_qty
+
+
+def _payment_remaining_for_item(item: CheckItem) -> tuple[Decimal, Decimal]:
+    if item.line_type != CheckItem.LineType.NORMAL:
+        return Decimal("0.0000"), Decimal("0.00")
+
+    chargeable_qty = _chargeable_qty_for_item(item)
+    remaining_qty = (chargeable_qty - item.paid_quantity).quantize(Decimal("0.0001"))
+    if remaining_qty < Decimal("0.0000"):
+        remaining_qty = Decimal("0.0000")
+
+    unit_price = Decimal(str(item.unit_price or "0.0000"))
+    if unit_price <= Decimal("0.0000") or remaining_qty <= Decimal("0.0000"):
+        return remaining_qty, Decimal("0.00")
+
+    remaining_amount = (remaining_qty * unit_price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if remaining_amount < Decimal("0.00"):
+        remaining_amount = Decimal("0.00")
+    return remaining_qty, remaining_amount
+
+
+def _display_quantity_for_item(item: CheckItem) -> Decimal:
+    if item.line_type != CheckItem.LineType.NORMAL:
+        return Decimal(str(item.quantity)).quantize(Decimal("0.0001"))
+    return _source_qty_for_item(
+        check_id=item.barion_check_id,
+        item_id=item.id,
+        stored_qty=item.quantity,
+    )
+
+
+def _serialize_item_settlement_state(check: Check) -> list[dict]:
+    rows = []
+    for item in check.items.order_by("id"):
+        remaining_qty, remaining_amount = _payment_remaining_for_item(item)
+        if remaining_qty <= Decimal("0.0000") or remaining_amount <= Decimal("0.00"):
+            continue
+        rows.append(
+            {
+                "id": item.id,
+                "artikl_id": item.artikl_id,
+                "round_number": item.round_number,
+                "sent_to_bar": item.sent_to_bar,
+                "quantity": _qty_str(_display_quantity_for_item(item)),
+                "paid_quantity": _qty_str(item.paid_quantity),
+                "remaining_quantity": _qty_str(remaining_qty),
+                "total_amount": _money_str(item.total_amount),
+                "paid_amount": _money_str(item.paid_amount),
+                "remaining_amount": _money_str(remaining_amount),
+            }
+        )
+    return rows
+
+
+def _serialize_round_state_items(check: Check) -> list[dict]:
+    """
+    UI-oriented quantity snapshot for Android round rendering.
+    Keeps main NORMAL line as source quantity and exposes PAID aggregate as a virtual line.
+    """
+    rows: list[dict] = []
+    items = (
+        check.items.select_related("artikl")
+        .filter(line_type=CheckItem.LineType.NORMAL)
+        .order_by("round_number", "id")
+    )
+    for item in items:
+        source_qty = _source_qty_for_item(
+            check_id=item.barion_check_id,
+            item_id=item.id,
+            stored_qty=item.quantity,
+        )
+        sold_qty = Decimal(str(item.paid_quantity or "0.0000")).quantize(Decimal("0.0001"))
+        storno_qty = _storno_applied_qty_for_item(check_id=item.barion_check_id, item_id=item.id)
+        gratis_qty = _gratis_applied_qty_for_item(check_id=item.barion_check_id, item_id=item.id)
+        otpis_qty = _otpis_applied_qty_for_item(check_id=item.barion_check_id, item_id=item.id)
+        remaining_qty, _ = _payment_remaining_for_item(item)
+
+        paid_line = None
+        if sold_qty > Decimal("0.0000"):
+            paid_total = (sold_qty * Decimal(str(item.unit_price or "0.0000"))).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            paid_line = {
+                "line_type": "PAID",
+                "quantity": _qty_str(sold_qty),
+                "unit_price": _qty_str(item.unit_price),
+                "total_amount": _money_str(paid_total),
+                "ui_color": "light_blue",
+            }
+
+        rows.append(
+            {
+                "item_id": item.id,
+                "check_id": item.barion_check_id,
+                "artikl_id": item.artikl_id,
+                "artikl_name": item.artikl.name,
+                "round_number": item.round_number,
+                "source_quantity": _qty_str(source_qty),
+                "sold_quantity": _qty_str(sold_qty),
+                "storno_quantity": _qty_str(storno_qty),
+                "gratis_quantity": _qty_str(gratis_qty),
+                "otpis_quantity": _qty_str(otpis_qty),
+                "remaining_quantity": _qty_str(remaining_qty),
+                "strike_main": remaining_qty <= Decimal("0.0000"),
+                "paid_line": paid_line,
+            }
+        )
+    return rows
+
+
+def _allocate_payment_to_items(*, check: Check, amount: Decimal, with_allocations: bool = False):
+    """Allocates paid amount across items in ID order, updating paid_amount/paid_quantity."""
+    remaining_to_allocate = Decimal(str(amount)).quantize(Decimal("0.01"))
+    if remaining_to_allocate <= Decimal("0.00"):
+        return (Decimal("0.00"), []) if with_allocations else Decimal("0.00")
+
+    allocations: list[dict] = []
+
+    for item in check.items.select_for_update().order_by("id"):
+        if item.line_type != CheckItem.LineType.NORMAL:
+            continue
+        item_remaining_qty, item_remaining_amount = _payment_remaining_for_item(item)
+        if item_remaining_amount <= Decimal("0.00") or item_remaining_qty <= Decimal("0.0000"):
+            continue
+        take = min(item_remaining_amount, remaining_to_allocate).quantize(Decimal("0.01"))
+        if take <= Decimal("0.00"):
+            continue
+        prev_paid_qty = item.paid_quantity
+        item.paid_amount = (item.paid_amount + take).quantize(Decimal("0.01"))
+        if item.unit_price > Decimal("0.0000"):
+            paid_qty = (item.paid_amount / item.unit_price).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+            item.paid_quantity = min(paid_qty, item.quantity)
+        else:
+            item.paid_quantity = item.quantity if item.paid_amount >= item.total_amount else Decimal("0.0000")
+        item.save(update_fields=["paid_amount", "paid_quantity", "updated_at"])
+        allocated_qty = (item.paid_quantity - prev_paid_qty).quantize(Decimal("0.0001"))
+        if allocated_qty > Decimal("0.0000"):
+            allocations.append({"item": item, "quantity": allocated_qty})
+        remaining_to_allocate = (remaining_to_allocate - take).quantize(Decimal("0.01"))
+        if remaining_to_allocate <= Decimal("0.00"):
+            break
+
+    allocated_total = (Decimal(str(amount)).quantize(Decimal("0.01")) - max(remaining_to_allocate, Decimal("0.00"))).quantize(
+        Decimal("0.01")
+    )
+    if with_allocations:
+        return allocated_total, allocations
+    return allocated_total
+
+
+def _allocate_selected_items(*, selections: list[dict], with_allocations: bool = False):
+    allocated_total = Decimal("0.00")
+    allocations: list[dict] = []
+    for row in selections:
+        item = row["item"]
+        quantity = Decimal(str(row["quantity"])).quantize(Decimal("0.0001"))
+        if quantity <= Decimal("0.0000"):
+            continue
+
+        payment_remaining_qty, payment_remaining_amount = _payment_remaining_for_item(item)
+        if quantity > payment_remaining_qty:
+            raise serializers.ValidationError(f"Nema dovoljno remaining_quantity za item {item.id}.")
+
+        line_amount = (quantity * item.unit_price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if line_amount > payment_remaining_amount:
+            raise serializers.ValidationError(f"Nema dovoljno remaining_amount za item {item.id}.")
+
+        item.paid_quantity = (item.paid_quantity + quantity).quantize(Decimal("0.0001"))
+        item.paid_amount = (item.paid_amount + line_amount).quantize(Decimal("0.01"))
+        item.save(update_fields=["paid_amount", "paid_quantity", "updated_at"])
+        allocated_total = (allocated_total + line_amount).quantize(Decimal("0.01"))
+        allocations.append({"item": item, "quantity": quantity})
+
+    if with_allocations:
+        return allocated_total, allocations
+    return allocated_total
+
+
+def _create_receipt_for_part_payment(*, part: SettlementPart, allocations: list[dict], user):
+    if part.confirmed_receipt_id:
+        return part.confirmed_receipt
+    if not allocations:
+        return None
+
+    items_payload: list[dict] = []
+    for row in allocations:
+        item = row["item"]
+        quantity = Decimal(str(row["quantity"])).quantize(Decimal("0.0001"))
+        if quantity <= Decimal("0.0000"):
+            continue
+        items_payload.append(
+            {
+                "artikl": item.artikl_id,
+                "quantity": quantity,
+                "unit_price": item.unit_price,
+            }
+        )
+    if not items_payload:
+        return None
+
+    payment_type = "card" if part.method == SettlementPart.Method.CARD else "cash"
+    receipt = create_pos_receipt(
+        office_code=os.getenv("FISCAL_OFFICE_CODE", "POS1"),
+        device_code=os.getenv("FISCAL_DEVICE_CODE", "1"),
+        payment_type=payment_type,
+        items=items_payload,
+        operator=user,
+    )
+    part.confirmed_receipt = receipt
+    part.save(update_fields=["confirmed_receipt", "updated_at"])
+    _save_receipt_pdf_to_media(receipt, user)
+    return receipt
+
+
+def _mark_all_items_paid(*, check: Check) -> None:
+    for item in check.items.select_for_update().order_by("id"):
+        if item.line_type != CheckItem.LineType.NORMAL:
+            continue
+        chargeable_qty = _chargeable_qty_for_item(item)
+        chargeable_amount = (chargeable_qty * Decimal(str(item.unit_price or "0.0000"))).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP,
+        )
+        if item.paid_amount != chargeable_amount or item.paid_quantity != chargeable_qty:
+            item.paid_amount = chargeable_amount
+            item.paid_quantity = chargeable_qty
+            item.save(update_fields=["paid_amount", "paid_quantity", "updated_at"])
+
+
+def _serialize_settlement_parts(parts: list[SettlementPart]) -> list[dict]:
+    return [
+        {
+            "id": part.id,
+            "method": part.method,
+            "amount": _money_str(part.amount),
+            "tip_amount": _money_str(part.tip_amount),
+            "total_charged": _money_str(part.total_charged),
+            "fiscal_amount": _money_str(part.fiscal_amount),
+            "status": part.status,
+            "provider_ref": part.provider_ref,
+        }
+        for part in parts
+    ]
+
+
+def _snapshot_part_sort_key(part: SettlementPart) -> tuple[int, int]:
+    # Return mutable parts first so clients can safely pick "first matching" part.
+    status_rank = {
+        SettlementPart.Status.PREPARED: 0,
+        SettlementPart.Status.FAILED: 1,
+        SettlementPart.Status.PAID: 2,
+    }
+    return (status_rank.get(part.status, 99), part.id)
+
+
+def _recalculate_check_settlement_status(check: Check) -> tuple[str, str]:
+    check_total = _check_total_amount(check)
+    parts = list(check.settlement_parts.all().order_by("id"))
+    if not parts:
+        check.settlement_status = Check.SettlementStatus.NONE
+        check.payment_status = Check.PaymentStatus.UNPAID
+        return check.settlement_status, check.payment_status
+
+    allocated_total = sum((part.amount for part in parts), Decimal("0.00")).quantize(Decimal("0.01"))
+    confirmed_total = _check_paid_amount(check)
+    remaining_total = (check_total - confirmed_total).quantize(Decimal("0.01"))
+    has_card_parts = any(part.method == SettlementPart.Method.CARD for part in parts)
+    all_confirmed = all(part.status == SettlementPart.Status.PAID for part in parts)
+
+    if confirmed_total <= 0:
+        check.payment_status = Check.PaymentStatus.UNPAID
+    elif remaining_total > Decimal("0.00"):
+        check.payment_status = Check.PaymentStatus.PARTIAL
+    else:
+        check.payment_status = Check.PaymentStatus.PAID
+
+    if all_confirmed and remaining_total <= Decimal("0.00"):
+        check.settlement_status = Check.SettlementStatus.COMPLETE
+    elif confirmed_total > Decimal("0.00") and has_card_parts:
+        check.settlement_status = Check.SettlementStatus.CARD_CONFIRMED
+    elif allocated_total >= remaining_total and remaining_total > Decimal("0.00"):
+        check.settlement_status = Check.SettlementStatus.PREPARED
+    else:
+        check.settlement_status = Check.SettlementStatus.NONE
+
+    return check.settlement_status, check.payment_status
+
+
+def _sync_settlement_after_items_changed(*, check: Check, user=None) -> None:
+    """Item mutations invalidate pending PREPARED parts; keep confirmed PAID history."""
+    check.settlement_parts.filter(status=SettlementPart.Status.PREPARED).delete()
+    snapshot = _build_settlement_snapshot(check)
+    remaining_total = Decimal(str(snapshot["totals"]["remaining_total"]))
+    if remaining_total <= Decimal("0.00") and check.status == Check.Status.OPEN:
+        check.settlement_status = Check.SettlementStatus.COMPLETE
+        check.payment_status = Check.PaymentStatus.PAID
+        check.save(update_fields=["settlement_status", "payment_status", "updated_at"])
+        _close_check_and_release_table(check=check, user=user)
+        return
+    _recalculate_check_settlement_status(check)
+    check.save(update_fields=["settlement_status", "payment_status", "updated_at"])
+
+
+def _build_settlement_snapshot(check: Check) -> dict:
+    parts = sorted(list(check.settlement_parts.all()), key=_snapshot_part_sort_key)
+    check_total = _check_total_amount(check)
+    allocated_total = sum((part.amount for part in parts), Decimal("0.00")).quantize(Decimal("0.01"))
+    confirmed_total = _check_paid_amount(check)
+    remaining_total = (check_total - confirmed_total).quantize(Decimal("0.01"))
+    has_unconfirmed_card = any(
+        part.method == SettlementPart.Method.CARD and part.status != SettlementPart.Status.PAID
+        for part in parts
+    )
+    can_settle_fully = remaining_total <= Decimal("0.00")
+    return {
+        "parts": _serialize_settlement_parts(parts),
+        "totals": {
+            "check_total": _money_str(check_total),
+            "allocated_total": _money_str(allocated_total),
+            "confirmed_total": _money_str(confirmed_total),
+            "remaining_total": _money_str(remaining_total),
+        },
+        "actions": {
+            "can_confirm_card": check.status == Check.Status.OPEN and has_unconfirmed_card,
+            "can_issue_receipt": check.status == Check.Status.OPEN and not check.pos_receipt_id and can_settle_fully,
+            "can_close_check": check.status == Check.Status.OPEN and can_settle_fully,
+        },
+        "items": _serialize_item_settlement_state(check),
+    }
+
+
+def _close_check_and_release_table(*, check: Check, user):
+    check.status = Check.Status.CLOSED
+    check.closed_at = timezone.now()
+    check.closed_by = user
+    check.save(update_fields=["status", "closed_at", "closed_by", "updated_at"])
+    placements = list(
+        LayoutTable.objects.select_for_update()
+        .filter(table_id=check.table_id, is_enabled=True)
+        .only("id")
+    )
+    if placements:
+        TableState.objects.filter(
+            layout_table_id__in=[p.id for p in placements],
+            open_check_id=check.id,
+        ).update(
+            state=TableState.State.FREE,
+            open_check_id=None,
+            updated_by=user,
+            updated_at=timezone.now(),
+        )
+
+
+def _save_receipt_pdf_to_media(receipt, user) -> str | None:
+    from rest_framework.test import APIRequestFactory
+    from pos.api import PosReceiptPrintView
+
+    req = APIRequestFactory().get(f"/api/pos/receipts/{receipt.id}/print/")
+    req.user = user
+    response = PosReceiptPrintView().get(req, receipt.id)
+    if getattr(response, "status_code", None) != 200:
+        return None
+
+    target_dir = Path(settings.MEDIA_ROOT) / "racuni"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"pos-receipt-{receipt.id}.pdf"
+    target_path = target_dir / filename
+    target_path.write_bytes(response.content)
+    return f"{settings.MEDIA_URL}racuni/{filename}"
+
+
+def _build_receipt_pdf_url(request, issued_receipt_id: int | None) -> str | None:
+    if not issued_receipt_id:
+        return None
+    filename = f"pos-receipt-{issued_receipt_id}.pdf"
+    relative_path = f"{settings.MEDIA_URL}racuni/{filename}"
+    fs_path = Path(settings.MEDIA_ROOT) / "racuni" / filename
+    if not fs_path.exists():
+        return None
+    return request.build_absolute_uri(relative_path)
+
+
+def _collect_check_receipt_ids(check: Check) -> list[int]:
+    receipt_ids: set[int] = set()
+    part_receipts = (
+        check.settlement_parts.exclude(confirmed_receipt_id__isnull=True)
+        .values_list("confirmed_receipt_id", flat=True)
+        .distinct()
+    )
+    receipt_ids.update(int(rid) for rid in part_receipts if rid)
+    return sorted(receipt_ids)
+
+
+def _serialize_check_receipts(request, check: Check) -> list[dict]:
+    receipt_ids = _collect_check_receipt_ids(check)
+    from pos.models import PosReceipt
+
+    receipts_by_id = {
+        receipt.id: receipt
+        for receipt in PosReceipt.objects.filter(id__in=receipt_ids).only("id", "receipt_number", "total_amount", "status")
+    }
+    return [
+        {
+            "id": rid,
+            "receipt_number": receipts_by_id[rid].receipt_number if rid in receipts_by_id else None,
+            "total_amount": _money_str(receipts_by_id[rid].total_amount) if rid in receipts_by_id else None,
+            "status": receipts_by_id[rid].status if rid in receipts_by_id else None,
+            "pdf_url": _build_receipt_pdf_url(request, rid),
+        }
+        for rid in receipt_ids
+    ]
+
+
+def _primary_check_receipt_id(check: Check) -> int | None:
+    receipt_ids = _collect_check_receipt_ids(check)
+    if not receipt_ids:
+        return None
+    return receipt_ids[-1]
+
+
+def _has_any_check_receipt(check: Check) -> bool:
+    return bool(_collect_check_receipt_ids(check))
+
+
+class PosRuntimeModeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _serialize(runtime_mode: BarionRuntimeMode) -> dict:
+        return {
+            "active_mode": runtime_mode.active_mode,
+            "updated_at": runtime_mode.updated_at,
+            "updated_by_id": runtime_mode.updated_by_id,
+        }
+
+    @extend_schema(
+        description="Returns backend runtime day/night mode used by POS clients.",
+        responses={200: RuntimeModeSerializer},
+    )
+    def get(self, request):
+        runtime_mode = BarionRuntimeMode.get_solo()
+        return Response(self._serialize(runtime_mode))
+
+    @extend_schema(
+        description="Updates backend runtime day/night mode. Staff users only.",
+        request=RuntimeModeUpdateRequestSerializer,
+        responses={200: RuntimeModeSerializer, 400: ErrorSerializer, 403: ErrorSerializer},
+    )
+    def patch(self, request):
+        if not request.user.is_staff:
+            return Response({"detail": "Nemate dozvolu za izmjenu runtime moda."}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = RuntimeModeUpdateRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        updates = serializer.validated_data
+
+        with transaction.atomic():
+            runtime_mode = BarionRuntimeMode.objects.select_for_update().filter(pk=1).first() or BarionRuntimeMode.get_solo()
+            runtime_mode.active_mode = updates["active_mode"]
+            runtime_mode.updated_by = request.user
+            try:
+                runtime_mode.save()
+            except ValidationError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(self._serialize(runtime_mode))
 
 
 class PosAllowedLayoutsView(APIView):
@@ -537,6 +1325,8 @@ class PosChecksView(APIView):
             "id": check.id,
             "table_id": check.table_id,
             "status": check.status,
+            "settlement_status": check.settlement_status,
+            "payment_status": check.payment_status,
             "pos_receipt_id": check.pos_receipt_id,
             "opened_at": check.opened_at.isoformat() if check.opened_at else None,
             "closed_at": check.closed_at.isoformat() if check.closed_at else None,
@@ -614,12 +1404,23 @@ class PosChecksView(APIView):
             )
             created = False
             if not check:
-                check = Check.objects.create(
-                    table_id=table_id,
-                    status=Check.Status.OPEN,
-                    opened_by=request.user,
-                )
-                created = True
+                try:
+                    check = Check.objects.create(
+                        table_id=table_id,
+                        status=Check.Status.OPEN,
+                        opened_by=request.user,
+                    )
+                    created = True
+                except IntegrityError:
+                    # Concurrent request may have created OPEN check first.
+                    check = (
+                        Check.objects.select_for_update()
+                        .filter(table_id=table_id, status=Check.Status.OPEN)
+                        .order_by("-opened_at")
+                        .first()
+                    )
+                    if not check:
+                        raise
 
             placements = list(
                 LayoutTable.objects.select_for_update()
@@ -666,6 +1467,12 @@ class PosCheckCloseView(APIView):
                 return Response({"detail": "Check ne postoji."}, status=status.HTTP_404_NOT_FOUND)
             if check.status == Check.Status.CLOSED:
                 return Response({"detail": "Check je već zatvoren."}, status=status.HTTP_409_CONFLICT)
+            part_qs = check.settlement_parts.select_for_update().all()
+            if part_qs.exists() and part_qs.exclude(status=SettlementPart.Status.PAID).exists():
+                return Response(
+                    {"detail": "Check nije moguće zatvoriti dok svi settlement partovi nisu PAID."},
+                    status=status.HTTP_409_CONFLICT,
+                )
 
             check.status = Check.Status.CLOSED
             check.closed_at = timezone.now()
@@ -855,6 +1662,859 @@ class PosCheckSendToBarView(APIView):
         )
 
 
+class PosCheckSettlementStateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        description=(
+            "Returns settlement snapshot for polling/sync on Android clients. "
+            "Snapshot includes parts, totals and allowed actions."
+        ),
+        responses={
+            200: SettlementStateResponseSerializer,
+            404: ErrorSerializer,
+        },
+        examples=[
+            OpenApiExample(
+                "Settlement state",
+                value={
+                    "check_id": 123,
+                    "check_status": "OPEN",
+                    "settlement_status": "CARD_CONFIRMED",
+                    "payment_status": "PARTIAL",
+                    "pos_receipt_id": None,
+                    "pos_receipt_ids": [501, 502],
+                    "receipts": [
+                        {"id": 501, "pdf_url": "https://mozart.sibenik1983.hr/media/racuni/pos-receipt-501.pdf"},
+                        {"id": 502, "pdf_url": "https://mozart.sibenik1983.hr/media/racuni/pos-receipt-502.pdf"},
+                    ],
+                    "parts": [
+                        {
+                            "id": 1,
+                            "method": "CARD",
+                            "amount": "20.00",
+                            "tip_amount": "2.00",
+                            "total_charged": "22.00",
+                            "fiscal_amount": "22.00",
+                            "status": "PAID",
+                            "provider_ref": "VIVA-REF-001",
+                        },
+                        {
+                            "id": 2,
+                            "method": "CASH",
+                            "amount": "30.00",
+                            "tip_amount": "0.00",
+                            "total_charged": "30.00",
+                            "fiscal_amount": "30.00",
+                            "status": "PREPARED",
+                            "provider_ref": "",
+                        },
+                    ],
+                    "totals": {
+                        "check_total": "50.00",
+                        "allocated_total": "50.00",
+                        "confirmed_total": "20.00",
+                        "remaining_total": "30.00",
+                    },
+                    "actions": {
+                        "can_confirm_card": False,
+                        "can_issue_receipt": False,
+                        "can_close_check": False,
+                    },
+                    "updated_at": "2026-02-24T14:30:00Z",
+                },
+                response_only=True,
+            ),
+        ],
+    )
+    def get(self, request, check_id: int):
+        check = Check.objects.filter(id=check_id).first()
+        if not check:
+            return Response({"detail": "Check ne postoji."}, status=status.HTTP_404_NOT_FOUND)
+        snapshot = _build_settlement_snapshot(check)
+        return Response(
+            {
+                "check_id": check.id,
+                "check_status": check.status,
+                "settlement_status": check.settlement_status,
+                "payment_status": check.payment_status,
+                "pos_receipt_id": check.pos_receipt_id,
+                "pos_receipt_ids": _collect_check_receipt_ids(check),
+                "receipts": _serialize_check_receipts(request, check),
+                "issued_receipt_id": check.pos_receipt_id,
+                "receipt_pdf_url": _build_receipt_pdf_url(request, check.pos_receipt_id),
+                "parts": snapshot["parts"],
+                "items": snapshot.get("items", []),
+                "totals": snapshot["totals"],
+                "actions": snapshot["actions"],
+                "updated_at": check.updated_at.isoformat(),
+            }
+        )
+
+
+class PosCheckRoundStateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        description=(
+            "Returns round UI quantity snapshot for Android clients. "
+            "Includes virtual PAID line (ui_color=light_blue) and strike_main flag "
+            "which becomes true only when remaining_quantity is 0."
+        ),
+        responses={
+            200: RoundStateResponseSerializer,
+            404: ErrorSerializer,
+        },
+    )
+    def get(self, request, check_id: int):
+        check = Check.objects.filter(id=check_id).first()
+        if not check:
+            return Response({"detail": "Check ne postoji."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(
+            {
+                "check_id": check.id,
+                "status": check.status,
+                "items": _serialize_round_state_items(check),
+                "updated_at": check.updated_at.isoformat(),
+            }
+        )
+
+
+class PosCheckReceiptFiscalizeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        description=(
+            "Fiscalizes a POS receipt linked to a Barion check. "
+            "Intended for Android button action on paid receipt rows."
+        ),
+        responses={
+            200: serializers.JSONField(),
+            404: ErrorSerializer,
+            409: ErrorSerializer,
+            428: ErrorSerializer,
+        },
+    )
+    def post(self, request, check_id: int, receipt_id: int):
+        ok, remaining = is_recent_pin_verified(request.user)
+        if not ok:
+            return Response(
+                {
+                    "detail": "Potrebna je PIN potvrda za ovu akciju.",
+                    "pin_verify_required": True,
+                    "pin_verify_endpoint": "/api/pos/pin/verify/",
+                    "pin_verify_ttl_seconds": pin_verify_ttl_seconds(),
+                    "pin_verify_remaining_seconds": remaining,
+                },
+                status=428,
+            )
+
+        check = Check.objects.filter(id=check_id).first()
+        if not check:
+            return Response({"detail": "Check ne postoji."}, status=status.HTTP_404_NOT_FOUND)
+
+        if receipt_id not in _collect_check_receipt_ids(check):
+            return Response(
+                {"detail": "Račun nije povezan s ovim checkom."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        from pos.models import PosReceipt
+
+        receipt = PosReceipt.objects.filter(id=receipt_id).first()
+        if not receipt:
+            return Response({"detail": "Račun ne postoji."}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            if receipt.status != PosReceipt.Status.FISCALIZED:
+                receipt = fiscalize_pos_receipt(receipt)
+                action = "fiscalized"
+            else:
+                action = "already_fiscalized"
+            _save_receipt_pdf_to_media(receipt, request.user)
+        except Exception as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                "check_id": check.id,
+                "receipt_id": receipt.id,
+                "action": action,
+                "status": receipt.status,
+                "receipt_number": receipt.receipt_number,
+                "total_amount": _money_str(receipt.total_amount),
+                "zki": receipt.zki,
+                "jir": receipt.jir,
+                "qr": receipt.qr_payload,
+                "pdf_url": _build_receipt_pdf_url(request, receipt.id),
+                "receipts": _serialize_check_receipts(request, check),
+            }
+        )
+
+
+class PosCheckPrepareSettlementView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        description=(
+            "Prepares split settlement for an OPEN check. "
+            "Validates allocation sum and persists settlement parts."
+        ),
+        request=PrepareSettlementRequestSerializer,
+        responses={
+            200: PrepareSettlementResponseSerializer,
+            400: ErrorSerializer,
+            404: ErrorSerializer,
+            409: ErrorSerializer,
+        },
+    )
+    def post(self, request, check_id: int):
+        raw_payload = request.data if isinstance(request.data, dict) else {}
+        serializer = PrepareSettlementRequestSerializer(data=raw_payload)
+        serializer.is_valid(raise_exception=True)
+        payload_parts = serializer.validated_data.get("parts", [])
+        ready_for_issue = bool(serializer.validated_data.get("ready_for_issue", False))
+
+        with transaction.atomic():
+            check = Check.objects.select_for_update().filter(id=check_id).first()
+            if not check:
+                return Response({"detail": "Check ne postoji."}, status=status.HTTP_404_NOT_FOUND)
+            if check.status != Check.Status.OPEN:
+                return Response({"detail": "Settlement je moguće pripremiti samo za OPEN check."}, status=409)
+
+            existing_parts = list(check.settlement_parts.select_for_update().order_by("id"))
+            paid_parts = [part for part in existing_parts if part.status == SettlementPart.Status.PAID]
+            mutable_parts = [part for part in existing_parts if part.status != SettlementPart.Status.PAID]
+            has_prepared_parts = any(part.status == SettlementPart.Status.PREPARED for part in mutable_parts)
+            if paid_parts and has_prepared_parts:
+                snapshot = _build_settlement_snapshot(check)
+                return Response(
+                    {
+                        "check_id": check.id,
+                        "settlement_status": check.settlement_status,
+                        "payment_status": check.payment_status,
+                        "parts": snapshot["parts"],
+                        "totals": snapshot["totals"],
+                        "actions": snapshot["actions"],
+                    }
+                )
+
+            check_total = _check_remaining_amount(check)
+            if not payload_parts:
+                return Response({"detail": "parts je obavezan i ne smije biti prazan."}, status=status.HTTP_400_BAD_REQUEST)
+            if check_total <= Decimal("0.00"):
+                return Response({"detail": "Check nema iznos za naplatu."}, status=status.HTTP_400_BAD_REQUEST)
+
+            normalized_parts = []
+            for part in payload_parts:
+                method = str(part["method"]).upper()
+                amount = Decimal(str(part["amount"])).quantize(Decimal("0.01"))
+                tip_amount = Decimal(str(part.get("tip_amount", "0.00"))).quantize(Decimal("0.01"))
+                if method == SettlementPart.Method.CASH and tip_amount != Decimal("0.00"):
+                    return Response({"detail": "tip_amount je dozvoljen samo za CARD method."}, status=400)
+                if method == SettlementPart.Method.CARD and tip_amount > amount:
+                    return Response({"detail": "tip_amount ne može biti veći od amount."}, status=400)
+                total_charged = (amount + tip_amount) if method == SettlementPart.Method.CARD else amount
+                fiscal_amount = total_charged
+                normalized_parts.append(
+                    {
+                        "method": method,
+                        "amount": amount,
+                        "tip_amount": tip_amount,
+                        "total_charged": total_charged.quantize(Decimal("0.01")),
+                        "fiscal_amount": fiscal_amount.quantize(Decimal("0.01")),
+                    }
+                )
+
+            allocated_total = sum((part["amount"] for part in normalized_parts), Decimal("0.00")).quantize(Decimal("0.01"))
+            # Android "kompletna naplata" može poslati stari/full iznos checka.
+            # Ako je poslan samo jedan CASH part bez tipa, sigurnije ga je normalizirati
+            # na trenutno preostali iznos umjesto vraćanja 400.
+            if (
+                allocated_total > check_total
+                and len(normalized_parts) == 1
+                and normalized_parts[0]["method"] == SettlementPart.Method.CASH
+                and normalized_parts[0]["tip_amount"] == Decimal("0.00")
+            ):
+                normalized_parts[0]["amount"] = check_total
+                normalized_parts[0]["total_charged"] = check_total
+                normalized_parts[0]["fiscal_amount"] = check_total
+                allocated_total = check_total
+            if allocated_total != check_total:
+                return Response(
+                    {
+                        "detail": "Zbroj settlement parts mora biti jednak totalu checka.",
+                        "check_total": str(check_total),
+                        "allocated_total": str(allocated_total),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            current_signature = [
+                (part.method, part.amount, part.tip_amount, part.total_charged, part.fiscal_amount)
+                for part in mutable_parts
+            ]
+            next_signature = [
+                (part["method"], part["amount"], part["tip_amount"], part["total_charged"], part["fiscal_amount"])
+                for part in normalized_parts
+            ]
+            if current_signature != next_signature:
+                if mutable_parts:
+                    check.settlement_parts.filter(id__in=[part.id for part in mutable_parts]).delete()
+                SettlementPart.objects.bulk_create(
+                    [
+                        SettlementPart(
+                            barion_check=check,
+                            method=part["method"],
+                            amount=part["amount"],
+                            tip_amount=part["tip_amount"],
+                            total_charged=part["total_charged"],
+                            fiscal_amount=part["fiscal_amount"],
+                        )
+                        for part in normalized_parts
+                    ]
+                )
+
+            refreshed_parts = list(check.settlement_parts.order_by("id"))
+            has_only_cash_no_tip = (
+                all(part.method == SettlementPart.Method.CASH for part in refreshed_parts)
+                and all(part.tip_amount == Decimal("0.00") for part in refreshed_parts)
+            )
+            check.settlement_status = (
+                Check.SettlementStatus.READY_FOR_ISSUE if (ready_for_issue and has_only_cash_no_tip) else Check.SettlementStatus.PREPARED
+            )
+            check.payment_status = Check.PaymentStatus.PARTIAL if _check_paid_amount(check) > Decimal("0.00") else Check.PaymentStatus.UNPAID
+            check.save(update_fields=["settlement_status", "payment_status", "updated_at"])
+
+            snapshot = _build_settlement_snapshot(check)
+            response_payload = {
+                "check_id": check.id,
+                "settlement_status": check.settlement_status,
+                "payment_status": check.payment_status,
+                "parts": snapshot["parts"],
+                "totals": snapshot["totals"],
+                "actions": snapshot["actions"],
+            }
+            return Response(response_payload)
+
+
+class PosSettlementPartPayCashView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        description="Pays a single CASH settlement part.",
+        request=SettlementPartPayCashRequestSerializer,
+        responses={200: serializers.JSONField(), 400: ErrorSerializer, 404: ErrorSerializer, 409: ErrorSerializer},
+    )
+    def post(self, request, check_id: int, part_id: int):
+        raw_payload = request.data if isinstance(request.data, dict) else {}
+        raw_items = raw_payload.get("items") if isinstance(raw_payload.get("items"), list) else []
+        normalized_items = []
+        for row in raw_items:
+            if not isinstance(row, dict):
+                continue
+            item_id = row.get("item_id", row.get("id"))
+            normalized_items.append(
+                {
+                    "item_id": item_id,
+                    "quantity": row.get("quantity"),
+                }
+            )
+
+        serializer = SettlementPartPayCashRequestSerializer(
+            data={
+                "amount": raw_payload.get("amount"),
+                "items": normalized_items,
+            }
+        )
+        serializer.is_valid(raise_exception=True)
+        requested_amount = serializer.validated_data.get("amount")
+        requested_items = serializer.validated_data.get("items") or []
+
+        with transaction.atomic():
+            check = Check.objects.select_for_update().filter(id=check_id).first()
+            if not check:
+                return Response({"detail": "Check ne postoji."}, status=status.HTTP_404_NOT_FOUND)
+            if check.status != Check.Status.OPEN:
+                return Response({"detail": "Naplata je moguća samo za OPEN check."}, status=status.HTTP_409_CONFLICT)
+
+            part = check.settlement_parts.select_for_update().filter(id=part_id).first()
+            if not part:
+                return Response({"detail": "Settlement part ne postoji."}, status=status.HTTP_404_NOT_FOUND)
+            if part.method != SettlementPart.Method.CASH:
+                return Response({"detail": "Part nije CASH."}, status=status.HTTP_409_CONFLICT)
+
+            if part.status == SettlementPart.Status.PAID:
+                snapshot = _build_settlement_snapshot(check)
+                return Response(
+                    {
+                        "check_id": check.id,
+                        "part_id": part.id,
+                        "action": "already_paid",
+                        "part_status": part.status,
+                        "parts": snapshot["parts"],
+                        "totals": snapshot["totals"],
+                        "actions": snapshot["actions"],
+                        "issued_receipt_id": check.pos_receipt_id,
+                        "pos_receipt_ids": _collect_check_receipt_ids(check),
+                        "receipt_pdf_url": _build_receipt_pdf_url(request, check.pos_receipt_id),
+                    }
+                )
+
+            selected_items = []
+            if requested_items:
+                item_ids = [int(row["item_id"]) for row in requested_items]
+                if len(set(item_ids)) != len(item_ids):
+                    return Response(
+                        {"detail": "items ne smiju sadržavati duplikate item_id."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                item_map = {
+                    item.id: item
+                    for item in check.items.select_for_update().filter(id__in=item_ids).order_by("id")
+                }
+                if len(item_map) != len(item_ids):
+                    return Response(
+                        {"detail": "Jedan ili više item_id ne pripadaju checku."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                selected_total = Decimal("0.00")
+                for row in requested_items:
+                    item = item_map[int(row["item_id"])]
+                    if item.line_type != CheckItem.LineType.NORMAL:
+                        return Response(
+                            {"detail": f"Item {item.id} nije naplativ (line_type={item.line_type})."},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    qty = Decimal(str(row["quantity"])).quantize(Decimal("0.0001"))
+                    remaining_qty, remaining_amount_item = _payment_remaining_for_item(item)
+                    if qty > remaining_qty:
+                        return Response(
+                            {"detail": f"Tražena quantity je veća od remaining_quantity za item {item.id}."},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    line_amount = (qty * item.unit_price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                    if line_amount > remaining_amount_item:
+                        return Response(
+                            {"detail": f"Traženi iznos je veći od remaining_amount za item {item.id}."},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    selected_items.append({"item": item, "quantity": qty})
+                    selected_total = (selected_total + line_amount).quantize(Decimal("0.01"))
+                normalized_requested = selected_total
+                if requested_amount is not None:
+                    normalized_amount = Decimal(str(requested_amount)).quantize(Decimal("0.01"))
+                    if normalized_amount != normalized_requested:
+                        return Response(
+                            {"detail": "amount mora biti jednak zbroju odabranih items."},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+            elif requested_amount is not None:
+                normalized_requested = Decimal(str(requested_amount)).quantize(Decimal("0.01"))
+            else:
+                normalized_requested = part.amount
+
+            if normalized_requested <= Decimal("0.00"):
+                return Response(
+                    {"detail": "amount mora biti > 0."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if normalized_requested > part.amount:
+                return Response(
+                    {"detail": "amount ne može biti veći od amount-a settlement parta."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if normalized_requested < part.amount:
+                # Split part into paid + remaining.
+                remaining_amount = (part.amount - normalized_requested).quantize(Decimal("0.01"))
+                part.amount = remaining_amount
+                part.total_charged = remaining_amount
+                part.fiscal_amount = remaining_amount
+                part.save(update_fields=["amount", "total_charged", "fiscal_amount", "updated_at"])
+                paid_part = SettlementPart.objects.create(
+                    barion_check=check,
+                    method=SettlementPart.Method.CASH,
+                    amount=normalized_requested,
+                    tip_amount=Decimal("0.00"),
+                    status=SettlementPart.Status.PAID,
+                    confirmed_at=timezone.now(),
+                    confirmed_by=request.user,
+                )
+                allocated, allocations = (
+                    _allocate_selected_items(selections=selected_items, with_allocations=True)
+                    if selected_items
+                    else _allocate_payment_to_items(check=check, amount=normalized_requested, with_allocations=True)
+                )
+                if allocated != normalized_requested:
+                    paid_part.amount = allocated
+                    paid_part.total_charged = allocated
+                    paid_part.fiscal_amount = allocated
+                    paid_part.save(update_fields=["amount", "total_charged", "fiscal_amount", "updated_at"])
+                issued_receipt = _create_receipt_for_part_payment(part=paid_part, allocations=allocations, user=request.user)
+                _recalculate_check_settlement_status(check)
+                check.save(update_fields=["settlement_status", "payment_status", "updated_at"])
+                snapshot = _build_settlement_snapshot(check)
+                return Response(
+                    {
+                        "check_id": check.id,
+                        "part_id": paid_part.id,
+                        "action": "paid",
+                        "part_status": paid_part.status,
+                        "parts": snapshot["parts"],
+                        "totals": snapshot["totals"],
+                        "actions": snapshot["actions"],
+                        "issued_receipt_id": issued_receipt.id if issued_receipt else check.pos_receipt_id,
+                        "pos_receipt_ids": _collect_check_receipt_ids(check),
+                        "receipt_pdf_url": _build_receipt_pdf_url(
+                            request, issued_receipt.id if issued_receipt else check.pos_receipt_id
+                        ),
+                    }
+                )
+
+            part.status = SettlementPart.Status.PAID
+            part.confirmed_at = timezone.now()
+            part.confirmed_by = request.user
+            part.save(update_fields=["status", "confirmed_at", "confirmed_by", "updated_at"])
+            if selected_items:
+                _, allocations = _allocate_selected_items(selections=selected_items, with_allocations=True)
+            else:
+                _, allocations = _allocate_payment_to_items(check=check, amount=part.amount, with_allocations=True)
+            issued_receipt = _create_receipt_for_part_payment(part=part, allocations=allocations, user=request.user)
+
+            _recalculate_check_settlement_status(check)
+            check.save(update_fields=["settlement_status", "payment_status", "updated_at"])
+            snapshot = _build_settlement_snapshot(check)
+            issued_receipt_id = issued_receipt.id if issued_receipt else check.pos_receipt_id
+            receipt_pdf_url = _build_receipt_pdf_url(request, issued_receipt_id)
+
+            if Decimal(str(snapshot["totals"]["remaining_total"])) <= Decimal("0.00"):
+                check.settlement_status = Check.SettlementStatus.COMPLETE
+                check.payment_status = Check.PaymentStatus.PAID
+                check.save(update_fields=["settlement_status", "payment_status", "updated_at"])
+                _close_check_and_release_table(check=check, user=request.user)
+                receipt_pdf_url = _build_receipt_pdf_url(request, issued_receipt_id)
+                snapshot = _build_settlement_snapshot(check)
+
+            return Response(
+                {
+                    "check_id": check.id,
+                    "part_id": part.id,
+                    "action": "paid",
+                    "part_status": part.status,
+                    "parts": snapshot["parts"],
+                    "totals": snapshot["totals"],
+                    "actions": snapshot["actions"],
+                    "issued_receipt_id": issued_receipt_id,
+                    "pos_receipt_ids": _collect_check_receipt_ids(check),
+                    "receipt_pdf_url": receipt_pdf_url,
+                }
+            )
+
+
+class PosSettlementPartPayCardConfirmView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        description="Confirms/declines a single CARD settlement part. Failed part is retryable.",
+        request=SettlementPartPayCardConfirmRequestSerializer,
+        responses={200: serializers.JSONField(), 400: ErrorSerializer, 404: ErrorSerializer, 409: ErrorSerializer},
+    )
+    def post(self, request, check_id: int, part_id: int):
+        serializer = SettlementPartPayCardConfirmRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        approved = bool(serializer.validated_data["approved"])
+        requested_amount = serializer.validated_data.get("amount")
+        requested_tip_amount = serializer.validated_data.get("tip_amount")
+        external_txn_id = str(serializer.validated_data.get("external_txn_id", "")).strip()
+        provider_ref = str(serializer.validated_data.get("provider_ref", "")).strip()
+
+        with transaction.atomic():
+            check = Check.objects.select_for_update().filter(id=check_id).first()
+            if not check:
+                return Response({"detail": "Check ne postoji."}, status=status.HTTP_404_NOT_FOUND)
+            if check.status != Check.Status.OPEN:
+                return Response({"detail": "Naplata je moguća samo za OPEN check."}, status=status.HTTP_409_CONFLICT)
+
+            part = check.settlement_parts.select_for_update().filter(id=part_id).first()
+            if not part:
+                return Response({"detail": "Settlement part ne postoji."}, status=status.HTTP_404_NOT_FOUND)
+            if part.method != SettlementPart.Method.CARD:
+                return Response({"detail": "Part nije CARD."}, status=status.HTTP_409_CONFLICT)
+
+            if requested_amount is not None:
+                normalized_requested_amount = Decimal(str(requested_amount)).quantize(Decimal("0.01"))
+                if normalized_requested_amount != part.amount:
+                    return Response({"detail": "amount mora biti jednak amount-u settlement parta."}, status=400)
+            if requested_tip_amount is not None:
+                normalized_requested_tip = Decimal(str(requested_tip_amount)).quantize(Decimal("0.01"))
+                if normalized_requested_tip != part.tip_amount:
+                    return Response({"detail": "tip_amount mora biti jednak tip_amount-u settlement parta."}, status=400)
+
+            if approved and part.status == SettlementPart.Status.PAID:
+                if external_txn_id and part.external_txn_id and part.external_txn_id != external_txn_id:
+                    return Response({"detail": "Part je već plaćen drugim transaction ID-em."}, status=409)
+                snapshot = _build_settlement_snapshot(check)
+                return Response(
+                    {
+                        "check_id": check.id,
+                        "part_id": part.id,
+                        "action": "idempotent",
+                        "part_status": part.status,
+                        "parts": snapshot["parts"],
+                        "totals": snapshot["totals"],
+                        "actions": snapshot["actions"],
+                        "issued_receipt_id": check.pos_receipt_id,
+                        "pos_receipt_ids": _collect_check_receipt_ids(check),
+                        "receipt_pdf_url": _build_receipt_pdf_url(request, check.pos_receipt_id),
+                    }
+                )
+
+            if external_txn_id:
+                part.external_txn_id = external_txn_id
+            if provider_ref:
+                part.provider_ref = provider_ref
+
+            if not approved:
+                part.status = SettlementPart.Status.FAILED
+                part.confirmed_at = timezone.now()
+                part.confirmed_by = request.user
+                part.save(
+                    update_fields=["status", "confirmed_at", "confirmed_by", "external_txn_id", "provider_ref", "updated_at"]
+                )
+                _recalculate_check_settlement_status(check)
+                check.save(update_fields=["settlement_status", "payment_status", "updated_at"])
+                snapshot = _build_settlement_snapshot(check)
+                return Response(
+                    {
+                        "check_id": check.id,
+                        "part_id": part.id,
+                        "action": "failed",
+                        "part_status": part.status,
+                        "parts": snapshot["parts"],
+                        "totals": snapshot["totals"],
+                        "actions": snapshot["actions"],
+                        "issued_receipt_id": check.pos_receipt_id,
+                        "pos_receipt_ids": _collect_check_receipt_ids(check),
+                        "receipt_pdf_url": _build_receipt_pdf_url(request, check.pos_receipt_id),
+                    }
+                )
+
+            part.status = SettlementPart.Status.PAID
+            part.confirmed_at = timezone.now()
+            part.confirmed_by = request.user
+            part.save(update_fields=["status", "confirmed_at", "confirmed_by", "external_txn_id", "provider_ref", "updated_at"])
+            _, allocations = _allocate_payment_to_items(check=check, amount=part.amount, with_allocations=True)
+            issued_receipt = _create_receipt_for_part_payment(part=part, allocations=allocations, user=request.user)
+
+            _recalculate_check_settlement_status(check)
+            check.save(update_fields=["settlement_status", "payment_status", "updated_at"])
+            snapshot = _build_settlement_snapshot(check)
+            return Response(
+                {
+                    "check_id": check.id,
+                    "part_id": part.id,
+                    "action": "paid",
+                    "part_status": part.status,
+                    "parts": snapshot["parts"],
+                    "totals": snapshot["totals"],
+                    "actions": snapshot["actions"],
+                    "issued_receipt_id": issued_receipt.id if issued_receipt else check.pos_receipt_id,
+                    "pos_receipt_ids": _collect_check_receipt_ids(check),
+                    "receipt_pdf_url": _build_receipt_pdf_url(
+                        request, issued_receipt.id if issued_receipt else check.pos_receipt_id
+                    ),
+                }
+            )
+
+
+class PosCheckPayCardConfirmView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _close_check_and_release_table(*, check: Check, user):
+        check.status = Check.Status.CLOSED
+        check.closed_at = timezone.now()
+        check.closed_by = user
+        check.save(update_fields=["status", "closed_at", "closed_by", "updated_at"])
+        placements = list(
+            LayoutTable.objects.select_for_update()
+            .filter(table_id=check.table_id, is_enabled=True)
+            .only("id")
+        )
+        if placements:
+            TableState.objects.filter(
+                layout_table_id__in=[p.id for p in placements],
+                open_check_id=check.id,
+            ).update(
+                state=TableState.State.FREE,
+                open_check_id=None,
+                updated_by=user,
+                updated_at=timezone.now(),
+            )
+
+    @extend_schema(
+        description=(
+            "Confirms CARD settlement part (idempotent by external_txn_id). "
+            "Can optionally issue receipt if settlement is fully covered."
+        ),
+        request=PayCardConfirmRequestSerializer,
+        responses={
+            200: PayCardConfirmResponseSerializer,
+            400: ErrorSerializer,
+            404: ErrorSerializer,
+            409: ErrorSerializer,
+        },
+    )
+    def post(self, request, check_id: int):
+        serializer = PayCardConfirmRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        requested_amount = serializer.validated_data.get("amount")
+        external_txn_id = str(serializer.validated_data.get("external_txn_id", "")).strip()
+        should_issue_receipt = bool(serializer.validated_data.get("issue_receipt", False))
+
+        with transaction.atomic():
+            check = Check.objects.select_for_update().filter(id=check_id).select_related("table").first()
+            if not check:
+                return Response({"detail": "Check ne postoji."}, status=status.HTTP_404_NOT_FOUND)
+            if check.status != Check.Status.OPEN:
+                return Response({"detail": "Card potvrda je moguća samo za OPEN check."}, status=409)
+
+            all_parts = list(check.settlement_parts.select_for_update().order_by("id"))
+            if not all_parts:
+                return Response({"detail": "Settlement nije pripremljen."}, status=status.HTTP_409_CONFLICT)
+
+            card_parts = [part for part in all_parts if part.method == SettlementPart.Method.CARD]
+            if not card_parts:
+                return Response({"detail": "Check nema CARD settlement part."}, status=status.HTTP_409_CONFLICT)
+
+            if external_txn_id:
+                same_txn = next((p for p in card_parts if p.external_txn_id == external_txn_id), None)
+                if same_txn:
+                    _recalculate_check_settlement_status(check)
+                    check.save(update_fields=["settlement_status", "payment_status", "updated_at"])
+                    snapshot = _build_settlement_snapshot(check)
+                    remaining_total = _money_str(snapshot["totals"]["remaining_total"])
+                    return Response(
+                        {
+                            "check_id": check.id,
+                            "settlement_status": check.settlement_status,
+                            "payment_status": check.payment_status,
+                            "card_confirmed": True,
+                            "issued_receipt_id": check.pos_receipt_id,
+                            "pos_receipt_ids": _collect_check_receipt_ids(check),
+                            "receipt_pdf_url": _build_receipt_pdf_url(request, check.pos_receipt_id),
+                            "remaining_total": remaining_total,
+                            "check_closed": check.status == Check.Status.CLOSED,
+                            "action": "idempotent",
+                            "parts": snapshot["parts"],
+                            "totals": snapshot["totals"],
+                            "actions": snapshot["actions"],
+                        }
+                    )
+
+            unconfirmed_card_parts = [part for part in card_parts if part.status != SettlementPart.Status.PAID]
+            if not unconfirmed_card_parts:
+                _recalculate_check_settlement_status(check)
+                check.save(update_fields=["settlement_status", "payment_status", "updated_at"])
+                snapshot = _build_settlement_snapshot(check)
+                remaining_total = _money_str(snapshot["totals"]["remaining_total"])
+                return Response(
+                    {
+                        "check_id": check.id,
+                        "settlement_status": check.settlement_status,
+                        "payment_status": check.payment_status,
+                        "card_confirmed": True,
+                        "issued_receipt_id": check.pos_receipt_id,
+                        "pos_receipt_ids": _collect_check_receipt_ids(check),
+                        "receipt_pdf_url": _build_receipt_pdf_url(request, check.pos_receipt_id),
+                        "remaining_total": remaining_total,
+                        "check_closed": check.status == Check.Status.CLOSED,
+                        "action": "already_confirmed",
+                        "parts": snapshot["parts"],
+                        "totals": snapshot["totals"],
+                        "actions": snapshot["actions"],
+                    }
+                )
+
+            unconfirmed_card_total = sum((part.amount for part in unconfirmed_card_parts), Decimal("0.00")).quantize(Decimal("0.01"))
+            if requested_amount is not None:
+                normalized_requested = Decimal(str(requested_amount)).quantize(Decimal("0.01"))
+                if normalized_requested != unconfirmed_card_total:
+                    return Response(
+                        {
+                            "detail": "amount mora biti jednak nepotvrđenom CARD iznosu.",
+                            "expected_amount": str(unconfirmed_card_total),
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+            now = timezone.now()
+            allocated_card_total = Decimal("0.00")
+            confirmed_parts: list[SettlementPart] = []
+            for part in unconfirmed_card_parts:
+                part.status = SettlementPart.Status.PAID
+                part.confirmed_at = now
+                part.confirmed_by = request.user
+                if external_txn_id:
+                    part.external_txn_id = external_txn_id
+                part.save(update_fields=["status", "confirmed_at", "confirmed_by", "external_txn_id", "updated_at"])
+                allocated_card_total += part.amount
+                confirmed_parts.append(part)
+            _, allocations = _allocate_payment_to_items(check=check, amount=allocated_card_total, with_allocations=True)
+            issued_receipt = None
+            if confirmed_parts:
+                issued_receipt = _create_receipt_for_part_payment(
+                    part=confirmed_parts[0],
+                    allocations=allocations,
+                    user=request.user,
+                )
+                if issued_receipt:
+                    for extra_part in confirmed_parts[1:]:
+                        if not extra_part.confirmed_receipt_id:
+                            extra_part.confirmed_receipt = issued_receipt
+                            extra_part.save(update_fields=["confirmed_receipt", "updated_at"])
+
+            _recalculate_check_settlement_status(check)
+            check.save(update_fields=["settlement_status", "payment_status", "updated_at"])
+
+            snapshot = _build_settlement_snapshot(check)
+            remaining_total = _money_str(snapshot["totals"]["remaining_total"])
+
+            issued_receipt_id = issued_receipt.id if issued_receipt else check.pos_receipt_id
+            receipt_pdf_url = _build_receipt_pdf_url(request, issued_receipt_id)
+            check_closed = check.status == Check.Status.CLOSED
+            action = "card_confirmed"
+
+            if Decimal(str(remaining_total)) <= Decimal("0.00") and should_issue_receipt:
+                check.settlement_status = Check.SettlementStatus.COMPLETE
+                check.payment_status = Check.PaymentStatus.PAID
+                check.save(update_fields=["settlement_status", "payment_status", "updated_at"])
+                self._close_check_and_release_table(check=check, user=request.user)
+                snapshot = _build_settlement_snapshot(check)
+                issued_receipt_id = issued_receipt.id if issued_receipt else check.pos_receipt_id
+                receipt_pdf_url = _build_receipt_pdf_url(request, issued_receipt_id)
+                check_closed = True
+                action = "confirmed_and_issued"
+
+        return Response(
+            {
+                "check_id": check.id,
+                "settlement_status": check.settlement_status,
+                "payment_status": check.payment_status,
+                "card_confirmed": True,
+                "issued_receipt_id": issued_receipt_id,
+                "pos_receipt_ids": _collect_check_receipt_ids(check),
+                "receipt_pdf_url": receipt_pdf_url,
+                "remaining_total": remaining_total,
+                "check_closed": check_closed,
+                "action": action,
+                "parts": snapshot["parts"],
+                "totals": snapshot["totals"],
+                "actions": snapshot["actions"],
+            }
+        )
+
+
 class PosCheckIssueReceiptView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -965,11 +2625,17 @@ class PosCheckIssueReceiptView(APIView):
             if not check:
                 return Response({"detail": "Check ne postoji."}, status=status.HTTP_404_NOT_FOUND)
 
-            if check.pos_receipt_id:
+            if check.pos_receipt_id and check.status != Check.Status.OPEN:
                 receipt = check.pos_receipt
+                if receipt is None:
+                    return Response({"detail": "Neispravna veza na POS račun."}, status=status.HTTP_409_CONFLICT)
+                snapshot = _build_settlement_snapshot(check)
                 return Response(
                     {
                         "check_id": check.id,
+                        "check_status": check.status,
+                        "settlement_status": check.settlement_status,
+                        "payment_status": check.payment_status,
                         "receipt_id": receipt.id,
                         "receipt_number": receipt.receipt_number,
                         "status": receipt.status,
@@ -977,6 +2643,9 @@ class PosCheckIssueReceiptView(APIView):
                         "zki": receipt.zki,
                         "jir": receipt.jir,
                         "qr": receipt.qr_payload,
+                        "parts": snapshot["parts"],
+                        "totals": snapshot["totals"],
+                        "actions": snapshot["actions"],
                     }
                 )
 
@@ -985,6 +2654,18 @@ class PosCheckIssueReceiptView(APIView):
                     {"detail": "Check nije otvoren pa nije moguće izdati račun."},
                     status=status.HTTP_409_CONFLICT,
                 )
+
+            settlement_parts = list(check.settlement_parts.select_for_update().order_by("id"))
+            if settlement_parts:
+                has_unconfirmed_card = any(
+                    part.method == SettlementPart.Method.CARD and part.status != SettlementPart.Status.PAID
+                    for part in settlement_parts
+                )
+                if has_unconfirmed_card:
+                    return Response(
+                        {"detail": "Kartični dio naplate nije potvrđen."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
 
             check_items = list(check.items.select_related("artikl").order_by("id"))
             if not check_items:
@@ -1025,12 +2706,57 @@ class PosCheckIssueReceiptView(APIView):
                     receipt = fiscalize_pos_receipt(receipt)
                 except Exception as exc:
                     return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            _save_receipt_pdf_to_media(receipt, request.user)
+
+            if settlement_parts:
+                for part in settlement_parts:
+                    if part.status != SettlementPart.Status.PAID:
+                        part.status = SettlementPart.Status.PAID
+                        part.confirmed_at = timezone.now()
+                        part.confirmed_by = request.user
+                    if not part.confirmed_receipt_id:
+                        part.confirmed_receipt = receipt
+                    part.save(
+                        update_fields=[
+                            "status",
+                            "confirmed_at",
+                            "confirmed_by",
+                            "confirmed_receipt",
+                            "updated_at",
+                        ]
+                    )
+            else:
+                check_total = _check_total_amount(check)
+                if check_total > Decimal("0.00"):
+                    SettlementPart.objects.create(
+                        barion_check=check,
+                        method=SettlementPart.Method.CASH if payment_type.lower() != "card" else SettlementPart.Method.CARD,
+                        amount=check_total,
+                        tip_amount=Decimal("0.00"),
+                        total_charged=check_total,
+                        fiscal_amount=check_total,
+                        status=SettlementPart.Status.PAID,
+                        confirmed_at=timezone.now(),
+                        confirmed_by=request.user,
+                        confirmed_receipt=receipt,
+                    )
+            _mark_all_items_paid(check=check)
 
             check.status = Check.Status.CLOSED
             check.closed_at = timezone.now()
             check.closed_by = request.user
-            check.pos_receipt = receipt
-            check.save(update_fields=["status", "closed_at", "closed_by", "pos_receipt", "updated_at"])
+            check.settlement_status = Check.SettlementStatus.COMPLETE
+            check.payment_status = Check.PaymentStatus.PAID
+            check.save(
+                update_fields=[
+                    "status",
+                    "closed_at",
+                    "closed_by",
+                    "settlement_status",
+                    "payment_status",
+                    "updated_at",
+                ]
+            )
 
             placements = list(
                 LayoutTable.objects.select_for_update()
@@ -1048,9 +2774,13 @@ class PosCheckIssueReceiptView(APIView):
                     updated_at=timezone.now(),
                 )
 
+        snapshot = _build_settlement_snapshot(check)
         return Response(
             {
                 "check_id": check.id,
+                "check_status": check.status,
+                "settlement_status": check.settlement_status,
+                "payment_status": check.payment_status,
                 "receipt_id": receipt.id,
                 "receipt_number": receipt.receipt_number,
                 "status": receipt.status,
@@ -1058,6 +2788,9 @@ class PosCheckIssueReceiptView(APIView):
                 "zki": receipt.zki,
                 "jir": receipt.jir,
                 "qr": receipt.qr_payload,
+                "parts": snapshot["parts"],
+                "totals": snapshot["totals"],
+                "actions": snapshot["actions"],
             }
         )
 
@@ -1072,7 +2805,7 @@ class PosCheckItemsView(APIView):
             "check_id": item.barion_check_id,
             "artikl_id": item.artikl_id,
             "artikl_name": item.artikl.name,
-            "quantity": item.quantity,
+            "quantity": _display_quantity_for_item(item),
             "unit_price": item.unit_price,
             "vat_rate": item.vat_rate,
             "net_amount": item.net_amount,
@@ -1087,16 +2820,33 @@ class PosCheckItemsView(APIView):
 
     @staticmethod
     def _get_totals(check: Check) -> dict:
-        agg = check.items.aggregate(
-            net_amount=Sum("net_amount"),
-            vat_amount=Sum("vat_amount"),
-            total_amount=Sum("total_amount"),
-        )
+        net_amount = Decimal("0.00")
+        vat_amount = Decimal("0.00")
+        total_amount = Decimal("0.00")
+        for item in check.items.all():
+            if item.line_type != CheckItem.LineType.NORMAL:
+                continue
+            chargeable_qty = _chargeable_qty_for_item(item)
+            if chargeable_qty <= Decimal("0.0000"):
+                continue
+            line_total = (chargeable_qty * Decimal(str(item.unit_price or "0.0000"))).quantize(
+                Decimal("0.01"),
+                rounding=ROUND_HALF_UP,
+            )
+            rate = Decimal(str(item.vat_rate or "0.0000"))
+            if rate > Decimal("0.0000"):
+                line_net = (line_total / (Decimal("1.00") + rate)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            else:
+                line_net = line_total
+            line_vat = (line_total - line_net).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            total_amount = (total_amount + line_total).quantize(Decimal("0.01"))
+            net_amount = (net_amount + line_net).quantize(Decimal("0.01"))
+            vat_amount = (vat_amount + line_vat).quantize(Decimal("0.01"))
         return {
             "items_count": check.items.count(),
-            "net_amount": agg["net_amount"] or Decimal("0.00"),
-            "vat_amount": agg["vat_amount"] or Decimal("0.00"),
-            "total_amount": agg["total_amount"] or Decimal("0.00"),
+            "net_amount": net_amount,
+            "vat_amount": vat_amount,
+            "total_amount": total_amount,
         }
 
     @extend_schema(
@@ -1125,7 +2875,7 @@ class PosCheckItemsView(APIView):
         )
 
     @extend_schema(
-        description="Adds NORMAL item to OPEN check.",
+        description="Adds NORMAL item to check. If check is CLOSED, it is reopened automatically.",
         request=CreateCheckItemRequestSerializer,
         responses={
             201: CheckItemSerializer,
@@ -1143,11 +2893,11 @@ class PosCheckItemsView(APIView):
             check = Check.objects.select_for_update().filter(id=check_id).first()
             if not check:
                 return Response({"detail": "Check ne postoji."}, status=status.HTTP_404_NOT_FOUND)
-            if check.status != Check.Status.OPEN:
-                return Response(
-                    {"detail": "Nije moguće dodati stavku na zatvoreni check."},
-                    status=status.HTTP_409_CONFLICT,
-                )
+            if check.status == Check.Status.CLOSED:
+                check.status = Check.Status.OPEN
+                check.closed_at = None
+                check.closed_by = None
+                check.save(update_fields=["status", "closed_at", "closed_by", "updated_at"])
 
             artikl_id = data["artikl_id"]
             artikl = Artikl.objects.filter(id=artikl_id).first()
@@ -1162,6 +2912,7 @@ class PosCheckItemsView(APIView):
                 vat_rate=data.get("vat_rate", Decimal("0.0000")),
                 note=data.get("note", ""),
             )
+            _sync_settlement_after_items_changed(check=check, user=request.user)
 
             placements = list(
                 LayoutTable.objects.select_for_update()
@@ -1191,7 +2942,7 @@ class PosCheckItemDetailView(APIView):
             "check_id": item.barion_check_id,
             "artikl_id": item.artikl_id,
             "artikl_name": item.artikl.name,
-            "quantity": item.quantity,
+            "quantity": _display_quantity_for_item(item),
             "unit_price": item.unit_price,
             "vat_rate": item.vat_rate,
             "net_amount": item.net_amount,
@@ -1248,6 +2999,7 @@ class PosCheckItemDetailView(APIView):
                 if field in data:
                     setattr(item, field, data[field])
             item.save()
+            _sync_settlement_after_items_changed(check=item.barion_check, user=request.user)
 
         return Response(self._serialize_item(item))
 
@@ -1271,6 +3023,7 @@ class PosCheckItemDetailView(APIView):
                 )
             check = item.barion_check
             item.delete()
+            _sync_settlement_after_items_changed(check=check, user=request.user)
             if not check.items.exists():
                 placements = list(
                     LayoutTable.objects.select_for_update()
@@ -1380,8 +3133,21 @@ class PosCheckItemStornoView(APIView):
                 check_id=item.barion_check_id,
                 item_id=item.id,
             )
-            source_qty = abs(Decimal(str(item.quantity)))
-            available_qty = source_qty - already_storno_qty
+            source_qty = abs(
+                _source_qty_for_item(
+                    check_id=item.barion_check_id,
+                    item_id=item.id,
+                    stored_qty=item.quantity,
+                )
+            )
+            paid_qty = Decimal(str(item.paid_quantity or "0.0000")).quantize(Decimal("0.0001"))
+            available_qty = (
+                source_qty
+                - already_storno_qty
+                - _gratis_applied_qty_for_item(check_id=item.barion_check_id, item_id=item.id)
+                - _otpis_applied_qty_for_item(check_id=item.barion_check_id, item_id=item.id)
+                - paid_qty
+            )
             if available_qty <= 0:
                 return Response(
                     {"detail": "Storno je već u cijelosti primijenjen za ovu stavku."},
@@ -1421,6 +3187,7 @@ class PosCheckItemStornoView(APIView):
                 line_type=CheckItem.LineType.STORNO,
                 note=note,
             )
+            _sync_settlement_after_items_changed(check=item.barion_check, user=request.user)
 
         return Response(PosCheckItemDetailView._serialize_item(storno_item), status=status.HTTP_201_CREATED)
 
@@ -1490,7 +3257,11 @@ class PosCheckItemGratisView(APIView):
                     {"detail": "Storno stavka ne može biti gratis."},
                     status=status.HTTP_409_CONFLICT,
                 )
-            source_qty = Decimal(str(item.quantity))
+            source_qty = _source_qty_for_item(
+                check_id=item.barion_check_id,
+                item_id=item.id,
+                stored_qty=item.quantity,
+            )
             if source_qty <= 0:
                 return Response(
                     {"detail": "Gratis je moguće primijeniti samo na pozitivnu količinu."},
@@ -1501,7 +3272,14 @@ class PosCheckItemGratisView(APIView):
                 check_id=item.barion_check_id,
                 item_id=item.id,
             )
-            available_qty = source_qty - storno_applied_qty
+            paid_qty = Decimal(str(item.paid_quantity or "0.0000")).quantize(Decimal("0.0001"))
+            available_qty = (
+                source_qty
+                - storno_applied_qty
+                - _gratis_applied_qty_for_item(check_id=item.barion_check_id, item_id=item.id)
+                - _otpis_applied_qty_for_item(check_id=item.barion_check_id, item_id=item.id)
+                - paid_qty
+            )
             if available_qty <= 0:
                 return Response(
                     {"detail": "Nema dostupne količine za gratis nakon storna."},
@@ -1515,17 +3293,6 @@ class PosCheckItemGratisView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            if apply_qty == source_qty:
-                item.unit_price = Decimal("0.0000")
-                item.line_type = CheckItem.LineType.GRATIS
-                if reason:
-                    item.note = f"{item.note} [gratis] {reason}".strip()
-                item.save()
-                return Response(PosCheckItemDetailView._serialize_item(item))
-
-            # Partial gratis: split source line and create separate GRATIS line.
-            item.quantity = source_qty - apply_qty
-            item.save()
             gratis_note = f"[gratis_of:{item.id}]"
             if reason:
                 gratis_note = f"{gratis_note} {reason}"
@@ -1539,6 +3306,7 @@ class PosCheckItemGratisView(APIView):
                 line_type=CheckItem.LineType.GRATIS,
                 note=gratis_note,
             )
+            _sync_settlement_after_items_changed(check=item.barion_check, user=request.user)
 
         return Response(PosCheckItemDetailView._serialize_item(gratis_item))
 
@@ -1613,7 +3381,11 @@ class PosCheckItemOtpisView(APIView):
                     status=status.HTTP_409_CONFLICT,
                 )
 
-            source_qty = Decimal(str(item.quantity))
+            source_qty = _source_qty_for_item(
+                check_id=item.barion_check_id,
+                item_id=item.id,
+                stored_qty=item.quantity,
+            )
             if source_qty <= 0:
                 return Response(
                     {"detail": "Otpis je moguće primijeniti samo na pozitivnu količinu."},
@@ -1624,7 +3396,14 @@ class PosCheckItemOtpisView(APIView):
                 check_id=item.barion_check_id,
                 item_id=item.id,
             )
-            available_qty = source_qty - storno_applied_qty
+            paid_qty = Decimal(str(item.paid_quantity or "0.0000")).quantize(Decimal("0.0001"))
+            available_qty = (
+                source_qty
+                - storno_applied_qty
+                - _gratis_applied_qty_for_item(check_id=item.barion_check_id, item_id=item.id)
+                - _otpis_applied_qty_for_item(check_id=item.barion_check_id, item_id=item.id)
+                - paid_qty
+            )
             if available_qty <= 0:
                 return Response(
                     {"detail": "Nema dostupne količine za otpis nakon storna."},
@@ -1638,16 +3417,6 @@ class PosCheckItemOtpisView(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            if apply_qty == source_qty:
-                item.unit_price = Decimal("0.0000")
-                item.line_type = CheckItem.LineType.OTPIS
-                if reason:
-                    item.note = f"{item.note} [otpis] {reason}".strip()
-                item.save()
-                return Response(PosCheckItemDetailView._serialize_item(item))
-
-            item.quantity = source_qty - apply_qty
-            item.save()
             otpis_note = f"[otpis_of:{item.id}]"
             if reason:
                 otpis_note = f"{otpis_note} {reason}"
@@ -1661,6 +3430,7 @@ class PosCheckItemOtpisView(APIView):
                 line_type=CheckItem.LineType.OTPIS,
                 note=otpis_note,
             )
+            _sync_settlement_after_items_changed(check=item.barion_check, user=request.user)
 
         return Response(PosCheckItemDetailView._serialize_item(otpis_item))
 
@@ -1771,10 +3541,20 @@ class PosProductSearchView(APIView):
                 {"detail": "sort mora biti jedan od: popular, name, code."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        try:
+            mode, _runtime_mode = _resolve_effective_mode(requested_mode=request.query_params.get("mode"))
+        except serializers.ValidationError as exc:
+            return Response({"detail": str(exc.detail)}, status=status.HTTP_400_BAD_REQUEST)
+
+        popularity_field = (
+            "barion_popularity_snapshot__sold_qty_night_weekend"
+            if mode == "night"
+            else "barion_popularity_snapshot__sold_qty_30d"
+        )
 
         qs = qs.annotate(
             popularity_score=Coalesce(
-                F("barion_popularity_snapshot__sold_qty_30d"),
+                F(popularity_field),
                 Value(Decimal("0.0000")),
                 output_field=DecimalField(max_digits=14, decimal_places=4),
             )
@@ -1858,6 +3638,42 @@ class PosDrinkCategoriesDisplayView(APIView):
             .distinct()
         )
 
+    @staticmethod
+    def _popularity_by_category_for_subtree(*, root: DrinkCategory, popularity_field: str) -> dict[int, Decimal]:
+        now = timezone.now()
+        direct_map: dict[int, Decimal] = {}
+        priced_rows = (
+            Artikl.objects.filter(
+                is_sellable=True,
+                drink_category__isnull=False,
+                drink_category__is_active=True,
+                drink_category__tree_id=root.tree_id,
+                drink_category__lft__gte=root.lft,
+                drink_category__rght__lte=root.rght,
+                sales_price_items__is_active=True,
+                sales_price_items__price_list__is_active=True,
+                sales_price_items__price_list__valid_from__lte=now,
+            )
+            .filter(
+                Q(sales_price_items__price_list__valid_to__isnull=True)
+                | Q(sales_price_items__price_list__valid_to__gte=now)
+            )
+            .annotate(
+                popularity_score=Coalesce(
+                    F(popularity_field),
+                    Value(Decimal("0.0000")),
+                    output_field=DecimalField(max_digits=14, decimal_places=4),
+                )
+            )
+            .values_list("drink_category_id", "popularity_score")
+        )
+        for category_id, popularity_score in priced_rows:
+            popularity = Decimal(str(popularity_score or "0.0000")).quantize(Decimal("0.0001"))
+            direct_map[category_id] = (direct_map.get(category_id, Decimal("0.0000")) + popularity).quantize(
+                Decimal("0.0001")
+            )
+        return direct_map
+
     @extend_schema(
         description=(
             "Returns display drink categories for POS by root category. "
@@ -1869,7 +3685,7 @@ class PosDrinkCategoriesDisplayView(APIView):
                 type=int,
                 required=True,
                 location=OpenApiParameter.QUERY,
-            )
+            ),
         ],
         responses={
             200: PosDrinkCategoryDisplayResponseSerializer,
@@ -1892,6 +3708,15 @@ class PosDrinkCategoriesDisplayView(APIView):
         root = DrinkCategory.objects.filter(id=root_id, is_active=True).first()
         if not root:
             return Response({"detail": "Aktivna root kategorija ne postoji."}, status=status.HTTP_404_NOT_FOUND)
+        try:
+            mode, _runtime_mode = _resolve_effective_mode(requested_mode=request.query_params.get("mode"))
+        except serializers.ValidationError as exc:
+            return Response({"detail": str(exc.detail)}, status=status.HTTP_400_BAD_REQUEST)
+        popularity_field = (
+            "barion_popularity_snapshot__sold_qty_night_weekend"
+            if mode == "night"
+            else "barion_popularity_snapshot__sold_qty_30d"
+        )
 
         subtree = list(
             DrinkCategory.objects.filter(
@@ -1907,6 +3732,10 @@ class PosDrinkCategoriesDisplayView(APIView):
             return Response({"root_id": root.id, "display_level": root.level + 1, "categories": []})
 
         priced_category_ids = self._priced_category_ids_for_subtree(root)
+        direct_popularity = self._popularity_by_category_for_subtree(
+            root=root,
+            popularity_field=popularity_field,
+        )
 
         children_by_parent: dict[int | None, list[int]] = {}
         for category in subtree:
@@ -1920,6 +3749,12 @@ class PosDrinkCategoriesDisplayView(APIView):
                 for child_id in children_by_parent.get(category.id, [])
             )
             has_products_in_subtree[category.id] = own_products or child_products
+        subtree_popularity: dict[int, Decimal] = {}
+        for category in reversed(subtree):
+            total_popularity = direct_popularity.get(category.id, Decimal("0.0000"))
+            for child_id in children_by_parent.get(category.id, []):
+                total_popularity += subtree_popularity.get(child_id, Decimal("0.0000"))
+            subtree_popularity[category.id] = total_popularity.quantize(Decimal("0.0001"))
 
         visible_descendant_levels = sorted(
             {
@@ -1942,10 +3777,19 @@ class PosDrinkCategoriesDisplayView(APIView):
                 "name": category.name,
                 "parent_id": category.parent_id,
                 "sort_order": category.sort_order,
+                "popularity_score": subtree_popularity.get(category.id, Decimal("0.0000")),
             }
             for category in subtree
             if category.level == target_level and has_products_in_subtree.get(category.id, False)
         ]
+        categories.sort(
+            key=lambda row: (
+                -Decimal(str(row.get("popularity_score") or "0.0000")),
+                int(row.get("sort_order") or 0),
+                str(row.get("name") or ""),
+                int(row.get("id") or 0),
+            )
+        )
 
         return Response(
             {

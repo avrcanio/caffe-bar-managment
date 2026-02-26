@@ -1,4 +1,5 @@
 import os
+import re
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -11,11 +12,13 @@ from rest_framework.test import APIClient
 
 from artikli.models import Artikl, DrinkCategory
 from barion.models import (
+    BarionRuntimeMode,
     Check,
     CheckItem,
     Layout,
     LayoutTable,
     ProductPopularitySnapshot,
+    SettlementPart,
     Table,
     TableState,
     UserLayoutAccess,
@@ -748,6 +751,63 @@ class PosCheckItemsApiTests(TestCase):
         )
         self.assertEqual(delete_response.status_code, 204, delete_response.content)
 
+    def test_add_item_reopens_closed_check(self):
+        self.client.force_authenticate(user=self.user)
+        self.check.status = Check.Status.CLOSED
+        self.check.closed_by = self.user
+        self.check.closed_at = timezone.now()
+        self.check.save(update_fields=["status", "closed_by", "closed_at", "updated_at"])
+
+        response = self.client.post(
+            f"/api/pos/checks/{self.check.id}/items/",
+            data={
+                "artikl_id": self.artikl_sok.id,
+                "quantity": "1.0000",
+                "unit_price": "2.5000",
+                "vat_rate": "0.2500",
+            },
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+
+        self.check.refresh_from_db()
+        self.assertEqual(self.check.status, Check.Status.OPEN)
+        self.assertIsNone(self.check.closed_at)
+        self.assertIsNone(self.check.closed_by)
+
+    def test_rejects_fractional_quantity_on_create_and_patch(self):
+        self.client.force_authenticate(user=self.user)
+        create_response = self.client.post(
+            f"/api/pos/checks/{self.check.id}/items/",
+            data={
+                "artikl_id": self.artikl_sok.id,
+                "quantity": "1.5000",
+                "unit_price": "2.5000",
+                "vat_rate": "0.2500",
+            },
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(create_response.status_code, 400, create_response.content)
+        self.assertIn("quantity", create_response.json())
+
+        item = CheckItem.objects.create(
+            barion_check=self.check,
+            artikl=self.artikl_kava,
+            quantity="2.0000",
+            unit_price="3.0000",
+            vat_rate="0.2500",
+        )
+        patch_response = self.client.patch(
+            f"/api/pos/check-items/{item.id}/",
+            data={"quantity": "2.5000"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(patch_response.status_code, 400, patch_response.content)
+        self.assertIn("quantity", patch_response.json())
+
     def test_storno_creates_negative_item_on_same_check(self):
         self.client.force_authenticate(user=self.user)
         item = CheckItem.objects.create(
@@ -822,7 +882,7 @@ class PosCheckItemsApiTests(TestCase):
         item = CheckItem.objects.create(
             barion_check=self.check,
             artikl=self.artikl_sok,
-            quantity="1.5000",
+            quantity="2.0000",
             unit_price="4.0000",
             vat_rate="0.2500",
         )
@@ -836,7 +896,7 @@ class PosCheckItemsApiTests(TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         payload = response.json()
         self.assertEqual(payload["line_type"], CheckItem.LineType.GRATIS)
-        self.assertEqual(float(payload["quantity"]), 1.5)
+        self.assertEqual(float(payload["quantity"]), 2.0)
         self.assertEqual(float(payload["unit_price"]), 0.0)
         self.assertEqual(float(payload["total_amount"]), 0.0)
 
@@ -865,7 +925,7 @@ class PosCheckItemsApiTests(TestCase):
         self.assertEqual(payload["round_number"], 9)
 
         item.refresh_from_db()
-        self.assertEqual(float(item.quantity), 3.0)
+        self.assertEqual(float(item.quantity), 5.0)
         self.assertEqual(item.line_type, CheckItem.LineType.NORMAL)
 
     def test_gratis_after_storno_is_limited_to_remaining_quantity(self):
@@ -900,11 +960,11 @@ class PosCheckItemsApiTests(TestCase):
 
         too_much = self.client.post(
             f"/api/pos/check-items/{item.id}/gratis/",
-            data={"quantity": "0.0001"},
+            data={"quantity": "1.5000"},
             format="json",
             secure=True,
         )
-        self.assertEqual(too_much.status_code, 409, too_much.content)
+        self.assertEqual(too_much.status_code, 400, too_much.content)
 
     def test_otpis_supports_partial_quantity_split(self):
         self.client.force_authenticate(user=self.user)
@@ -931,7 +991,7 @@ class PosCheckItemsApiTests(TestCase):
         self.assertEqual(payload["round_number"], 4)
 
         item.refresh_from_db()
-        self.assertEqual(float(item.quantity), 4.0)
+        self.assertEqual(float(item.quantity), 6.0)
         self.assertEqual(item.line_type, CheckItem.LineType.NORMAL)
 
     def test_otpis_rejects_non_normal_lines(self):
@@ -976,6 +1036,178 @@ class PosCheckItemsApiTests(TestCase):
             secure=True,
         )
         self.assertEqual(storno.status_code, 409, storno.content)
+
+    def test_settlement_state_remaining_excludes_paid_and_storno_for_normal_item(self):
+        self.client.force_authenticate(user=self.user)
+        item = CheckItem.objects.create(
+            barion_check=self.check,
+            artikl=self.artikl_kava,
+            quantity="10.0000",
+            unit_price="2.2000",
+            vat_rate="0.2500",
+            round_number=1,
+            sent_to_bar=True,
+        )
+
+        prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "22.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.content)
+        cash_part = SettlementPart.objects.get(barion_check=self.check, method=SettlementPart.Method.CASH)
+        pay = self.client.post(
+            f"/api/pos/checks/{self.check.id}/settlements/parts/{cash_part.id}/pay-cash/",
+            data={"amount": "2.20", "items": [{"id": item.id, "quantity": "1.0000"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(pay.status_code, 200, pay.content)
+
+        storno = self.client.post(
+            f"/api/pos/check-items/{item.id}/storno/",
+            data={"quantity": "1.0000"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(storno.status_code, 201, storno.content)
+
+        state = self.client.get(f"/api/pos/checks/{self.check.id}/settlement-state/", secure=True)
+        self.assertEqual(state.status_code, 200, state.content)
+        rows = [row for row in state.json().get("items", []) if row["id"] == item.id]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["remaining_quantity"], "8.0000")
+        self.assertEqual(row["remaining_amount"], "17.60")
+
+    def test_settlement_state_remaining_after_paid_storno_gratis_otpis_sequence(self):
+        self.client.force_authenticate(user=self.user)
+        item = CheckItem.objects.create(
+            barion_check=self.check,
+            artikl=self.artikl_kava,
+            quantity="10.0000",
+            unit_price="2.2000",
+            vat_rate="0.2500",
+            round_number=1,
+            sent_to_bar=True,
+        )
+        prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "22.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.content)
+        cash_part = SettlementPart.objects.get(barion_check=self.check, method=SettlementPart.Method.CASH)
+        pay = self.client.post(
+            f"/api/pos/checks/{self.check.id}/settlements/parts/{cash_part.id}/pay-cash/",
+            data={"amount": "2.20", "items": [{"id": item.id, "quantity": "1.0000"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(pay.status_code, 200, pay.content)
+
+        self.assertEqual(
+            self.client.post(
+                f"/api/pos/check-items/{item.id}/storno/",
+                data={"quantity": "1.0000"},
+                format="json",
+                secure=True,
+            ).status_code,
+            201,
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/api/pos/check-items/{item.id}/gratis/",
+                data={"quantity": "1.0000"},
+                format="json",
+                secure=True,
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/api/pos/check-items/{item.id}/otpis/",
+                data={"quantity": "1.0000"},
+                format="json",
+                secure=True,
+            ).status_code,
+            200,
+        )
+
+        state = self.client.get(f"/api/pos/checks/{self.check.id}/settlement-state/", secure=True)
+        self.assertEqual(state.status_code, 200, state.content)
+        rows = [row for row in state.json().get("items", []) if row["id"] == item.id]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["remaining_quantity"], "6.0000")
+        self.assertEqual(row["remaining_amount"], "13.20")
+
+    def test_round_state_exposes_paid_line_and_strike_main_only_at_zero_remaining(self):
+        self.client.force_authenticate(user=self.user)
+        item = CheckItem.objects.create(
+            barion_check=self.check,
+            artikl=self.artikl_kava,
+            quantity="10.0000",
+            unit_price="2.2000",
+            vat_rate="0.2500",
+            round_number=1,
+            sent_to_bar=True,
+        )
+
+        prepare_1 = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "22.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare_1.status_code, 200, prepare_1.content)
+        part_1 = SettlementPart.objects.get(barion_check=self.check, method=SettlementPart.Method.CASH)
+        pay_1 = self.client.post(
+            f"/api/pos/checks/{self.check.id}/settlements/parts/{part_1.id}/pay-cash/",
+            data={"amount": "6.60", "items": [{"id": item.id, "quantity": "3.0000"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(pay_1.status_code, 200, pay_1.content)
+
+        round_state_1 = self.client.get(f"/api/pos/checks/{self.check.id}/round-state/", secure=True)
+        self.assertEqual(round_state_1.status_code, 200, round_state_1.content)
+        rows_1 = [row for row in round_state_1.json()["items"] if row["item_id"] == item.id]
+        self.assertEqual(len(rows_1), 1)
+        row_1 = rows_1[0]
+        self.assertEqual(row_1["source_quantity"], "10.0000")
+        self.assertEqual(row_1["sold_quantity"], "3.0000")
+        self.assertEqual(row_1["remaining_quantity"], "7.0000")
+        self.assertFalse(row_1["strike_main"])
+        self.assertIsNotNone(row_1["paid_line"])
+        self.assertEqual(row_1["paid_line"]["line_type"], "PAID")
+        self.assertEqual(row_1["paid_line"]["quantity"], "3.0000")
+        self.assertEqual(row_1["paid_line"]["ui_color"], "light_blue")
+
+        part_2 = (
+            SettlementPart.objects.filter(barion_check=self.check, status=SettlementPart.Status.PREPARED)
+            .order_by("-id")
+            .first()
+        )
+        self.assertIsNotNone(part_2)
+        pay_2 = self.client.post(
+            f"/api/pos/checks/{self.check.id}/settlements/parts/{part_2.id}/pay-cash/",
+            data={"amount": "15.40", "items": [{"id": item.id, "quantity": "7.0000"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(pay_2.status_code, 200, pay_2.content)
+
+        round_state_2 = self.client.get(f"/api/pos/checks/{self.check.id}/round-state/", secure=True)
+        self.assertEqual(round_state_2.status_code, 200, round_state_2.content)
+        rows_2 = [row for row in round_state_2.json()["items"] if row["item_id"] == item.id]
+        self.assertEqual(len(rows_2), 1)
+        row_2 = rows_2[0]
+        self.assertEqual(row_2["sold_quantity"], "10.0000")
+        self.assertEqual(row_2["remaining_quantity"], "0.0000")
+        self.assertTrue(row_2["strike_main"])
 
     def test_cannot_change_items_on_closed_check(self):
         self.client.force_authenticate(user=self.user)
@@ -1058,6 +1290,9 @@ class PosProductSearchApiTests(TestCase):
         SalesPriceItem.objects.create(price_list=self.price_list, artikl=self.espresso, unit_price_gross="2.50", is_active=True)
         SalesPriceItem.objects.create(price_list=self.price_list, artikl=self.cola, unit_price_gross="3.00", is_active=True)
         SalesPriceItem.objects.create(price_list=self.price_list, artikl=self.water, unit_price_gross="2.00", is_active=True)
+        runtime = BarionRuntimeMode.get_solo()
+        runtime.active_mode = BarionRuntimeMode.Mode.DAY
+        runtime.save()
 
     def test_requires_authentication(self):
         response = self.client.get("/api/pos/products/search/?q=co", secure=True)
@@ -1141,6 +1376,60 @@ class PosProductSearchApiTests(TestCase):
         response = self.client.get("/api/pos/products/search/?sort=bad", secure=True)
         self.assertEqual(response.status_code, 400, response.content)
 
+    def test_invalid_mode_query_is_ignored(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/pos/products/search/?mode=bad", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+
+    def test_night_mode_uses_backend_active_mode(self):
+        ProductPopularitySnapshot.objects.create(
+            artikl=self.espresso,
+            sold_qty_30d="500.0000",
+            sold_qty_night_weekend="50.0000",
+        )
+        ProductPopularitySnapshot.objects.create(
+            artikl=self.cola,
+            sold_qty_30d="10.0000",
+            sold_qty_night_weekend="500.0000",
+        )
+        ProductPopularitySnapshot.objects.create(
+            artikl=self.water,
+            sold_qty_30d="1000.0000",
+            sold_qty_night_weekend="5.0000",
+        )
+
+        self.client.force_authenticate(user=self.user)
+        runtime = BarionRuntimeMode.get_solo()
+        runtime.active_mode = BarionRuntimeMode.Mode.NIGHT
+        runtime.save()
+        response = self.client.get("/api/pos/products/search/?mode=day&sort=popular", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual([row["id"] for row in payload[:3]], [self.cola.id, self.espresso.id, self.water.id])
+        self.assertEqual(float(payload[0]["popularity_score"]), 500.0)
+
+    def test_backend_day_mode_ignores_query_night(self):
+        ProductPopularitySnapshot.objects.create(
+            artikl=self.espresso,
+            sold_qty_30d="10.0000",
+            sold_qty_night_weekend="500.0000",
+        )
+        ProductPopularitySnapshot.objects.create(
+            artikl=self.cola,
+            sold_qty_30d="300.0000",
+            sold_qty_night_weekend="5.0000",
+        )
+        runtime = BarionRuntimeMode.get_solo()
+        runtime.active_mode = BarionRuntimeMode.Mode.DAY
+        runtime.save()
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/pos/products/search/?mode=night&sort=popular", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        # Backend day mode should always win.
+        self.assertEqual(payload[0]["id"], self.cola.id)
+
     def test_excludes_products_without_active_sales_price(self):
         no_price = Artikl.objects.create(
             name="Bez cijene",
@@ -1199,6 +1488,61 @@ class PosProductSearchApiTests(TestCase):
         payload = response.json()
         self.assertEqual(payload[0]["id"], self.cola.id)
         self.assertEqual(float(payload[0]["unit_price"]), 3.00)
+
+
+class PosRuntimeModeApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="barion-runtime-user",
+            email="barion-runtime@example.com",
+            password="pass1234",
+        )
+        self.staff = User.objects.create_user(
+            username="barion-runtime-staff",
+            email="barion-runtime-staff@example.com",
+            password="pass1234",
+            is_staff=True,
+        )
+        runtime = BarionRuntimeMode.get_solo()
+        runtime.active_mode = BarionRuntimeMode.Mode.DAY
+        runtime.updated_by = None
+        runtime.save()
+
+    def test_runtime_mode_get_requires_authentication(self):
+        response = self.client.get("/api/pos/runtime-mode/", secure=True)
+        self.assertEqual(response.status_code, 403)
+
+    def test_runtime_mode_get_returns_singleton(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/pos/runtime-mode/", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload["active_mode"], "day")
+
+    def test_runtime_mode_patch_requires_staff(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.patch(
+            "/api/pos/runtime-mode/",
+            data={"active_mode": "night"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 403, response.content)
+
+    def test_runtime_mode_patch_updates_mode_for_staff(self):
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.patch(
+            "/api/pos/runtime-mode/",
+            data={"active_mode": "night"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload["active_mode"], "night")
+        self.assertEqual(payload["updated_by_id"], self.staff.id)
 
 
 class PosCheckSendToBarApiTests(TestCase):
@@ -1408,6 +1752,9 @@ class PosDrinkCategoriesDisplayApiTests(TestCase):
             is_default=True,
             valid_from=timezone.now(),
         )
+        runtime = BarionRuntimeMode.get_solo()
+        runtime.active_mode = BarionRuntimeMode.Mode.DAY
+        runtime.save()
 
     def _priced_artikl(self, *, category: DrinkCategory, code: str):
         artikl = Artikl.objects.create(
@@ -1463,6 +1810,68 @@ class PosDrinkCategoriesDisplayApiTests(TestCase):
         self.assertEqual(payload["display_level"], 2)
         names = [row["name"] for row in payload["categories"]]
         self.assertEqual(names, ["Topli", "Sokovi"])
+
+    def test_sorts_display_categories_by_day_popularity_desc(self):
+        root = DrinkCategory.objects.create(name="Napitci")
+        lvl2_hot = DrinkCategory.objects.create(name="Topli", parent=root, sort_order=10)
+        lvl2_soft = DrinkCategory.objects.create(name="Sokovi", parent=root, sort_order=20)
+
+        hot_artikl = self._priced_artikl(category=lvl2_hot, code="TOP01")
+        soft_artikl = self._priced_artikl(category=lvl2_soft, code="SOK01")
+        ProductPopularitySnapshot.objects.create(artikl=hot_artikl, sold_qty_30d="10.0000")
+        ProductPopularitySnapshot.objects.create(artikl=soft_artikl, sold_qty_30d="200.0000")
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(
+            f"/api/pos/drink-categories/display/?root_id={root.id}&mode=day",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload["display_level"], 2)
+        rows = payload["categories"]
+        self.assertEqual([row["id"] for row in rows], [lvl2_soft.id, lvl2_hot.id])
+        self.assertEqual(float(rows[0]["popularity_score"]), 200.0)
+
+    def test_sorts_display_categories_by_night_popularity_desc_when_backend_mode_is_night(self):
+        root = DrinkCategory.objects.create(name="Napitci")
+        lvl2_hot = DrinkCategory.objects.create(name="Topli", parent=root, sort_order=10)
+        lvl2_soft = DrinkCategory.objects.create(name="Sokovi", parent=root, sort_order=20)
+
+        hot_artikl = self._priced_artikl(category=lvl2_hot, code="TOP01")
+        soft_artikl = self._priced_artikl(category=lvl2_soft, code="SOK01")
+        ProductPopularitySnapshot.objects.create(
+            artikl=hot_artikl,
+            sold_qty_30d="500.0000",
+            sold_qty_night_weekend="5.0000",
+        )
+        ProductPopularitySnapshot.objects.create(
+            artikl=soft_artikl,
+            sold_qty_30d="10.0000",
+            sold_qty_night_weekend="300.0000",
+        )
+
+        self.client.force_authenticate(user=self.user)
+        runtime = BarionRuntimeMode.get_solo()
+        runtime.active_mode = BarionRuntimeMode.Mode.NIGHT
+        runtime.save()
+        response = self.client.get(
+            f"/api/pos/drink-categories/display/?root_id={root.id}&mode=day",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        rows = response.json()["categories"]
+        self.assertEqual([row["id"] for row in rows], [lvl2_soft.id, lvl2_hot.id])
+        self.assertEqual(float(rows[0]["popularity_score"]), 300.0)
+
+    def test_display_categories_invalid_mode_query_is_ignored(self):
+        root = DrinkCategory.objects.create(name="Napitci")
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(
+            f"/api/pos/drink-categories/display/?root_id={root.id}&mode=bad",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
 
 class PosCheckIssueReceiptApiTests(TestCase):
     def setUp(self):
@@ -1549,9 +1958,11 @@ class PosCheckIssueReceiptApiTests(TestCase):
 
         self.check.refresh_from_db()
         self.assertEqual(self.check.status, Check.Status.CLOSED)
-        self.assertIsNotNone(self.check.pos_receipt_id)
+        paid_part = SettlementPart.objects.filter(barion_check=self.check, status=SettlementPart.Status.PAID).first()
+        self.assertIsNotNone(paid_part)
+        self.assertIsNotNone(paid_part.confirmed_receipt_id)
 
-        receipt = PosReceipt.objects.get(id=self.check.pos_receipt_id)
+        receipt = PosReceipt.objects.get(id=paid_part.confirmed_receipt_id)
         self.assertEqual(receipt.items.count(), 1)
         self.assertEqual(receipt.items.first().artikl_id, self.artikl.id)
 
@@ -1602,3 +2013,750 @@ class PosCheckIssueReceiptApiTests(TestCase):
         receipt = PosReceipt.objects.get(id=response.json()["receipt_id"])
         receipt_quantities = sorted([str(row.quantity) for row in receipt.items.order_by("id")])
         self.assertEqual(receipt_quantities, ["-2.0000", "2.0000"])
+
+
+class PosSplitSettlementApiContractTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="barion-split-user",
+            email="barion-split@example.com",
+            password="pass1234",
+        )
+        self.client.force_authenticate(user=self.user)
+        self.profile = PosProfile.objects.create(user=self.user)
+        self.profile.set_pin("1234")
+        self.profile.save(update_fields=["pin_hash"])
+
+        self.table = Table.objects.create(label="SPLIT-1", capacity=4, shape=Table.Shape.SQUARE, is_vip=False)
+        self.layout = Layout.objects.create(name="Split layout", is_active=True)
+        self.zone = Zone.objects.create(layout=self.layout, name="Main", order=1)
+        self.layout_table = LayoutTable.objects.create(
+            layout=self.layout,
+            table=self.table,
+            zone=self.zone,
+            x=0,
+            y=0,
+            w=90,
+            h=90,
+            rotation=0,
+            z_index=1,
+            is_enabled=True,
+        )
+        self.check = Check.objects.create(table=self.table, status=Check.Status.OPEN, opened_by=self.user)
+        TableState.objects.create(
+            layout_table=self.layout_table,
+            state=TableState.State.OPEN,
+            open_check_id=self.check.id,
+            updated_by=self.user,
+        )
+        self.tax_group = TaxGroup.objects.create(name="PDV 25 split", code="PDV25S", rate="0.2500")
+        self.artikl = Artikl.objects.create(
+            name="Split test item",
+            code="SPLIT-ITEM-1",
+            is_sellable=True,
+            is_stock_item=False,
+            tax_group=self.tax_group,
+        )
+        CheckItem.objects.create(
+            barion_check=self.check,
+            artikl=self.artikl,
+            quantity="1.0000",
+            unit_price="50.0000",
+            vat_rate="0.2500",
+        )
+
+    def _verify_pin(self):
+        response = self.client.post(
+            "/api/pos/pin/verify/",
+            data={"pin": "1234"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+
+    def _assert_absolute_url_or_null(self, value):
+        if value is None:
+            return
+        self.assertIsInstance(value, str)
+        self.assertTrue(value.startswith("http://") or value.startswith("https://"), value)
+
+    def _assert_money_string(self, value):
+        self.assertIsInstance(value, str)
+        self.assertRegex(value, r"^-?\d+\.\d{2}$")
+
+    def test_prepare_settlement_persists_parts_and_returns_contract_shape(self):
+        response = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={
+                "parts": [
+                    {"method": "CASH", "amount": "30.00"},
+                    {"method": "CARD", "amount": "20.00", "tip_amount": "2.00"},
+                ]
+            },
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload["check_id"], self.check.id)
+        self.assertEqual(payload["settlement_status"], Check.SettlementStatus.PREPARED)
+        self.assertEqual(payload["payment_status"], Check.PaymentStatus.UNPAID)
+        self.assertEqual(float(payload["totals"]["check_total"]), 50.00)
+        self.assertEqual(float(payload["totals"]["allocated_total"]), 50.00)
+        self.assertEqual(float(payload["totals"]["confirmed_total"]), 0.00)
+        self.assertEqual(float(payload["totals"]["remaining_total"]), 50.00)
+        self.assertEqual(payload["actions"]["can_confirm_card"], True)
+        self.assertEqual(payload["actions"]["can_issue_receipt"], False)
+        self.assertEqual(payload["actions"]["can_close_check"], False)
+        self.assertEqual(len(payload["parts"]), 2)
+
+        cash = next(row for row in payload["parts"] if row["method"] == "CASH")
+        card = next(row for row in payload["parts"] if row["method"] == "CARD")
+        self.assertEqual(float(cash["tip_amount"]), 0.00)
+        self.assertEqual(float(cash["fiscal_amount"]), 30.00)
+        self.assertEqual(float(cash["total_charged"]), 30.00)
+        self.assertEqual(float(card["tip_amount"]), 2.00)
+        self.assertEqual(float(card["fiscal_amount"]), 22.00)
+        self.assertEqual(float(card["total_charged"]), 22.00)
+
+        self.assertEqual(SettlementPart.objects.filter(barion_check=self.check).count(), 2)
+
+    def test_prepare_settlement_rejects_invalid_sum(self):
+        response = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "49.99"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("allocated_total", response.json())
+
+    def test_prepare_settlement_is_idempotent_for_same_payload(self):
+        payload = {"parts": [{"method": "CASH", "amount": "50.00"}]}
+        first = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data=payload,
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(first.status_code, 200, first.content)
+        ids_first = list(SettlementPart.objects.filter(barion_check=self.check).values_list("id", flat=True))
+
+        second = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data=payload,
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(second.status_code, 200, second.content)
+        ids_second = list(SettlementPart.objects.filter(barion_check=self.check).values_list("id", flat=True))
+        self.assertEqual(ids_first, ids_second)
+
+    def test_prepare_settlement_rejects_cash_tip(self):
+        response = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "50.00", "tip_amount": "1.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+
+    def test_prepare_settlement_allows_reprepare_after_paid_when_no_prepared_parts(self):
+        prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "50.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.content)
+        initial_cash_part = SettlementPart.objects.get(barion_check=self.check, method=SettlementPart.Method.CASH)
+
+        pay = self.client.post(
+            f"/api/pos/checks/{self.check.id}/settlements/parts/{initial_cash_part.id}/pay-cash/",
+            data={"amount": "20.00"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(pay.status_code, 200, pay.content)
+
+        # Simulate item mutation sync removing stale PREPARED parts.
+        SettlementPart.objects.filter(barion_check=self.check, status=SettlementPart.Status.PREPARED).delete()
+
+        reprepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "30.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(reprepare.status_code, 200, reprepare.content)
+
+        self.check.refresh_from_db()
+        self.assertEqual(self.check.status, Check.Status.OPEN)
+        self.assertEqual(self.check.payment_status, Check.PaymentStatus.PARTIAL)
+        self.assertEqual(
+            SettlementPart.objects.filter(barion_check=self.check, status=SettlementPart.Status.PAID).count(),
+            1,
+        )
+        self.assertEqual(
+            SettlementPart.objects.filter(barion_check=self.check, status=SettlementPart.Status.PREPARED).count(),
+            1,
+        )
+
+    def test_pay_card_confirm_marks_partial_and_is_idempotent_by_external_txn(self):
+        prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={
+                "parts": [
+                    {"method": "CARD", "amount": "20.00", "tip_amount": "2.00"},
+                    {"method": "CASH", "amount": "30.00"},
+                ]
+            },
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.content)
+
+        first = self.client.post(
+            f"/api/pos/checks/{self.check.id}/pay-card/confirm/",
+            data={"amount": "20.00", "external_txn_id": "TXN-001"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(first.status_code, 200, first.content)
+        first_payload = first.json()
+        self.assertEqual(first_payload["payment_status"], Check.PaymentStatus.PARTIAL)
+        self.assertEqual(float(first_payload["remaining_total"]), 30.00)
+        self.assertEqual(first_payload["check_closed"], False)
+        self.assertEqual(first_payload["action"], "card_confirmed")
+        self.assertIn("parts", first_payload)
+        self.assertIn("totals", first_payload)
+        self.assertIn("actions", first_payload)
+        self.assertIn("receipt_pdf_url", first_payload)
+        self.assertIn("issued_receipt_id", first_payload)
+        self.assertIn("pos_receipt_ids", first_payload)
+        self.assertIsInstance(first_payload["pos_receipt_ids"], list)
+        self._assert_absolute_url_or_null(first_payload["receipt_pdf_url"])
+        self.assertEqual(float(first_payload["totals"]["confirmed_total"]), 20.00)
+        self.assertEqual(first_payload["actions"]["can_confirm_card"], False)
+        self.assertEqual(first_payload["actions"]["can_issue_receipt"], False)
+
+        second = self.client.post(
+            f"/api/pos/checks/{self.check.id}/pay-card/confirm/",
+            data={"amount": "20.00", "external_txn_id": "TXN-001"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(second.status_code, 200, second.content)
+        self.assertEqual(second.json()["action"], "idempotent")
+
+    def test_pay_card_confirm_rejects_missing_prepare(self):
+        response = self.client.post(
+            f"/api/pos/checks/{self.check.id}/pay-card/confirm/",
+            data={"amount": "20.00", "external_txn_id": "TXN-002"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 409, response.content)
+
+    def test_split_e2e_prepare_card_cash_confirm_then_final_issue(self):
+        prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={
+                "parts": [
+                    {"method": "CARD", "amount": "20.00", "tip_amount": "2.00"},
+                    {"method": "CASH", "amount": "30.00"},
+                ]
+            },
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.content)
+
+        confirm = self.client.post(
+            f"/api/pos/checks/{self.check.id}/pay-card/confirm/",
+            data={"amount": "20.00", "external_txn_id": "TXN-E2E-001"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(confirm.status_code, 200, confirm.content)
+        self.assertEqual(confirm.json()["payment_status"], Check.PaymentStatus.PARTIAL)
+        self.assertEqual(float(confirm.json()["totals"]["remaining_total"]), 30.00)
+
+        self._verify_pin()
+        issue = self.client.post(
+            f"/api/pos/checks/{self.check.id}/issue-receipt/",
+            data={"fiscalize": False, "payment_type": "cash"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(issue.status_code, 200, issue.content)
+        payload = issue.json()
+        self.assertEqual(payload["check_id"], self.check.id)
+        self.assertEqual(payload["check_status"], Check.Status.CLOSED)
+        self.assertEqual(payload["settlement_status"], Check.SettlementStatus.COMPLETE)
+        self.assertEqual(payload["payment_status"], Check.PaymentStatus.PAID)
+        self.assertEqual(float(payload["totals"]["remaining_total"]), 0.00)
+        self.assertEqual(payload["actions"]["can_issue_receipt"], False)
+        self.assertEqual(payload["actions"]["can_close_check"], False)
+
+        self.check.refresh_from_db()
+        self.assertEqual(self.check.status, Check.Status.CLOSED)
+        self.assertEqual(self.check.payment_status, Check.PaymentStatus.PAID)
+        self.assertEqual(self.check.settlement_status, Check.SettlementStatus.COMPLETE)
+
+        state = TableState.objects.get(layout_table=self.layout_table)
+        self.assertEqual(state.state, TableState.State.FREE)
+        self.assertIsNone(state.open_check_id)
+
+    def test_settlement_state_returns_snapshot_for_polling(self):
+        prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={
+                "parts": [
+                    {"method": "CARD", "amount": "20.00", "tip_amount": "2.00"},
+                    {"method": "CASH", "amount": "30.00"},
+                ]
+            },
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.content)
+
+        response = self.client.get(
+            f"/api/pos/checks/{self.check.id}/settlement-state/",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload["check_id"], self.check.id)
+        self.assertEqual(payload["check_status"], Check.Status.OPEN)
+        self.assertEqual(payload["settlement_status"], Check.SettlementStatus.PREPARED)
+        self.assertEqual(payload["payment_status"], Check.PaymentStatus.UNPAID)
+        self.assertIsNone(payload["pos_receipt_id"])
+        self.assertIn("pos_receipt_ids", payload)
+        self.assertEqual(payload["pos_receipt_ids"], [])
+        self.assertIsNone(payload["issued_receipt_id"])
+        self.assertIsNone(payload["receipt_pdf_url"])
+        self.assertEqual(len(payload["parts"]), 2)
+        self.assertEqual(float(payload["totals"]["check_total"]), 50.00)
+        self.assertEqual(float(payload["totals"]["allocated_total"]), 50.00)
+        self.assertEqual(float(payload["totals"]["confirmed_total"]), 0.00)
+        self.assertEqual(float(payload["totals"]["remaining_total"]), 50.00)
+        self._assert_money_string(payload["totals"]["check_total"])
+        self._assert_money_string(payload["totals"]["allocated_total"])
+        self._assert_money_string(payload["totals"]["confirmed_total"])
+        self._assert_money_string(payload["totals"]["remaining_total"])
+        self.assertEqual(payload["actions"]["can_confirm_card"], True)
+        self.assertEqual(payload["actions"]["can_issue_receipt"], False)
+        self.assertEqual(payload["actions"]["can_close_check"], False)
+        self.assertIn("items", payload)
+        self.assertGreaterEqual(len(payload["items"]), 1)
+        first_item = payload["items"][0]
+        self.assertIn("round_number", first_item)
+        self.assertIn("sent_to_bar", first_item)
+        if first_item["round_number"] is not None:
+            self.assertIsInstance(first_item["round_number"], int)
+        self.assertIsInstance(first_item["sent_to_bar"], bool)
+        self.assertIn("updated_at", payload)
+
+    def test_settlement_state_returns_404_for_unknown_check(self):
+        response = self.client.get("/api/pos/checks/999999/settlement-state/", secure=True)
+        self.assertEqual(response.status_code, 404, response.content)
+
+    def test_part_level_pay_cash_endpoint(self):
+        prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "50.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.content)
+        cash_part = SettlementPart.objects.get(barion_check=self.check, method=SettlementPart.Method.CASH)
+
+        with patch.dict(
+            os.environ,
+            {"FISCAL_MOCK": "true", "FISCAL_OIB": "12345678901", "FISCAL_SEND_ENABLED": "false"},
+            clear=False,
+        ):
+            pay = self.client.post(
+                f"/api/pos/checks/{self.check.id}/settlements/parts/{cash_part.id}/pay-cash/",
+                data={"amount": "50.00"},
+                format="json",
+                secure=True,
+            )
+        self.assertEqual(pay.status_code, 200, pay.content)
+        self.assertEqual(pay.json()["part_status"], SettlementPart.Status.PAID)
+        self.assertEqual(pay.json()["action"], "paid")
+        self.assertIn("receipt_pdf_url", pay.json())
+        self.assertIn("issued_receipt_id", pay.json())
+        self.assertIn("pos_receipt_ids", pay.json())
+        self.assertIsInstance(pay.json()["pos_receipt_ids"], list)
+        self._assert_absolute_url_or_null(pay.json()["receipt_pdf_url"])
+
+    def test_part_pay_cash_allows_partial_and_keeps_remaining(self):
+        prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "50.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.content)
+
+        cash_part = SettlementPart.objects.get(barion_check=self.check, method=SettlementPart.Method.CASH)
+        pay = self.client.post(
+            f"/api/pos/checks/{self.check.id}/settlements/parts/{cash_part.id}/pay-cash/",
+            data={"amount": "20.00"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(pay.status_code, 200, pay.content)
+        payload = pay.json()
+        self.assertEqual(float(payload["totals"]["confirmed_total"]), 20.00)
+        self.assertEqual(float(payload["totals"]["remaining_total"]), 30.00)
+        self.assertIsNotNone(payload["issued_receipt_id"])
+        self.assertIn("pos_receipt_ids", payload)
+        self.assertGreaterEqual(len(payload["pos_receipt_ids"]), 1)
+        self._assert_absolute_url_or_null(payload["receipt_pdf_url"])
+
+        state = self.client.get(
+            f"/api/pos/checks/{self.check.id}/settlement-state/",
+            secure=True,
+        )
+        self.assertEqual(state.status_code, 200, state.content)
+        item_rows = state.json().get("items") or []
+        self.assertGreaterEqual(len(item_rows), 1)
+        row = item_rows[0]
+        self.assertEqual(float(row["paid_amount"]), 20.00)
+        self.assertEqual(float(row["remaining_amount"]), 30.00)
+
+        self.check.refresh_from_db()
+        self.assertEqual(self.check.status, Check.Status.OPEN)
+        self.assertEqual(self.check.payment_status, Check.PaymentStatus.PARTIAL)
+
+    def test_part_pay_cash_supports_strict_item_selection(self):
+        second_artikl = Artikl.objects.create(
+            name="Strict target item",
+            code="STRICT-TARGET-1",
+            is_sellable=True,
+            is_stock_item=False,
+            tax_group=self.tax_group,
+        )
+        second_item = CheckItem.objects.create(
+            barion_check=self.check,
+            artikl=second_artikl,
+            quantity="2.0000",
+            unit_price="5.0000",
+            vat_rate="0.2500",
+        )
+
+        prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "60.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.content)
+
+        cash_part = SettlementPart.objects.get(barion_check=self.check, method=SettlementPart.Method.CASH)
+        pay = self.client.post(
+            f"/api/pos/checks/{self.check.id}/settlements/parts/{cash_part.id}/pay-cash/",
+            data={"items": [{"id": second_item.id, "quantity": "1.0000"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(pay.status_code, 200, pay.content)
+        payload = pay.json()
+        self.assertEqual(float(payload["totals"]["confirmed_total"]), 5.00)
+        self.assertEqual(float(payload["totals"]["remaining_total"]), 55.00)
+
+        self.check.refresh_from_db()
+        first_item = self.check.items.get(artikl=self.artikl)
+        second_item.refresh_from_db()
+        self.assertEqual(float(first_item.paid_amount), 0.00)
+        self.assertEqual(float(second_item.paid_amount), 5.00)
+        self.assertEqual(float(second_item.paid_quantity), 1.00)
+
+    def test_prepare_and_state_prioritize_prepared_parts_over_paid_for_same_amount(self):
+        prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "50.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.content)
+        cash_part = SettlementPart.objects.get(barion_check=self.check, method=SettlementPart.Method.CASH)
+
+        pay = self.client.post(
+            f"/api/pos/checks/{self.check.id}/settlements/parts/{cash_part.id}/pay-cash/",
+            data={"amount": "20.00"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(pay.status_code, 200, pay.content)
+        SettlementPart.objects.filter(
+            barion_check=self.check,
+            status=SettlementPart.Status.PREPARED,
+        ).delete()
+
+        reprepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "20.00"}, {"method": "CASH", "amount": "10.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(reprepare.status_code, 200, reprepare.content)
+        reprepare_payload = reprepare.json()
+
+        twenty_parts = [row for row in reprepare_payload["parts"] if row["method"] == "CASH" and row["amount"] == "20.00"]
+        self.assertGreaterEqual(len(twenty_parts), 2)
+        self.assertEqual(twenty_parts[0]["status"], SettlementPart.Status.PREPARED)
+
+        state = self.client.get(f"/api/pos/checks/{self.check.id}/settlement-state/", secure=True)
+        self.assertEqual(state.status_code, 200, state.content)
+        state_payload = state.json()
+        state_twenty_parts = [
+            row for row in state_payload["parts"] if row["method"] == "CASH" and row["amount"] == "20.00"
+        ]
+        self.assertGreaterEqual(len(state_twenty_parts), 2)
+        self.assertEqual(state_twenty_parts[0]["status"], SettlementPart.Status.PREPARED)
+
+    def test_prepare_preserves_order_within_prepared_cash_parts(self):
+        prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "2.20"}, {"method": "CASH", "amount": "47.80"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.content)
+        payload = prepare.json()
+        cash_parts = [row for row in payload["parts"] if row["method"] == "CASH"]
+        self.assertEqual(cash_parts[0]["amount"], "2.20")
+        self.assertEqual(cash_parts[1]["amount"], "47.80")
+
+        state = self.client.get(f"/api/pos/checks/{self.check.id}/settlement-state/", secure=True)
+        self.assertEqual(state.status_code, 200, state.content)
+        state_payload = state.json()
+        state_cash_parts = [row for row in state_payload["parts"] if row["method"] == "CASH"]
+        self.assertEqual(state_cash_parts[0]["amount"], "2.20")
+        self.assertEqual(state_cash_parts[1]["amount"], "47.80")
+
+    def test_part_pay_cash_rejects_non_normal_item_selection(self):
+        source_item = self.check.items.get(artikl=self.artikl)
+        # Keep check payable/open after otpis so we can test pay-cash rejection path.
+        CheckItem.objects.create(
+            barion_check=self.check,
+            artikl=self.artikl,
+            quantity="1.0000",
+            unit_price="10.0000",
+            vat_rate="0.2500",
+        )
+        otpis = self.client.post(
+            f"/api/pos/check-items/{source_item.id}/otpis/",
+            data={"quantity": "1.0000", "reason": "test"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(otpis.status_code, 200, otpis.content)
+        otpis_item_id = otpis.json()["id"]
+        prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "10.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.content)
+        cash_part = SettlementPart.objects.get(barion_check=self.check, method=SettlementPart.Method.CASH)
+
+        pay = self.client.post(
+            f"/api/pos/checks/{self.check.id}/settlements/parts/{cash_part.id}/pay-cash/",
+            data={"amount": "0.00", "items": [{"id": otpis_item_id, "quantity": "1.0000"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(pay.status_code, 400, pay.content)
+        self.assertIn("nije naplativ", pay.json()["detail"])
+
+    def test_item_action_clears_prepared_parts_and_recalculates_state(self):
+        prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "50.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.content)
+        self.assertEqual(
+            SettlementPart.objects.filter(barion_check=self.check, status=SettlementPart.Status.PREPARED).count(),
+            1,
+        )
+
+        source_item = self.check.items.get(artikl=self.artikl)
+        otpis = self.client.post(
+            f"/api/pos/check-items/{source_item.id}/otpis/",
+            data={"quantity": "1.0000", "reason": "lom"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(otpis.status_code, 200, otpis.content)
+
+        self.assertEqual(
+            SettlementPart.objects.filter(barion_check=self.check, status=SettlementPart.Status.PREPARED).count(),
+            0,
+        )
+        self.check.refresh_from_db()
+        self.assertEqual(self.check.status, Check.Status.CLOSED)
+        self.assertEqual(self.check.settlement_status, Check.SettlementStatus.COMPLETE)
+        self.assertEqual(self.check.payment_status, Check.PaymentStatus.PAID)
+
+    def test_part_pay_cash_without_prepare_returns_not_found(self):
+        pay = self.client.post(
+            f"/api/pos/checks/{self.check.id}/settlements/parts/0/pay-cash/",
+            data={"amount": "20.00"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(pay.status_code, 404, pay.content)
+
+    def test_prepare_legacy_endpoint_removed(self):
+        first_pay = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "50.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(first_pay.status_code, 200, first_pay.content)
+
+        cash_part = SettlementPart.objects.get(barion_check=self.check, method=SettlementPart.Method.CASH)
+        second_pay = self.client.post(
+            f"/api/pos/checks/{self.check.id}/settlements/parts/{cash_part.id}/pay-cash/",
+            data={"amount": "20.00"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(second_pay.status_code, 200, second_pay.content)
+
+        prepare_again = self.client.post(
+            f"/api/pos/checks/{self.check.id}/settlements/parts/prepare/",
+            data={"parts": [{"method": "CASH", "amount": "30.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare_again.status_code, 404, prepare_again.content)
+
+    def test_receipt_pdf_url_is_absolute_when_present_for_cash_and_state(self):
+        prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "50.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.content)
+        cash_part = SettlementPart.objects.get(barion_check=self.check, method=SettlementPart.Method.CASH)
+
+        with patch.dict(
+            os.environ,
+            {"FISCAL_MOCK": "true", "FISCAL_OIB": "12345678901", "FISCAL_SEND_ENABLED": "false"},
+            clear=False,
+        ):
+            pay = self.client.post(
+                f"/api/pos/checks/{self.check.id}/settlements/parts/{cash_part.id}/pay-cash/",
+                data={"amount": "50.00"},
+                format="json",
+                secure=True,
+            )
+        self.assertEqual(pay.status_code, 200, pay.content)
+        payload = pay.json()
+        self.assertIn("issued_receipt_id", payload)
+        self.assertIn("receipt_pdf_url", payload)
+        if payload["receipt_pdf_url"] is not None:
+            self.assertTrue(payload["receipt_pdf_url"].startswith("https://"), payload["receipt_pdf_url"])
+
+        state = self.client.get(
+            f"/api/pos/checks/{self.check.id}/settlement-state/",
+            secure=True,
+        )
+        self.assertEqual(state.status_code, 200, state.content)
+        state_payload = state.json()
+        self.assertIn("issued_receipt_id", state_payload)
+        self.assertIn("receipt_pdf_url", state_payload)
+        self.assertIn("pos_receipt_ids", state_payload)
+        self.assertIn("receipts", state_payload)
+        self.assertIsInstance(state_payload["receipts"], list)
+        if state_payload["issued_receipt_id"] is not None:
+            self.assertIn(state_payload["issued_receipt_id"], state_payload["pos_receipt_ids"])
+        for receipt in state_payload["receipts"]:
+            self.assertIn("id", receipt)
+            self.assertIn(receipt["id"], state_payload["pos_receipt_ids"])
+            self._assert_absolute_url_or_null(receipt.get("pdf_url"))
+        self._assert_absolute_url_or_null(state_payload["receipt_pdf_url"])
+
+    def test_receipt_pdf_url_is_absolute_when_present_for_pay_card_confirm(self):
+        prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CARD", "amount": "50.00", "tip_amount": "0.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.content)
+
+        confirm = self.client.post(
+            f"/api/pos/checks/{self.check.id}/pay-card/confirm/",
+            data={"amount": "50.00", "external_txn_id": "TXN-CARD-ABS-001", "issue_receipt": True},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(confirm.status_code, 200, confirm.content)
+        payload = confirm.json()
+        self.assertIn("receipt_pdf_url", payload)
+        self.assertIn("issued_receipt_id", payload)
+        self.assertIn("pos_receipt_ids", payload)
+        self.assertIsInstance(payload["pos_receipt_ids"], list)
+        self._assert_absolute_url_or_null(payload["receipt_pdf_url"])
+
+    def test_part_level_card_confirm_failed_then_retry_paid(self):
+        prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={
+                "parts": [
+                    {"method": "CARD", "amount": "20.00", "tip_amount": "2.00"},
+                    {"method": "CASH", "amount": "30.00"},
+                ]
+            },
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.content)
+        card_part = SettlementPart.objects.get(barion_check=self.check, method=SettlementPart.Method.CARD)
+
+        failed = self.client.post(
+            f"/api/pos/checks/{self.check.id}/settlements/parts/{card_part.id}/pay-card/confirm/",
+            data={
+                "approved": False,
+                "amount": "20.00",
+                "tip_amount": "2.00",
+                "external_txn_id": "TXN-FAIL-01",
+                "provider_ref": "VIVA-DECLINED-01",
+            },
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(failed.status_code, 200, failed.content)
+        self.assertEqual(failed.json()["part_status"], SettlementPart.Status.FAILED)
+        self.assertEqual(failed.json()["action"], "failed")
+
+        retry = self.client.post(
+            f"/api/pos/checks/{self.check.id}/settlements/parts/{card_part.id}/pay-card/confirm/",
+            data={
+                "approved": True,
+                "amount": "20.00",
+                "tip_amount": "2.00",
+                "external_txn_id": "TXN-OK-01",
+                "provider_ref": "VIVA-APPROVED-01",
+            },
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(retry.status_code, 200, retry.content)
+        self.assertEqual(retry.json()["part_status"], SettlementPart.Status.PAID)
+        self.assertEqual(retry.json()["action"], "paid")

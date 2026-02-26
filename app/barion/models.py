@@ -242,6 +242,18 @@ class Check(models.Model):
         OPEN = "OPEN", "Open"
         CLOSED = "CLOSED", "Closed"
 
+    class SettlementStatus(models.TextChoices):
+        NONE = "NONE", "None"
+        PREPARED = "PREPARED", "Prepared"
+        CARD_CONFIRMED = "CARD_CONFIRMED", "Card confirmed"
+        READY_FOR_ISSUE = "READY_FOR_ISSUE", "Ready for issue"
+        COMPLETE = "COMPLETE", "Complete"
+
+    class PaymentStatus(models.TextChoices):
+        UNPAID = "UNPAID", "Unpaid"
+        PARTIAL = "PARTIAL", "Partial"
+        PAID = "PAID", "Paid"
+
     table = models.ForeignKey(
         "barion.Table",
         on_delete=models.PROTECT,
@@ -253,6 +265,18 @@ class Check(models.Model):
         choices=Status.choices,
         default=Status.OPEN,
         verbose_name="Status",
+    )
+    settlement_status = models.CharField(
+        max_length=20,
+        choices=SettlementStatus.choices,
+        default=SettlementStatus.NONE,
+        verbose_name="Settlement status",
+    )
+    payment_status = models.CharField(
+        max_length=10,
+        choices=PaymentStatus.choices,
+        default=PaymentStatus.UNPAID,
+        verbose_name="Payment status",
     )
     opened_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -272,14 +296,6 @@ class Check(models.Model):
     )
     opened_at = models.DateTimeField(auto_now_add=True)
     closed_at = models.DateTimeField(null=True, blank=True)
-    pos_receipt = models.OneToOneField(
-        "pos.PosReceipt",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="barion_check",
-        verbose_name="POS receipt",
-    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -301,6 +317,32 @@ class Check(models.Model):
 
     def __str__(self) -> str:
         return f"Check {self.id} - {self.table} ({self.status})"
+
+    @property
+    def pos_receipt_ids(self) -> list[int]:
+        receipt_ids: set[int] = set()
+        settlement_receipts = self.settlement_parts.exclude(confirmed_receipt_id__isnull=True).values_list(
+            "confirmed_receipt_id",
+            flat=True,
+        )
+        receipt_ids.update(int(rid) for rid in settlement_receipts if rid)
+        return sorted(receipt_ids)
+
+    @property
+    def pos_receipt_id(self) -> int | None:
+        receipt_ids = self.pos_receipt_ids
+        if not receipt_ids:
+            return None
+        return receipt_ids[-1]
+
+    @property
+    def pos_receipt(self):
+        receipt_id = self.pos_receipt_id
+        if not receipt_id:
+            return None
+        from pos.models import PosReceipt
+
+        return PosReceipt.objects.filter(id=receipt_id).first()
 
 
 class CheckItem(models.Model):
@@ -328,6 +370,8 @@ class CheckItem(models.Model):
     net_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     vat_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     total_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    paid_quantity = models.DecimalField(max_digits=12, decimal_places=4, default=Decimal("0.0000"))
+    paid_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     round_number = models.PositiveIntegerField(null=True, blank=True)
     sent_to_bar = models.BooleanField(default=False)
     sent_at = models.DateTimeField(null=True, blank=True)
@@ -360,7 +404,9 @@ class CheckItem(models.Model):
             rate = self.artikl.tax_group.rate or Decimal("0.0000")
             self.vat_rate = rate
 
-        quantity = Decimal(str(self.quantity or "0.0000"))
+        quantity = Decimal(str(self.quantity or "0.0000")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+        if quantity != quantity.quantize(Decimal("1")):
+            raise ValidationError("quantity mora biti cijeli broj komada.")
         unit_price = Decimal(str(self.unit_price or "0.0000"))
         total = (quantity * unit_price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         if rate:
@@ -372,6 +418,100 @@ class CheckItem(models.Model):
         self.total_amount = total
         self.net_amount = net
         self.vat_amount = vat
+        if self.paid_amount < Decimal("0.00"):
+            self.paid_amount = Decimal("0.00")
+        if self.paid_amount > total:
+            self.paid_amount = total
+        if unit_price > Decimal("0.0000"):
+            implied_paid_qty = (self.paid_amount / unit_price).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+        else:
+            implied_paid_qty = Decimal("0.0000")
+        max_paid_qty = max(Decimal("0.0000"), quantity)
+        self.paid_quantity = min(max(implied_paid_qty, Decimal("0.0000")), max_paid_qty)
+        super().save(*args, **kwargs)
+
+
+class SettlementPart(models.Model):
+    class Method(models.TextChoices):
+        CASH = "CASH", "Cash"
+        CARD = "CARD", "Card"
+
+    class Status(models.TextChoices):
+        PREPARED = "PREPARED", "Prepared"
+        PAID = "PAID", "Paid"
+        FAILED = "FAILED", "Failed"
+
+    barion_check = models.ForeignKey(
+        "barion.Check",
+        on_delete=models.CASCADE,
+        related_name="settlement_parts",
+        verbose_name="Check",
+        db_column="check_id",
+    )
+    method = models.CharField(max_length=10, choices=Method.choices)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    tip_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    total_charged = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    fiscal_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.PREPARED)
+    external_txn_id = models.CharField(max_length=100, blank=True, default="")
+    provider_ref = models.CharField(max_length=100, blank=True, default="")
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="barion_settlement_parts_confirmed",
+    )
+    confirmed_receipt = models.ForeignKey(
+        "pos.PosReceipt",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="barion_settlement_parts",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Settlement part"
+        verbose_name_plural = "Settlement parts"
+        ordering = ["id"]
+        indexes = [
+            models.Index(fields=["barion_check", "status"], name="idx_barion_sp_check_status"),
+            models.Index(fields=["barion_check", "method"], name="idx_barion_sp_check_method"),
+            models.Index(fields=["external_txn_id"], name="idx_barion_sp_ext_txn"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.barion_check_id} {self.method} {self.amount}"
+
+    def clean(self):
+        amount = Decimal(str(self.amount or "0.00"))
+        tip = Decimal(str(self.tip_amount or "0.00"))
+        if amount <= 0:
+            raise ValidationError("amount mora biti > 0.")
+        if tip < 0:
+            raise ValidationError("tip_amount mora biti >= 0.")
+        if self.method == self.Method.CASH and tip != Decimal("0.00"):
+            raise ValidationError("CASH settlement ne podržava tip_amount.")
+        if self.method == self.Method.CARD and tip > amount:
+            raise ValidationError("tip_amount ne može biti veći od amount.")
+
+    def save(self, *args, **kwargs):
+        amount = Decimal(str(self.amount or "0.00")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        tip = Decimal(str(self.tip_amount or "0.00")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        self.amount = amount
+        self.tip_amount = tip
+        if self.method == self.Method.CARD:
+            self.total_charged = (amount + tip).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            self.fiscal_amount = self.total_charged
+        else:
+            self.tip_amount = Decimal("0.00")
+            self.total_charged = amount
+            self.fiscal_amount = amount
+        self.full_clean()
         super().save(*args, **kwargs)
 
 
@@ -382,6 +522,7 @@ class ProductPopularitySnapshot(models.Model):
         related_name="barion_popularity_snapshot",
     )
     sold_qty_30d = models.DecimalField(max_digits=14, decimal_places=4, default=Decimal("0.0000"))
+    sold_qty_night_weekend = models.DecimalField(max_digits=14, decimal_places=4, default=Decimal("0.0000"))
     window_days = models.PositiveIntegerField(default=30)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -390,8 +531,48 @@ class ProductPopularitySnapshot(models.Model):
         verbose_name_plural = "Product popularity snapshots"
         indexes = [
             models.Index(fields=["-sold_qty_30d"], name="idx_barion_pop_qty_desc"),
+            models.Index(fields=["-sold_qty_night_weekend"], name="idx_barion_pop_night_qty_desc"),
             models.Index(fields=["updated_at"], name="idx_barion_pop_updated"),
         ]
 
     def __str__(self) -> str:
         return f"{self.artikl_id}: {self.sold_qty_30d}"
+
+
+class BarionRuntimeMode(models.Model):
+    class Mode(models.TextChoices):
+        DAY = "day", "Day"
+        NIGHT = "night", "Night"
+
+    active_mode = models.CharField(max_length=10, choices=Mode.choices, default=Mode.DAY)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="barion_runtime_mode_updates",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Runtime mode"
+        verbose_name_plural = "Runtime mode"
+
+    def save(self, *args, **kwargs):
+        # Singleton row used as runtime source-of-truth.
+        self.pk = 1
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    @classmethod
+    def get_solo(cls):
+        instance, _ = cls.objects.get_or_create(
+            pk=1,
+            defaults={
+                "active_mode": cls.Mode.DAY,
+            },
+        )
+        return instance
+
+    def __str__(self) -> str:
+        return f"Runtime mode: {self.active_mode}"

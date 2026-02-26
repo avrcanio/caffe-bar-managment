@@ -7,10 +7,22 @@ from django.db import IntegrityError, transaction
 from django.http import HttpResponseNotAllowed, JsonResponse
 from django.shortcuts import get_object_or_404
 from django.template.response import TemplateResponse
+from django.utils.html import format_html
 from django.urls import path, reverse
 from django.utils import timezone
 
-from .models import Check, CheckItem, Layout, LayoutTable, Table, TableState, UserLayoutAccess, Zone
+from .models import (
+    BarionRuntimeMode,
+    Check,
+    CheckItem,
+    Layout,
+    LayoutTable,
+    SettlementPart,
+    Table,
+    TableState,
+    UserLayoutAccess,
+    Zone,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -335,11 +347,40 @@ class TableStateAdmin(admin.ModelAdmin):
 
 @admin.register(Check)
 class CheckAdmin(admin.ModelAdmin):
-    list_display = ("id", "table", "status", "pos_receipt", "opened_by", "closed_by", "opened_at", "closed_at")
+    list_display = (
+        "id",
+        "table",
+        "status",
+        "pos_receipt",
+        "pos_receipt_ids_summary",
+        "opened_by",
+        "closed_by",
+        "opened_at",
+        "closed_at",
+    )
     list_filter = ("status",)
-    search_fields = ("=id", "table__label", "=pos_receipt__id")
-    autocomplete_fields = ("table", "opened_by", "closed_by", "pos_receipt")
+    search_fields = ("=id", "table__label", "=settlement_parts__confirmed_receipt__id")
+    autocomplete_fields = ("table", "opened_by", "closed_by")
+    readonly_fields = ("pos_receipt_ids_display",)
     ordering = ("-opened_at",)
+
+    @admin.display(description="POS receipts")
+    def pos_receipt_ids_summary(self, obj: Check):
+        ids = obj.pos_receipt_ids
+        if not ids:
+            return "-"
+        return ", ".join(str(i) for i in ids)
+
+    @admin.display(description="POS receipt IDs (multi)")
+    def pos_receipt_ids_display(self, obj: Check):
+        ids = obj.pos_receipt_ids
+        if not ids:
+            return "-"
+        links = [
+            format_html('<a href="{}">#{}</a>', reverse("admin:pos_posreceipt_change", args=[rid]), rid)
+            for rid in ids
+        ]
+        return format_html(", ".join(["{}"] * len(links)), *links)
 
 
 class CheckItemInline(admin.TabularInline):
@@ -363,7 +404,30 @@ class CheckItemInline(admin.TabularInline):
     readonly_fields = ("net_amount", "vat_amount", "total_amount", "sent_at")
 
 
-CheckAdmin.inlines = (CheckItemInline,)
+class SettlementPartInline(admin.TabularInline):
+    model = SettlementPart
+    extra = 0
+    fields = (
+        "id",
+        "method",
+        "amount",
+        "tip_amount",
+        "total_charged",
+        "fiscal_amount",
+        "status",
+        "provider_ref",
+        "external_txn_id",
+        "confirmed_receipt",
+        "confirmed_by",
+        "confirmed_at",
+        "created_at",
+        "updated_at",
+    )
+    readonly_fields = fields
+    can_delete = False
+
+
+CheckAdmin.inlines = (CheckItemInline, SettlementPartInline)
 
 
 @admin.register(CheckItem)
@@ -385,3 +449,20 @@ class CheckItemAdmin(admin.ModelAdmin):
     search_fields = ("=id", "=barion_check__id", "artikl__name", "artikl__code")
     autocomplete_fields = ("barion_check", "artikl")
     ordering = ("barion_check", "id")
+
+
+@admin.register(BarionRuntimeMode)
+class BarionRuntimeModeAdmin(admin.ModelAdmin):
+    list_display = ("active_mode", "updated_by", "updated_at")
+    fields = ("active_mode", "updated_by", "updated_at")
+    readonly_fields = ("updated_by", "updated_at")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def changelist_view(self, request, extra_context=None):
+        BarionRuntimeMode.get_solo()
+        return super().changelist_view(request, extra_context=extra_context)
