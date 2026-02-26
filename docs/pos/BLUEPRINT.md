@@ -4,6 +4,9 @@ Ovaj dokument je razvojni blueprint za POS sustav u ovom repozitoriju (Django ba
 
 ## 1) Trenutno Stanje U Repozitoriju
 
+Android implementacijska mapa (DTO + endpoint contract):
+- `docs/pos/ANDROID_ENDPOINT_MAPPING.md`
+
 Backend je Django (DRF, TokenAuth/SessionAuth, Celery, Postgres). POS domena je primarno u `app/pos/*` i djelomicno u `app/sales/*`.
 
 Postojece kljucne domenske komponente:
@@ -39,7 +42,7 @@ Minimalni POS (MVP):
 
 Izvan MVP-a (planirano):
 
-- Kartice i split payments (cash + card + voucher + tips).
+- Voucher i napredni payment mix (iznad cash/card split flow-a).
 - Stolovi, narudzbe, kuhinja/bar printeri (KOT/BOT), statusi pripreme.
 - Offline-first POS (queue + sync), conflict strategije.
 - Integracija sa skladistem (stock out) i nabavom.
@@ -143,6 +146,101 @@ Predlozena poboljsanja:
 - Dodati `receipt_external_id` (UUID iz klijenta) za offline sync i anti-dup.
 - Dodati `payment_type` prosirenje: `cash`, `card`, `mixed`, `voucher`, uz payment breakdown tablicu (buduci model).
 
+### 5.1 Barion Check Settlement Contract (Android-ready)
+
+Trenutni backend contract za split/card potvrde je u `barion` check flow-u:
+
+- `POST /api/pos/checks/{check_id}/prepare-settlement/`
+- `GET /api/pos/checks/{check_id}/settlement-state/`
+- `POST /api/pos/checks/{check_id}/settlements/parts/{part_id}/pay-cash/` (canonical)
+- `POST /api/pos/checks/{check_id}/settlements/parts/{part_id}/pay-card/confirm/` (canonical)
+- `POST /api/pos/checks/{check_id}/issue-receipt/`
+- `POST /api/pos/checks/{check_id}/pay-card/confirm/` (legacy compat endpoint)
+
+Settlement snapshot (`GET settlement-state`) je polling/sync source of truth:
+
+- `check_status`, `settlement_status`, `payment_status`
+- `parts[]` sa poljima `amount`, `tip_amount`, `total_charged`, `fiscal_amount`, `status`, `provider_ref`
+- `totals` (`check_total`, `allocated_total`, `confirmed_total`, `remaining_total`)
+- `actions` (`can_confirm_card`, `can_issue_receipt`, `can_close_check`)
+- `updated_at` za client-side diff/poll strategiju
+
+`curl` primjer (`prepare-settlement`):
+
+```bash
+curl -sS -X POST \
+  -H "Authorization: Token <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "parts": [
+      {"method":"CARD","amount":"20.00","tip_amount":"2.00"},
+      {"method":"CASH","amount":"30.00"}
+    ],
+    "ready_for_issue": false
+  }' \
+  https://mozart.sibenik1983.hr/api/pos/checks/123/prepare-settlement/
+```
+
+`curl` primjer (`settlement-state`):
+
+```bash
+curl -sS \
+  -H "Authorization: Token <TOKEN>" \
+  https://mozart.sibenik1983.hr/api/pos/checks/123/settlement-state/
+```
+
+JSON primjer (`settlement-state`):
+
+```json
+{
+  "check_id": 123,
+  "check_status": "OPEN",
+  "settlement_status": "CARD_CONFIRMED",
+  "payment_status": "PARTIAL",
+  "pos_receipt_id": null,
+  "parts": [
+    {
+      "id": 1,
+      "method": "CARD",
+      "amount": "20.00",
+      "tip_amount": "2.00",
+      "total_charged": "22.00",
+      "fiscal_amount": "22.00",
+      "status": "PAID",
+      "provider_ref": "VIVA-REF-001"
+    },
+    {
+      "id": 2,
+      "method": "CASH",
+      "amount": "30.00",
+      "tip_amount": "0.00",
+      "total_charged": "30.00",
+      "fiscal_amount": "30.00",
+      "status": "PREPARED",
+      "provider_ref": ""
+    }
+  ],
+  "totals": {
+    "check_total": "50.00",
+    "allocated_total": "50.00",
+    "confirmed_total": "20.00",
+    "remaining_total": "30.00"
+  },
+  "actions": {
+    "can_confirm_card": false,
+    "can_issue_receipt": false,
+    "can_close_check": false
+  },
+  "updated_at": "2026-02-24T14:30:00Z"
+}
+```
+
+Statusi i model:
+
+- `part.status`: `PREPARED | PAID | FAILED` (FAILED je retryable preko part-level card confirm)
+- `CARD`: `total_charged = amount + tip_amount`, `fiscal_amount = total_charged`
+- `totals.confirmed_total`: suma `part.amount` za `PAID` partove
+
 ## 6) Fiskalizacija (HR)
 
 Trenutno:
@@ -196,4 +294,3 @@ Iteracija 4 (Napredne funkcije):
 - Jedinstveni "source of truth" za promet: da li `SalesInvoice` i `PosReceipt` konvergiraju u jedan model, ili se drze odvojeno uz zajednicki reporting sloj?
 - Kako POS klijent dobiva listu artikala i POS layout: direktno iz API-ja ili iz posebnog "snapshot" endpointa?
 - Politika numeracije racuna: da li office/device dolazi iz POS konfiguracije ili requesta (trenutno je kombinacija)?
-

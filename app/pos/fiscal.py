@@ -9,10 +9,17 @@ from django.utils import timezone
 
 from configuration.models import CompanyProfile
 from pos.models import PosReceipt
+from sales.fiscal import get_fiscal_config
 
 
 def _format_amount(value: Decimal) -> str:
     return f"{value:.2f}"
+
+
+def _format_qr_amount(value: Decimal) -> str:
+    # PU QR expects amount as 10 chars without decimal separator (2 decimal places implied).
+    cents = int((Decimal(str(value)).quantize(Decimal("0.01")) * 100))
+    return str(cents).zfill(10)
 
 
 def _is_mock_enabled() -> bool:
@@ -66,33 +73,38 @@ def generate_zki(receipt: PosReceipt) -> str:
     return hashlib.md5(signature).hexdigest()
 
 
-def build_qr_payload(receipt: PosReceipt, zki: str) -> str:
-    oib = _get_oib()
+def build_qr_payload(receipt: PosReceipt, zki: str, jir: str = "") -> str:
     issued_at = timezone.localtime(receipt.issued_at)
-    issued_at_str = issued_at.strftime("%d.%m.%Y %H:%M:%S")
-    return "|".join(
-        [
-            oib,
-            issued_at_str,
-            str(receipt.receipt_number),
-            receipt.office_code,
-            receipt.device_code,
-            _format_amount(receipt.total_amount),
-            zki,
-        ]
-    )
+    datv = issued_at.strftime("%Y%m%d_%H%M")
+    izn = _format_qr_amount(receipt.total_amount)
+    key = "jir" if jir else "zki"
+    code = jir or zki
+    return f"https://porezna.gov.hr/rn?{key}={code}&datv={datv}&izn={izn}"
 
 
 def fiscalize_pos_receipt(receipt: PosReceipt) -> PosReceipt:
     oib = _get_oib()
     if not oib:
         raise ValueError("OIB nije postavljen (CompanyProfile.oib ili FISCAL_OIB).")
-    zki = generate_zki(receipt)
-    receipt.zki = zki
-    receipt.qr_payload = build_qr_payload(receipt, zki)
-    receipt.status = PosReceipt.Status.FISCALIZED if receipt.status != PosReceipt.Status.ERROR else receipt.status
-    receipt.error_message = "MOCK fiskalizacija (bez certifikata)." if _is_mock_enabled() else ""
-    receipt.save(update_fields=["zki", "qr_payload", "status", "error_message", "updated_at"])
-    if os.getenv("FISCAL_SEND_ENABLED", "false").lower() == "true":
-        raise NotImplementedError("Slanje u Poreznu (JIR) nije još implementirano.")
-    return receipt
+    try:
+        zki = generate_zki(receipt)
+        receipt.zki = zki
+        receipt.qr_payload = build_qr_payload(receipt, zki)
+        receipt.status = PosReceipt.Status.FISCALIZED
+        receipt.error_message = "MOCK fiskalizacija (bez certifikata)." if _is_mock_enabled() else ""
+        receipt.save(update_fields=["zki", "qr_payload", "status", "error_message", "updated_at"])
+
+        if os.getenv("FISCAL_SEND_ENABLED", "false").lower() == "true":
+            from pos.fiscal_send import send_pos_receipt
+
+            result = send_pos_receipt(receipt, get_fiscal_config())
+            receipt.jir = result.jir
+            receipt.qr_payload = build_qr_payload(receipt, zki, result.jir)
+            receipt.error_message = ""
+            receipt.save(update_fields=["jir", "qr_payload", "error_message", "updated_at"])
+        return receipt
+    except Exception as exc:
+        receipt.status = PosReceipt.Status.ERROR
+        receipt.error_message = str(exc)
+        receipt.save(update_fields=["status", "error_message", "updated_at"])
+        raise
