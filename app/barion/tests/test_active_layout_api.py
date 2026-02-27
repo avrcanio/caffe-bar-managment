@@ -15,6 +15,11 @@ from barion.models import (
     BarionRuntimeMode,
     Check,
     CheckItem,
+    CheckItemModifierSelection,
+    ItemModifierGroup,
+    ItemBundleOption,
+    ItemModifierGroupAssignment,
+    ItemModifierOption,
     Layout,
     LayoutTable,
     ProductPopularitySnapshot,
@@ -693,6 +698,94 @@ class PosCheckItemsApiTests(TestCase):
             is_stock_item=False,
             tax_group=self.tax_group,
         )
+        self.coffee_group = ItemModifierGroup.objects.create(
+            name="Coffee edits",
+            code="coffee-edits",
+            selection_mode=ItemModifierGroup.SelectionMode.MULTIPLE,
+            min_select=0,
+            max_select=3,
+            allow_note=True,
+            sort_order=10,
+        )
+        self.opt_natren = ItemModifierOption.objects.create(
+            group=self.coffee_group,
+            name="Natren",
+            code="natren",
+            sort_order=10,
+        )
+        self.opt_cold_milk = ItemModifierOption.objects.create(
+            group=self.coffee_group,
+            name="Hladno mlijeko",
+            code="cold-milk",
+            sort_order=20,
+        )
+        ItemModifierGroupAssignment.objects.create(
+            artikl=self.artikl_kava,
+            group=self.coffee_group,
+            is_active=True,
+            is_required=False,
+        )
+        self.artikl_boca = Artikl.objects.create(
+            name="Grey Goose Vodka 0.7l",
+            code="GG700",
+            is_sellable=True,
+            is_stock_item=False,
+            tax_group=self.tax_group,
+        )
+        self.artikl_mixer_juice = Artikl.objects.create(
+            name="Orange Juice",
+            code="MIXJ01",
+            is_sellable=True,
+            is_stock_item=False,
+            tax_group=self.tax_group,
+        )
+        self.artikl_mixer_rb = Artikl.objects.create(
+            name="Red Bull",
+            code="MIXRB01",
+            is_sellable=True,
+            is_stock_item=False,
+            tax_group=self.tax_group,
+        )
+        self.bundle_group = ItemModifierGroup.objects.create(
+            name="Bottle mixers",
+            code="bottle-mixers",
+            type=ItemModifierGroup.Type.BUNDLE,
+            selection_mode=ItemModifierGroup.SelectionMode.MULTIPLE,
+            min_select=4,
+            max_select=4,
+            allow_note=True,
+            sort_order=20,
+        )
+        self.bundle_opt_juice = ItemBundleOption.objects.create(
+            group=self.bundle_group,
+            artikl=self.artikl_mixer_juice,
+            price_delta="2.5000",
+            sort_order=10,
+        )
+        self.bundle_opt_rb = ItemBundleOption.objects.create(
+            group=self.bundle_group,
+            artikl=self.artikl_mixer_rb,
+            price_delta="5.0000",
+            sort_order=20,
+        )
+        ItemModifierGroupAssignment.objects.create(
+            artikl=self.artikl_boca,
+            group=self.bundle_group,
+            is_active=True,
+            is_required=True,
+        )
+        self.bundle_price_list = SalesPriceList.objects.create(
+            name="Bundle test cjenik",
+            is_active=True,
+            is_default=False,
+            valid_from=timezone.now() + timezone.timedelta(minutes=-2),
+        )
+        SalesPriceItem.objects.create(
+            price_list=self.bundle_price_list,
+            artikl=self.artikl_boca,
+            unit_price_gross="150.00",
+            is_active=True,
+        )
 
     def test_list_items_returns_totals(self):
         self.client.force_authenticate(user=self.user)
@@ -728,7 +821,6 @@ class PosCheckItemsApiTests(TestCase):
                 "quantity": "2.0000",
                 "unit_price": "2.5000",
                 "vat_rate": "0.2500",
-                "note": "hladno",
             },
             format="json",
             secure=True,
@@ -1235,6 +1327,132 @@ class PosCheckItemsApiTests(TestCase):
         )
         self.assertEqual(response.status_code, 409, response.content)
 
+    def test_create_item_with_modifiers_requires_quantity_one(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            f"/api/pos/checks/{self.check.id}/items/",
+            data={
+                "artikl_id": self.artikl_kava.id,
+                "quantity": "2.0000",
+                "unit_price": "2.5000",
+                "vat_rate": "0.2500",
+                "modifiers": [self.opt_natren.id],
+            },
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("quantity mora biti 1", response.json()["detail"])
+
+    def test_create_item_with_modifier_persists_selection_and_display_lines(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            f"/api/pos/checks/{self.check.id}/items/",
+            data={
+                "artikl_id": self.artikl_kava.id,
+                "quantity": "1.0000",
+                "unit_price": "2.5000",
+                "vat_rate": "0.2500",
+                "note": "bez pjene",
+                "modifiers": [self.opt_natren.id, self.opt_cold_milk.id],
+            },
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        payload = response.json()
+        self.assertEqual(len(payload["modifiers"]), 2)
+        self.assertTrue(any("Natren" in line for line in payload["display_lines"]))
+        self.assertTrue(any("Napomena: bez pjene" in line for line in payload["display_lines"]))
+        self.assertEqual(
+            CheckItemModifierSelection.objects.filter(check_item_id=payload["id"]).count(),
+            2,
+        )
+
+    def test_patch_item_modifiers_revalidates_quantity(self):
+        self.client.force_authenticate(user=self.user)
+        item = CheckItem.objects.create(
+            barion_check=self.check,
+            artikl=self.artikl_kava,
+            quantity="2.0000",
+            unit_price="3.0000",
+            vat_rate="0.2500",
+        )
+        response = self.client.patch(
+            f"/api/pos/check-items/{item.id}/",
+            data={"modifiers": [self.opt_natren.id]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("quantity mora biti 1", response.json()["detail"])
+
+    def test_patch_item_can_update_modifiers_when_quantity_is_one(self):
+        self.client.force_authenticate(user=self.user)
+        item = CheckItem.objects.create(
+            barion_check=self.check,
+            artikl=self.artikl_kava,
+            quantity="1.0000",
+            unit_price="3.0000",
+            vat_rate="0.2500",
+        )
+        response = self.client.patch(
+            f"/api/pos/check-items/{item.id}/",
+            data={"modifiers": [self.opt_natren.id]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(len(payload["modifiers"]), 1)
+        self.assertEqual(payload["modifiers"][0]["option_id"], self.opt_natren.id)
+        self.assertEqual(
+            CheckItemModifierSelection.objects.filter(check_item=item, option=self.opt_natren).count(),
+            1,
+        )
+
+    def test_create_bundle_item_applies_price_delta(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            f"/api/pos/checks/{self.check.id}/items/",
+            data={
+                "artikl_id": self.artikl_boca.id,
+                "quantity": "1.0000",
+                "unit_price": "999.0000",
+                "vat_rate": "0.2500",
+                "modifiers": [
+                    {"type": "bundle", "id": self.bundle_opt_rb.id, "quantity": 2},
+                    {"type": "bundle", "id": self.bundle_opt_juice.id, "quantity": 2},
+                ],
+            },
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        payload = response.json()
+        self.assertEqual(float(payload["unit_price"]), 165.0)
+        self.assertTrue(any(row["option_type"] == "bundle" for row in payload["modifiers"]))
+
+    def test_product_bundle_price_endpoint_returns_server_calculation(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            f"/api/pos/products/{self.artikl_boca.id}/bundle-price/",
+            data={
+                "modifiers": [
+                    {"type": "bundle", "id": self.bundle_opt_rb.id, "quantity": 2},
+                    {"type": "bundle", "id": self.bundle_opt_juice.id, "quantity": 2},
+                ]
+            },
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(float(payload["base_unit_price"]), 150.0)
+        self.assertEqual(float(payload["mixers_delta"]), 15.0)
+        self.assertEqual(float(payload["final_unit_price"]), 165.0)
+        self.assertEqual(len(payload["mixers"]), 2)
+
 
 class PosProductSearchApiTests(TestCase):
     def setUp(self):
@@ -1488,6 +1706,41 @@ class PosProductSearchApiTests(TestCase):
         payload = response.json()
         self.assertEqual(payload[0]["id"], self.cola.id)
         self.assertEqual(float(payload[0]["unit_price"]), 3.00)
+
+    def test_product_modifiers_endpoint_returns_configured_groups(self):
+        group = ItemModifierGroup.objects.create(
+            name="Coffee edits",
+            code="coffee-edits-search",
+            selection_mode=ItemModifierGroup.SelectionMode.MULTIPLE,
+            min_select=0,
+            max_select=3,
+            allow_note=True,
+            sort_order=5,
+        )
+        option = ItemModifierOption.objects.create(
+            group=group,
+            name="Natren",
+            code="natren-search",
+            sort_order=10,
+        )
+        ItemModifierGroupAssignment.objects.create(
+            artikl=self.espresso,
+            group=group,
+            is_active=True,
+            is_required=False,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(
+            f"/api/pos/products/{self.espresso.id}/modifiers/",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload["artikl_id"], self.espresso.id)
+        self.assertEqual(len(payload["modifier_groups"]), 1)
+        self.assertEqual(payload["modifier_groups"][0]["name"], "Coffee edits")
+        self.assertEqual(payload["modifier_groups"][0]["options"][0]["id"], option.id)
 
 
 class PosRuntimeModeApiTests(TestCase):
@@ -2389,11 +2642,15 @@ class PosSplitSettlementApiContractTests(TestCase):
         self.assertEqual(pay.status_code, 200, pay.content)
         self.assertEqual(pay.json()["part_status"], SettlementPart.Status.PAID)
         self.assertEqual(pay.json()["action"], "paid")
+        self.assertEqual(float(pay.json()["totals"]["remaining_total"]), 0.00)
+        self.assertEqual(pay.json()["actions"]["can_close_check"], True)
         self.assertIn("receipt_pdf_url", pay.json())
         self.assertIn("issued_receipt_id", pay.json())
         self.assertIn("pos_receipt_ids", pay.json())
         self.assertIsInstance(pay.json()["pos_receipt_ids"], list)
         self._assert_absolute_url_or_null(pay.json()["receipt_pdf_url"])
+        self.check.refresh_from_db()
+        self.assertEqual(self.check.status, Check.Status.OPEN)
 
     def test_part_pay_cash_allows_partial_and_keeps_remaining(self):
         prepare = self.client.post(

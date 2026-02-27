@@ -576,3 +576,220 @@ class BarionRuntimeMode(models.Model):
 
     def __str__(self) -> str:
         return f"Runtime mode: {self.active_mode}"
+
+
+class ItemModifierGroup(models.Model):
+    class Type(models.TextChoices):
+        SIMPLE = "simple", "Simple"
+        BUNDLE = "bundle", "Bundle"
+
+    class SelectionMode(models.TextChoices):
+        SINGLE = "single", "Single"
+        MULTIPLE = "multiple", "Multiple"
+
+    name = models.CharField(max_length=120)
+    code = models.CharField(max_length=60, unique=True)
+    is_active = models.BooleanField(default=True)
+    type = models.CharField(max_length=20, choices=Type.choices, default=Type.SIMPLE)
+    selection_mode = models.CharField(max_length=20, choices=SelectionMode.choices, default=SelectionMode.MULTIPLE)
+    min_select = models.PositiveIntegerField(default=0)
+    max_select = models.PositiveIntegerField(default=10)
+    allow_note = models.BooleanField(default=False)
+    sort_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Item modifier group"
+        verbose_name_plural = "Item modifier groups"
+        ordering = ["sort_order", "name", "id"]
+
+    def clean(self):
+        if self.selection_mode == self.SelectionMode.SINGLE:
+            self.max_select = 1
+            if self.min_select > 1:
+                raise ValidationError("Single group ne može imati min_select > 1.")
+        if self.max_select < self.min_select:
+            raise ValidationError("max_select mora biti >= min_select.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class ItemModifierOption(models.Model):
+    group = models.ForeignKey(
+        "barion.ItemModifierGroup",
+        on_delete=models.CASCADE,
+        related_name="options",
+    )
+    name = models.CharField(max_length=120)
+    code = models.CharField(max_length=60)
+    is_active = models.BooleanField(default=True)
+    sort_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Item modifier option"
+        verbose_name_plural = "Item modifier options"
+        ordering = ["group_id", "sort_order", "name", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["group", "code"], name="uniq_barion_modifier_option_group_code"),
+            models.UniqueConstraint(fields=["group", "name"], name="uniq_barion_modifier_option_group_name"),
+        ]
+
+    def clean(self):
+        if self.group_id and self.group.type != ItemModifierGroup.Type.SIMPLE:
+            raise ValidationError("ItemModifierOption je dozvoljen samo za group.type=simple.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.group.name}: {self.name}"
+
+
+class ItemBundleOption(models.Model):
+    group = models.ForeignKey(
+        "barion.ItemModifierGroup",
+        on_delete=models.CASCADE,
+        related_name="bundle_options",
+    )
+    artikl = models.ForeignKey(
+        "artikli.Artikl",
+        on_delete=models.PROTECT,
+        related_name="barion_bundle_options",
+    )
+    price_delta = models.DecimalField(max_digits=12, decimal_places=4, default=Decimal("0.0000"))
+    is_active = models.BooleanField(default=True)
+    sort_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Item bundle option"
+        verbose_name_plural = "Item bundle options"
+        ordering = ["group_id", "sort_order", "artikl__name", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["group", "artikl"], name="uniq_barion_bundle_option_group_artikl"),
+        ]
+
+    def clean(self):
+        if self.group_id and self.group.type != ItemModifierGroup.Type.BUNDLE:
+            raise ValidationError("ItemBundleOption je dozvoljen samo za group.type=bundle.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.group.name}: {self.artikl.name}"
+
+
+class ItemModifierGroupAssignment(models.Model):
+    artikl = models.ForeignKey(
+        "artikli.Artikl",
+        on_delete=models.CASCADE,
+        related_name="barion_modifier_group_assignments",
+    )
+    group = models.ForeignKey(
+        "barion.ItemModifierGroup",
+        on_delete=models.CASCADE,
+        related_name="artikl_assignments",
+    )
+    is_active = models.BooleanField(default=True)
+    is_required = models.BooleanField(default=False)
+    min_select_override = models.PositiveIntegerField(null=True, blank=True)
+    max_select_override = models.PositiveIntegerField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Item modifier group assignment"
+        verbose_name_plural = "Item modifier group assignments"
+        ordering = ["artikl_id", "group_id"]
+        constraints = [
+            models.UniqueConstraint(fields=["artikl", "group"], name="uniq_barion_modifier_assignment_artikl_group"),
+        ]
+
+    def clean(self):
+        min_select = self.min_select_override if self.min_select_override is not None else self.group.min_select
+        max_select = self.max_select_override if self.max_select_override is not None else self.group.max_select
+        if max_select < min_select:
+            raise ValidationError("max_select_override mora biti >= min_select_override.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.artikl_id} -> {self.group.code}"
+
+
+class CheckItemModifierSelection(models.Model):
+    check_item = models.ForeignKey(
+        "barion.CheckItem",
+        on_delete=models.CASCADE,
+        related_name="modifier_selections",
+    )
+    group = models.ForeignKey(
+        "barion.ItemModifierGroup",
+        on_delete=models.PROTECT,
+        related_name="check_item_selections",
+    )
+    option = models.ForeignKey(
+        "barion.ItemModifierOption",
+        on_delete=models.PROTECT,
+        related_name="check_item_selections",
+        null=True,
+        blank=True,
+    )
+    bundle_option = models.ForeignKey(
+        "barion.ItemBundleOption",
+        on_delete=models.PROTECT,
+        related_name="check_item_selections",
+        null=True,
+        blank=True,
+    )
+    quantity = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Check item modifier selection"
+        verbose_name_plural = "Check item modifier selections"
+        ordering = ["check_item_id", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["check_item", "option"],
+                condition=Q(option__isnull=False),
+                name="uniq_barion_check_item_modifier_option",
+            ),
+            models.UniqueConstraint(
+                fields=["check_item", "bundle_option"],
+                condition=Q(bundle_option__isnull=False),
+                name="uniq_barion_check_item_bundle_option",
+            ),
+            models.CheckConstraint(
+                check=(
+                    (Q(option__isnull=False) & Q(bundle_option__isnull=True))
+                    | (Q(option__isnull=True) & Q(bundle_option__isnull=False))
+                ),
+                name="chk_barion_check_item_one_option_source",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        if self.option_id:
+            return f"{self.check_item_id}: {self.option.name}"
+        if self.bundle_option_id:
+            return f"{self.check_item_id}: {self.bundle_option.artikl.name} x{self.quantity}"
+        return f"{self.check_item_id}: -"
+
+    def clean(self):
+        if self.option_id and self.quantity != 1:
+            raise ValidationError("Simple modifier selection quantity mora biti 1.")

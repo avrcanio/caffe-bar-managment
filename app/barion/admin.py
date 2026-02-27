@@ -13,8 +13,13 @@ from django.utils import timezone
 
 from .models import (
     BarionRuntimeMode,
+    CheckItemModifierSelection,
     Check,
     CheckItem,
+    ItemBundleOption,
+    ItemModifierGroup,
+    ItemModifierGroupAssignment,
+    ItemModifierOption,
     Layout,
     LayoutTable,
     SettlementPart,
@@ -466,3 +471,76 @@ class BarionRuntimeModeAdmin(admin.ModelAdmin):
     def changelist_view(self, request, extra_context=None):
         BarionRuntimeMode.get_solo()
         return super().changelist_view(request, extra_context=extra_context)
+
+
+class ItemModifierOptionInline(admin.TabularInline):
+    model = ItemModifierOption
+    extra = 0
+    fields = ("name", "code", "is_active", "sort_order")
+    ordering = ("sort_order", "name")
+
+
+class ItemBundleOptionInline(admin.TabularInline):
+    model = ItemBundleOption
+    extra = 0
+    fields = ("artikl", "price_delta", "is_active", "sort_order")
+    autocomplete_fields = ("artikl",)
+    ordering = ("sort_order", "artikl__name")
+
+
+@admin.register(ItemModifierGroup)
+class ItemModifierGroupAdmin(admin.ModelAdmin):
+    list_display = ("name", "code", "type", "selection_mode", "min_select", "max_select", "allow_note", "is_active")
+    list_filter = ("is_active", "type", "selection_mode", "allow_note")
+    search_fields = ("name", "code")
+    ordering = ("sort_order", "name")
+
+    def get_inlines(self, request, obj):
+        if obj is None:
+            return [ItemModifierOptionInline, ItemBundleOptionInline]
+        if obj.type == ItemModifierGroup.Type.BUNDLE:
+            return [ItemBundleOptionInline]
+        return [ItemModifierOptionInline]
+
+
+@admin.register(ItemModifierOption)
+class ItemModifierOptionAdmin(admin.ModelAdmin):
+    list_display = ("name", "code", "group", "is_active", "sort_order")
+    list_filter = ("is_active", "group")
+    search_fields = ("name", "code", "group__name", "group__code")
+    autocomplete_fields = ("group",)
+    ordering = ("group__name", "sort_order", "name")
+
+
+@admin.register(ItemBundleOption)
+class ItemBundleOptionAdmin(admin.ModelAdmin):
+    list_display = ("artikl", "group", "price_delta", "is_active", "sort_order")
+    list_filter = ("is_active", "group")
+    search_fields = ("artikl__name", "artikl__code", "group__name", "group__code")
+    autocomplete_fields = ("artikl", "group")
+    ordering = ("group__name", "sort_order", "artikl__name")
+
+
+@admin.register(ItemModifierGroupAssignment)
+class ItemModifierGroupAssignmentAdmin(admin.ModelAdmin):
+    list_display = ("artikl", "group", "is_active", "is_required", "min_select_override", "max_select_override")
+    list_filter = ("is_active", "is_required", "group__type")
+    search_fields = ("artikl__name", "artikl__code", "group__name", "group__code")
+    autocomplete_fields = ("artikl", "group")
+    ordering = ("artikl__name", "group__name")
+
+
+@admin.register(CheckItemModifierSelection)
+class CheckItemModifierSelectionAdmin(admin.ModelAdmin):
+    list_display = ("check_item", "group", "option", "bundle_option", "created_at")
+    list_filter = ("group",)
+    search_fields = (
+        "check_item__id",
+        "option__name",
+        "option__code",
+        "bundle_option__artikl__name",
+        "bundle_option__artikl__code",
+        "group__name",
+    )
+    autocomplete_fields = ("check_item", "group", "option")
+    ordering = ("check_item", "id")

@@ -23,12 +23,16 @@ from pos.fiscal import fiscalize_pos_receipt
 from pos.models import Pos, PosDevice
 from pos.security import is_recent_pin_verified, pin_verify_ttl_seconds
 from pos.services import create_pos_receipt
-from sales.models import ShiftCashHandover, ShiftTurnover
+from sales.models import SalesPriceItem, ShiftCashHandover, ShiftTurnover
 
 from .models import (
     BarionRuntimeMode,
+    CheckItemModifierSelection,
     Check,
     CheckItem,
+    ItemBundleOption,
+    ItemModifierGroupAssignment,
+    ItemModifierOption,
     Layout,
     LayoutTable,
     SettlementPart,
@@ -157,6 +161,8 @@ class CheckItemSerializer(serializers.Serializer):
         help_text="Vrijeme slanja stavke na šank; null dok nije poslana.",
     )
     note = serializers.CharField()
+    modifiers = serializers.ListField(child=serializers.JSONField(), required=False)
+    display_lines = serializers.ListField(child=serializers.CharField(), required=False)
 
 
 class CheckItemsTotalsSerializer(serializers.Serializer):
@@ -192,6 +198,7 @@ class CreateCheckItemRequestSerializer(serializers.Serializer):
         max_value=Decimal("0.9999"),
     )
     note = serializers.CharField(required=False, allow_blank=True, default="")
+    modifiers = serializers.ListField(child=serializers.JSONField(), required=False, default=list)
 
     def validate_quantity(self, value):
         return _ensure_whole_piece_quantity(value)
@@ -219,6 +226,7 @@ class UpdateCheckItemRequestSerializer(serializers.Serializer):
         max_value=Decimal("0.9999"),
     )
     note = serializers.CharField(required=False, allow_blank=True)
+    modifiers = serializers.ListField(child=serializers.JSONField(), required=False)
 
     def validate_quantity(self, value):
         return _ensure_whole_piece_quantity(value)
@@ -268,6 +276,47 @@ class PosDrinkCategoryDisplayResponseSerializer(serializers.Serializer):
     root_id = serializers.IntegerField()
     display_level = serializers.IntegerField()
     categories = PosDrinkCategoryDisplayItemSerializer(many=True)
+
+
+class ProductModifierOptionSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    option_type = serializers.ChoiceField(choices=["simple", "bundle"])
+    name = serializers.CharField()
+    code = serializers.CharField()
+    sort_order = serializers.IntegerField()
+    artikl_id = serializers.IntegerField(allow_null=True, required=False)
+    artikl_name = serializers.CharField(allow_null=True, required=False)
+    price_delta = serializers.DecimalField(max_digits=12, decimal_places=4, required=False)
+
+
+class ProductModifierGroupSerializer(serializers.Serializer):
+    id = serializers.IntegerField()
+    name = serializers.CharField()
+    code = serializers.CharField()
+    type = serializers.CharField()
+    selection_mode = serializers.CharField()
+    min_select = serializers.IntegerField()
+    max_select = serializers.IntegerField()
+    is_required = serializers.BooleanField()
+    allow_note = serializers.BooleanField()
+    options = ProductModifierOptionSerializer(many=True)
+
+
+class ProductModifiersResponseSerializer(serializers.Serializer):
+    artikl_id = serializers.IntegerField()
+    modifier_groups = ProductModifierGroupSerializer(many=True)
+
+
+class ProductBundlePriceRequestSerializer(serializers.Serializer):
+    modifiers = serializers.ListField(child=serializers.JSONField(), required=False, default=list)
+
+
+class ProductBundlePriceResponseSerializer(serializers.Serializer):
+    artikl_id = serializers.IntegerField()
+    base_unit_price = serializers.DecimalField(max_digits=12, decimal_places=4)
+    mixers_delta = serializers.DecimalField(max_digits=12, decimal_places=4)
+    final_unit_price = serializers.DecimalField(max_digits=12, decimal_places=4)
+    mixers = serializers.ListField(child=serializers.JSONField(), required=False)
 
 
 class IssueCheckReceiptRequestSerializer(serializers.Serializer):
@@ -465,6 +514,282 @@ def _resolve_effective_mode(*, requested_mode: str | None) -> tuple[str, BarionR
     runtime_mode = BarionRuntimeMode.get_solo()
     effective_mode = runtime_mode.active_mode or BarionRuntimeMode.Mode.DAY
     return effective_mode, runtime_mode
+
+
+def _active_modifier_assignments_for_artikl(artikl_id: int):
+    return (
+        ItemModifierGroupAssignment.objects.select_related("group")
+        .prefetch_related("group__options", "group__bundle_options__artikl")
+        .filter(
+            artikl_id=artikl_id,
+            is_active=True,
+            group__is_active=True,
+        )
+        .order_by("group__sort_order", "group__name", "id")
+    )
+
+
+def _resolve_group_min_max(assignment: ItemModifierGroupAssignment) -> tuple[int, int]:
+    group = assignment.group
+    min_select = assignment.min_select_override if assignment.min_select_override is not None else group.min_select
+    max_select = assignment.max_select_override if assignment.max_select_override is not None else group.max_select
+    if group.selection_mode == group.SelectionMode.SINGLE:
+        max_select = 1
+    return int(min_select), int(max_select)
+
+
+def _normalize_modifier_ids(raw_modifier_ids) -> list[tuple[str, int, int]]:
+    if raw_modifier_ids is None:
+        return []
+    normalized: list[tuple[str, int, int]] = []
+    simple_seen = set()
+    bundle_qty: dict[int, int] = {}
+    for raw in raw_modifier_ids:
+        if isinstance(raw, dict):
+            option_type = str(raw.get("type") or "simple").strip().lower()
+            raw_id = raw.get("id")
+            raw_qty = raw.get("quantity", 1)
+        else:
+            option_type = "simple"
+            raw_id = raw
+            raw_qty = 1
+        if option_type not in {"simple", "bundle"}:
+            raise serializers.ValidationError("Modifier type mora biti simple ili bundle.")
+        try:
+            option_id = int(raw_id)
+        except (TypeError, ValueError):
+            raise serializers.ValidationError("Modifier id mora biti broj.")
+        if option_id <= 0:
+            raise serializers.ValidationError("Modifier id mora biti >= 1.")
+        try:
+            quantity = int(raw_qty)
+        except (TypeError, ValueError):
+            raise serializers.ValidationError("Modifier quantity mora biti broj.")
+        if quantity <= 0:
+            raise serializers.ValidationError("Modifier quantity mora biti >= 1.")
+        if option_type == "simple":
+            key = ("simple", option_id, 1)
+            if option_id in simple_seen:
+                continue
+            normalized.append(key)
+            simple_seen.add(option_id)
+        else:
+            bundle_qty[option_id] = bundle_qty.get(option_id, 0) + quantity
+    for option_id, quantity in bundle_qty.items():
+        normalized.append(("bundle", option_id, quantity))
+    return normalized
+
+
+def _validate_modifier_ids_for_artikl(*, artikl_id: int, modifier_ids: list[tuple[str, int, int]]) -> dict:
+    assignments = list(_active_modifier_assignments_for_artikl(artikl_id))
+    allowed_option_to_assignment: dict[tuple[str, int], ItemModifierGroupAssignment] = {}
+    group_selected_count: dict[int, int] = {}
+
+    for assignment in assignments:
+        for option in assignment.group.options.all():
+            if not option.is_active:
+                continue
+            allowed_option_to_assignment[("simple", option.id)] = assignment
+        for bundle_option in assignment.group.bundle_options.all():
+            if not bundle_option.is_active:
+                continue
+            allowed_option_to_assignment[("bundle", bundle_option.id)] = assignment
+
+    for option_type, option_id, quantity in modifier_ids:
+        assignment = allowed_option_to_assignment.get((option_type, option_id))
+        if not assignment:
+            raise serializers.ValidationError(f"Modifier option {option_type}:{option_id} nije dozvoljen za ovaj artikl.")
+        group_selected_count[assignment.group_id] = group_selected_count.get(assignment.group_id, 0) + int(quantity)
+
+    for assignment in assignments:
+        min_select, max_select = _resolve_group_min_max(assignment)
+        selected = group_selected_count.get(assignment.group_id, 0)
+        if assignment.is_required and selected == 0:
+            raise serializers.ValidationError(f"Grupa '{assignment.group.name}' je obavezna.")
+        if selected < min_select:
+            raise serializers.ValidationError(
+                f"Grupa '{assignment.group.name}' zahtijeva barem {min_select} odabira."
+            )
+        if selected > max_select:
+            raise serializers.ValidationError(
+                f"Grupa '{assignment.group.name}' dopušta najviše {max_select} odabira."
+            )
+
+    return allowed_option_to_assignment
+
+
+def _enforce_qty_customization_rule(*, quantity: Decimal, note: str, modifier_ids: list[tuple[str, int, int]]):
+    qty = Decimal(str(quantity)).quantize(Decimal("0.0001"))
+    has_customization = bool((note or "").strip()) or bool(modifier_ids)
+    if has_customization and qty != Decimal("1.0000"):
+        raise serializers.ValidationError("Ako stavka ima opciju ili napomenu, quantity mora biti 1.")
+
+
+def _set_check_item_modifiers(
+    *,
+    check_item: CheckItem,
+    modifier_ids: list[tuple[str, int, int]],
+    allowed_option_to_assignment: dict[tuple[str, int], ItemModifierGroupAssignment],
+):
+    CheckItemModifierSelection.objects.filter(check_item=check_item).delete()
+    if not modifier_ids:
+        return
+    rows = []
+    for option_type, option_id, quantity in modifier_ids:
+        assignment = allowed_option_to_assignment[(option_type, option_id)]
+        rows.append(
+            CheckItemModifierSelection(
+                check_item=check_item,
+                group_id=assignment.group_id,
+                option_id=option_id if option_type == "simple" else None,
+                bundle_option_id=option_id if option_type == "bundle" else None,
+                quantity=int(quantity),
+            )
+        )
+    CheckItemModifierSelection.objects.bulk_create(rows)
+
+
+def _serialize_check_item_modifiers(item: CheckItem) -> list[dict]:
+    selections = (
+        item.modifier_selections.select_related("group", "option", "bundle_option__artikl")
+        .all()
+        .order_by("group__sort_order", "group__name", "id")
+    )
+    rows = []
+    for sel in selections:
+        if sel.option_id:
+            rows.append(
+                {
+                    "group_id": sel.group_id,
+                    "group_name": sel.group.name,
+                    "group_code": sel.group.code,
+                    "option_type": "simple",
+                    "option_id": sel.option_id,
+                    "option_name": sel.option.name,
+                    "option_code": sel.option.code,
+                    "quantity": 1,
+                    "artikl_id": None,
+                    "artikl_name": None,
+                    "price_delta": "0.0000",
+                }
+            )
+            continue
+        rows.append(
+            {
+                "group_id": sel.group_id,
+                "group_name": sel.group.name,
+                "group_code": sel.group.code,
+                "option_type": "bundle",
+                "option_id": sel.bundle_option_id,
+                "option_name": sel.bundle_option.artikl.name,
+                "option_code": sel.bundle_option.artikl.code or str(sel.bundle_option.artikl_id),
+                "quantity": int(sel.quantity),
+                "artikl_id": sel.bundle_option.artikl_id,
+                "artikl_name": sel.bundle_option.artikl.name,
+                "price_delta": str((Decimal(str(sel.bundle_option.price_delta)) * Decimal(str(sel.quantity))).quantize(Decimal("0.0000"))),
+            }
+        )
+    return rows
+
+
+def _bundle_options_total_delta(modifier_ids: list[tuple[str, int, int]]) -> Decimal:
+    bundle_ids = [option_id for option_type, option_id, _qty in modifier_ids if option_type == "bundle"]
+    if not bundle_ids:
+        return Decimal("0.0000")
+    option_map = {
+        row.id: Decimal(str(row.price_delta)).quantize(Decimal("0.0001"))
+        for row in ItemBundleOption.objects.filter(id__in=bundle_ids, is_active=True)
+    }
+    total = Decimal("0.0000")
+    for option_type, option_id, qty in modifier_ids:
+        if option_type != "bundle":
+            continue
+        total += option_map.get(option_id, Decimal("0.0000")) * Decimal(str(qty))
+    return total.quantize(Decimal("0.0001"))
+
+
+def _build_check_item_display_lines(item: CheckItem) -> list[str]:
+    lines = []
+    for row in _serialize_check_item_modifiers(item):
+        qty = int(row.get("quantity") or 1)
+        if qty > 1:
+            lines.append(f"• {row['option_name']} x{qty}")
+        else:
+            lines.append(f"• {row['option_name']}")
+    note = (item.note or "").strip()
+    if note:
+        lines.append(f"• Napomena: {note}")
+    return lines
+
+
+def _active_sales_unit_price_for_artikl(artikl_id: int) -> Decimal | None:
+    now = timezone.now()
+    unit_price = (
+        SalesPriceItem.objects.filter(
+            artikl_id=artikl_id,
+            is_active=True,
+            price_list__is_active=True,
+            price_list__valid_from__lte=now,
+        )
+        .filter(Q(price_list__valid_to__isnull=True) | Q(price_list__valid_to__gte=now))
+        .order_by("-price_list__valid_from", "-price_list__created_at", "-id")
+        .values_list("unit_price_gross", flat=True)
+        .first()
+    )
+    if unit_price is None:
+        return None
+    return Decimal(str(unit_price)).quantize(Decimal("0.0001"))
+
+
+def _has_bundle_modifiers(modifier_ids: list[tuple[str, int, int]]) -> bool:
+    return any(option_type == "bundle" for option_type, _option_id, _qty in modifier_ids)
+
+
+def _resolve_effective_unit_price_for_item(
+    *,
+    artikl_id: int,
+    requested_unit_price: Decimal | None,
+    current_unit_price: Decimal | None,
+    modifier_ids: list[tuple[str, int, int]],
+) -> Decimal:
+    if _has_bundle_modifiers(modifier_ids):
+        base_unit_price = _active_sales_unit_price_for_artikl(artikl_id)
+        if base_unit_price is None:
+            raise serializers.ValidationError("Za bundle artikl nema aktivne prodajne cijene.")
+        return (base_unit_price + _bundle_options_total_delta(modifier_ids)).quantize(Decimal("0.0001"))
+    if requested_unit_price is not None:
+        return Decimal(str(requested_unit_price)).quantize(Decimal("0.0001"))
+    if current_unit_price is not None:
+        return Decimal(str(current_unit_price)).quantize(Decimal("0.0001"))
+    raise serializers.ValidationError("unit_price je obavezan kada nema bundle modifera.")
+
+
+def _serialize_bundle_breakdown(modifier_ids: list[tuple[str, int, int]]) -> list[dict]:
+    bundle_map: dict[int, int] = {}
+    for option_type, option_id, qty in modifier_ids:
+        if option_type != "bundle":
+            continue
+        bundle_map[option_id] = bundle_map.get(option_id, 0) + int(qty)
+    if not bundle_map:
+        return []
+    options = ItemBundleOption.objects.select_related("artikl").filter(id__in=list(bundle_map.keys()), is_active=True)
+    rows: list[dict] = []
+    for option in options:
+        qty = bundle_map.get(option.id, 0)
+        unit_delta = Decimal(str(option.price_delta)).quantize(Decimal("0.0000"))
+        total_delta = (unit_delta * Decimal(str(qty))).quantize(Decimal("0.0000"))
+        rows.append(
+            {
+                "bundle_option_id": option.id,
+                "artikl_id": option.artikl_id,
+                "artikl_name": option.artikl.name,
+                "quantity": qty,
+                "price_delta_unit": str(unit_delta),
+                "price_delta_total": str(total_delta),
+            }
+        )
+    rows.sort(key=lambda row: (str(row["artikl_name"]).lower(), int(row["bundle_option_id"])))
+    return rows
 
 
 def _allowed_layout_assignments_qs(user):
@@ -2187,11 +2512,12 @@ class PosSettlementPartPayCashView(APIView):
             issued_receipt_id = issued_receipt.id if issued_receipt else check.pos_receipt_id
             receipt_pdf_url = _build_receipt_pdf_url(request, issued_receipt_id)
 
+            # Do not auto-close on full CASH payment.
+            # Closing is explicit via POST /api/pos/checks/{check_id}/close/ (Free button).
             if Decimal(str(snapshot["totals"]["remaining_total"])) <= Decimal("0.00"):
                 check.settlement_status = Check.SettlementStatus.COMPLETE
                 check.payment_status = Check.PaymentStatus.PAID
                 check.save(update_fields=["settlement_status", "payment_status", "updated_at"])
-                _close_check_and_release_table(check=check, user=request.user)
                 receipt_pdf_url = _build_receipt_pdf_url(request, issued_receipt_id)
                 snapshot = _build_settlement_snapshot(check)
 
@@ -2800,6 +3126,7 @@ class PosCheckItemsView(APIView):
 
     @staticmethod
     def _serialize_item(item: CheckItem) -> dict:
+        modifiers = _serialize_check_item_modifiers(item)
         return {
             "id": item.id,
             "check_id": item.barion_check_id,
@@ -2816,6 +3143,8 @@ class PosCheckItemsView(APIView):
             "line_type": item.line_type,
             "sent_at": item.sent_at.isoformat() if item.sent_at else None,
             "note": item.note,
+            "modifiers": modifiers,
+            "display_lines": _build_check_item_display_lines(item),
         }
 
     @staticmethod
@@ -2864,7 +3193,15 @@ class PosCheckItemsView(APIView):
         if not check:
             return Response({"detail": "Check ne postoji."}, status=status.HTTP_404_NOT_FOUND)
 
-        items = list(check.items.select_related("artikl").order_by("id"))
+        items = list(
+            check.items.select_related("artikl")
+            .prefetch_related(
+                "modifier_selections__group",
+                "modifier_selections__option",
+                "modifier_selections__bundle_option__artikl",
+            )
+            .order_by("id")
+        )
         return Response(
             {
                 "check_id": check.id,
@@ -2903,14 +3240,42 @@ class PosCheckItemsView(APIView):
             artikl = Artikl.objects.filter(id=artikl_id).first()
             if not artikl:
                 return Response({"detail": "Artikl ne postoji."}, status=status.HTTP_404_NOT_FOUND)
+            modifier_ids = _normalize_modifier_ids(data.get("modifiers"))
+            note = data.get("note", "")
+            try:
+                _enforce_qty_customization_rule(
+                    quantity=data["quantity"],
+                    note=note,
+                    modifier_ids=modifier_ids,
+                )
+                allowed_option_to_assignment = _validate_modifier_ids_for_artikl(
+                    artikl_id=artikl_id,
+                    modifier_ids=modifier_ids,
+                )
+            except serializers.ValidationError as exc:
+                return Response({"detail": str(exc.detail)}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                effective_unit_price = _resolve_effective_unit_price_for_item(
+                    artikl_id=artikl_id,
+                    requested_unit_price=data.get("unit_price"),
+                    current_unit_price=None,
+                    modifier_ids=modifier_ids,
+                )
+            except serializers.ValidationError as exc:
+                return Response({"detail": str(exc.detail)}, status=status.HTTP_400_BAD_REQUEST)
 
             check_item = CheckItem.objects.create(
                 barion_check=check,
                 artikl=artikl,
                 quantity=data["quantity"],
-                unit_price=data["unit_price"],
+                unit_price=effective_unit_price,
                 vat_rate=data.get("vat_rate", Decimal("0.0000")),
-                note=data.get("note", ""),
+                note=note,
+            )
+            _set_check_item_modifiers(
+                check_item=check_item,
+                modifier_ids=modifier_ids,
+                allowed_option_to_assignment=allowed_option_to_assignment,
             )
             _sync_settlement_after_items_changed(check=check, user=request.user)
 
@@ -2937,6 +3302,7 @@ class PosCheckItemDetailView(APIView):
 
     @staticmethod
     def _serialize_item(item: CheckItem) -> dict:
+        modifiers = _serialize_check_item_modifiers(item)
         return {
             "id": item.id,
             "check_id": item.barion_check_id,
@@ -2953,6 +3319,8 @@ class PosCheckItemDetailView(APIView):
             "line_type": item.line_type,
             "sent_at": item.sent_at.isoformat() if item.sent_at else None,
             "note": item.note,
+            "modifiers": modifiers,
+            "display_lines": _build_check_item_display_lines(item),
         }
 
     @extend_schema(
@@ -2994,11 +3362,52 @@ class PosCheckItemDetailView(APIView):
                 if not artikl:
                     return Response({"detail": "Artikl ne postoji."}, status=status.HTTP_404_NOT_FOUND)
                 item.artikl = artikl
+            target_artikl_id = data.get("artikl_id", item.artikl_id)
+            target_quantity = data.get("quantity", item.quantity)
+            target_note = data.get("note", item.note)
+            if "modifiers" in data:
+                target_modifier_ids = _normalize_modifier_ids(data.get("modifiers"))
+            else:
+                target_modifier_ids = []
+                for selection in item.modifier_selections.all():
+                    if selection.option_id:
+                        target_modifier_ids.append(("simple", selection.option_id, 1))
+                    elif selection.bundle_option_id:
+                        target_modifier_ids.append(("bundle", selection.bundle_option_id, int(selection.quantity)))
+            try:
+                _enforce_qty_customization_rule(
+                    quantity=target_quantity,
+                    note=target_note,
+                    modifier_ids=target_modifier_ids,
+                )
+                allowed_option_to_assignment = _validate_modifier_ids_for_artikl(
+                    artikl_id=target_artikl_id,
+                    modifier_ids=target_modifier_ids,
+                )
+            except serializers.ValidationError as exc:
+                return Response({"detail": str(exc.detail)}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                effective_unit_price = _resolve_effective_unit_price_for_item(
+                    artikl_id=target_artikl_id,
+                    requested_unit_price=data.get("unit_price"),
+                    current_unit_price=item.unit_price,
+                    modifier_ids=target_modifier_ids,
+                )
+            except serializers.ValidationError as exc:
+                return Response({"detail": str(exc.detail)}, status=status.HTTP_400_BAD_REQUEST)
 
             for field in ("quantity", "unit_price", "vat_rate", "note"):
                 if field in data:
                     setattr(item, field, data[field])
+            if "unit_price" in data or "modifiers" in data or "artikl_id" in data:
+                item.unit_price = effective_unit_price
             item.save()
+            if "modifiers" in data or "artikl_id" in data:
+                _set_check_item_modifiers(
+                    check_item=item,
+                    modifier_ids=target_modifier_ids,
+                    allowed_option_to_assignment=allowed_option_to_assignment,
+                )
             _sync_settlement_after_items_changed(check=item.barion_check, user=request.user)
 
         return Response(self._serialize_item(item))
@@ -3610,6 +4019,131 @@ class PosProductSearchView(APIView):
                 }
             )
         return Response(rows)
+
+
+class PosProductModifiersView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        description="Returns active modifier groups/options configured for given product.",
+        responses={
+            200: ProductModifiersResponseSerializer,
+            404: ErrorSerializer,
+        },
+    )
+    def get(self, request, artikl_id: int):
+        artikl = Artikl.objects.filter(id=artikl_id).first()
+        if not artikl:
+            return Response({"detail": "Artikl ne postoji."}, status=status.HTTP_404_NOT_FOUND)
+
+        assignments = list(_active_modifier_assignments_for_artikl(artikl_id))
+        modifier_groups: list[dict] = []
+        for assignment in assignments:
+            group = assignment.group
+            options = []
+            for option in group.options.all():
+                if not option.is_active:
+                    continue
+                options.append(
+                    {
+                        "id": option.id,
+                        "option_type": "simple",
+                        "name": option.name,
+                        "code": option.code,
+                        "sort_order": option.sort_order,
+                        "artikl_id": None,
+                        "artikl_name": None,
+                        "price_delta": Decimal("0.0000"),
+                    }
+                )
+            for option in group.bundle_options.all():
+                if not option.is_active:
+                    continue
+                options.append(
+                    {
+                        "id": option.id,
+                        "option_type": "bundle",
+                        "name": option.artikl.name,
+                        "code": option.artikl.code or str(option.artikl_id),
+                        "sort_order": option.sort_order,
+                        "artikl_id": option.artikl_id,
+                        "artikl_name": option.artikl.name,
+                        "price_delta": option.price_delta,
+                    }
+                )
+            options.sort(key=lambda row: (int(row["sort_order"]), str(row["name"]).lower(), int(row["id"])))
+            min_select, max_select = _resolve_group_min_max(assignment)
+            modifier_groups.append(
+                {
+                    "id": group.id,
+                    "name": group.name,
+                    "code": group.code,
+                    "type": group.type,
+                    "selection_mode": group.selection_mode,
+                    "min_select": min_select,
+                    "max_select": max_select,
+                    "is_required": assignment.is_required,
+                    "allow_note": group.allow_note,
+                    "options": options,
+                }
+            )
+
+        return Response(
+            {
+                "artikl_id": artikl.id,
+                "modifier_groups": modifier_groups,
+            }
+        )
+
+
+class PosProductBundlePriceView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        description="Calculates effective bundle unit price from server base sales price + selected mixers.",
+        request=ProductBundlePriceRequestSerializer,
+        responses={
+            200: ProductBundlePriceResponseSerializer,
+            400: ErrorSerializer,
+            404: ErrorSerializer,
+        },
+    )
+    def post(self, request, artikl_id: int):
+        artikl = Artikl.objects.filter(id=artikl_id).first()
+        if not artikl:
+            return Response({"detail": "Artikl ne postoji."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = ProductBundlePriceRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        modifier_ids = _normalize_modifier_ids(serializer.validated_data.get("modifiers"))
+        try:
+            _validate_modifier_ids_for_artikl(artikl_id=artikl_id, modifier_ids=modifier_ids)
+        except serializers.ValidationError as exc:
+            return Response({"detail": str(exc.detail)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if any(option_type != "bundle" for option_type, _option_id, _qty in modifier_ids):
+            return Response(
+                {"detail": "Bundle price endpoint podržava samo modifiers type=bundle."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        base_unit_price = _active_sales_unit_price_for_artikl(artikl_id)
+        if base_unit_price is None:
+            return Response(
+                {"detail": "Za bundle artikl nema aktivne prodajne cijene."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        mixers_delta = _bundle_options_total_delta(modifier_ids)
+        final_unit_price = (base_unit_price + mixers_delta).quantize(Decimal("0.0001"))
+        return Response(
+            {
+                "artikl_id": artikl_id,
+                "base_unit_price": base_unit_price,
+                "mixers_delta": mixers_delta,
+                "final_unit_price": final_unit_price,
+                "mixers": _serialize_bundle_breakdown(modifier_ids),
+            }
+        )
 
 
 class PosDrinkCategoriesDisplayView(APIView):
