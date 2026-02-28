@@ -38,6 +38,45 @@ services:
     container_name: mozzart-redis
     networks:
       - hetzner_net
+  print_bridge:
+    build: ./printbridge
+    container_name: mozzart-print-bridge
+    env_file:
+      - .env
+    expose:
+      - "8090"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+    networks:
+      - hetzner_net
+  tailscale-print-bridge:
+    image: tailscale/tailscale:latest
+    container_name: tailscale-print-bridge
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY_PRINT_BRIDGE}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      TS_EXTRA_ARGS: >-
+        --login-server=https://hs-control.qubitsecured.online
+        --hostname=tailscale-print-bridge
+    volumes:
+      - tailscale_print_bridge_state:/var/lib/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    depends_on:
+      - print_bridge
+    restart: unless-stopped
+    network_mode: service:print_bridge
   web:
     build: .
     container_name: mozzart
@@ -54,6 +93,7 @@ services:
       DATABASE_URL: postgresql://postgis:postgis@postgis:5432/mozzart_db
     depends_on:
       - redis
+      - print_bridge
     ports:
       - "8003:8000"
     networks:
@@ -140,4 +180,5 @@ volumes:
   postgis_postgis_data16:
     external: true
   tailscale_postgis_state:
+  tailscale_print_bridge_state:
   webterm_home:

@@ -49,8 +49,8 @@ Response (200):
   "settlement_status": "PREPARED",
   "payment_status": "UNPAID",
   "parts": [
-    { "id": 1, "method": "CARD", "amount": "20.00", "tip_amount": "2.00", "total_charged": "22.00", "fiscal_amount": "22.00", "status": "PREPARED", "provider_ref": "" },
-    { "id": 2, "method": "CASH", "amount": "30.00", "tip_amount": "0.00", "total_charged": "30.00", "fiscal_amount": "30.00", "status": "PREPARED", "provider_ref": "" }
+    { "id": 1, "method": "CARD", "amount": "20.00", "tip_amount": "2.00", "total_charged": "22.00", "fiscal_amount": "22.00", "status": "PREPARED", "provider": "", "provider_ref": "" },
+    { "id": 2, "method": "CASH", "amount": "30.00", "tip_amount": "0.00", "total_charged": "30.00", "fiscal_amount": "30.00", "status": "PREPARED", "provider": "", "provider_ref": "" }
   ],
   "totals": {
     "check_total": "50.00",
@@ -86,8 +86,8 @@ Response (200):
   "payment_status": "PARTIAL",
   "pos_receipt_id": null,
   "parts": [
-    { "id": 1, "method": "CARD", "amount": "20.00", "tip_amount": "2.00", "total_charged": "22.00", "fiscal_amount": "22.00", "status": "PAID", "provider_ref": "VIVA-REF-001" },
-    { "id": 2, "method": "CASH", "amount": "30.00", "tip_amount": "0.00", "total_charged": "30.00", "fiscal_amount": "30.00", "status": "PREPARED", "provider_ref": "" }
+    { "id": 1, "method": "CARD", "amount": "20.00", "tip_amount": "2.00", "total_charged": "22.00", "fiscal_amount": "22.00", "status": "PAID", "provider": "VIVA", "provider_ref": "VIVA-REF-001" },
+    { "id": 2, "method": "CASH", "amount": "30.00", "tip_amount": "0.00", "total_charged": "30.00", "fiscal_amount": "30.00", "status": "PREPARED", "provider": "", "provider_ref": "" }
   ],
   "totals": {
     "check_total": "50.00",
@@ -127,8 +127,8 @@ Response (200):
   "action": "paid",
   "part_status": "PAID",
   "parts": [
-    { "id": 1, "method": "CARD", "amount": "20.00", "tip_amount": "2.00", "total_charged": "22.00", "fiscal_amount": "22.00", "status": "PREPARED", "provider_ref": "" },
-    { "id": 2, "method": "CASH", "amount": "30.00", "tip_amount": "0.00", "total_charged": "30.00", "fiscal_amount": "30.00", "status": "PAID", "provider_ref": "" }
+    { "id": 1, "method": "CARD", "amount": "20.00", "tip_amount": "2.00", "total_charged": "22.00", "fiscal_amount": "22.00", "status": "PREPARED", "provider": "", "provider_ref": "" },
+    { "id": 2, "method": "CASH", "amount": "30.00", "tip_amount": "0.00", "total_charged": "30.00", "fiscal_amount": "30.00", "status": "PAID", "provider": "", "provider_ref": "" }
   ],
   "totals": {
     "check_total": "50.00",
@@ -158,6 +158,7 @@ Request:
 
 ```json
 {
+  "provider": "VIVA",
   "approved": true,
   "amount": "20.00",
   "tip_amount": "2.00",
@@ -175,8 +176,8 @@ Response (200):
   "action": "paid",
   "part_status": "PAID",
   "parts": [
-    { "id": 1, "method": "CARD", "amount": "20.00", "tip_amount": "2.00", "total_charged": "22.00", "fiscal_amount": "22.00", "status": "PAID", "provider_ref": "VIVA-REF-001" },
-    { "id": 2, "method": "CASH", "amount": "30.00", "tip_amount": "0.00", "total_charged": "30.00", "fiscal_amount": "30.00", "status": "PREPARED", "provider_ref": "" }
+    { "id": 1, "method": "CARD", "amount": "20.00", "tip_amount": "2.00", "total_charged": "22.00", "fiscal_amount": "22.00", "status": "PAID", "provider": "VIVA", "provider_ref": "VIVA-REF-001" },
+    { "id": 2, "method": "CASH", "amount": "30.00", "tip_amount": "0.00", "total_charged": "30.00", "fiscal_amount": "30.00", "status": "PREPARED", "provider": "", "provider_ref": "" }
   ],
   "totals": {
     "check_total": "50.00",
@@ -195,6 +196,7 @@ Response (200):
 Napomena:
 - `action` može biti `paid`, `failed`, `idempotent`
 - ako je part već `PAID` s drugim `external_txn_id` -> `409`
+- `provider` je trenutno optional, ali podržana vrijednost je `VIVA`
 
 ### 2.5 Confirm Card (Legacy Check-Level)
 
@@ -233,8 +235,8 @@ Response (200):
   "jir": "",
   "qr": "",
   "parts": [
-    { "id": 1, "method": "CARD", "amount": "20.00", "tip_amount": "2.00", "total_charged": "22.00", "fiscal_amount": "22.00", "status": "PAID", "provider_ref": "VIVA-REF-001" },
-    { "id": 2, "method": "CASH", "amount": "30.00", "tip_amount": "0.00", "total_charged": "30.00", "fiscal_amount": "30.00", "status": "PAID", "provider_ref": "" }
+    { "id": 1, "method": "CARD", "amount": "20.00", "tip_amount": "2.00", "total_charged": "22.00", "fiscal_amount": "22.00", "status": "PAID", "provider": "VIVA", "provider_ref": "VIVA-REF-001" },
+    { "id": 2, "method": "CASH", "amount": "30.00", "tip_amount": "0.00", "total_charged": "30.00", "fiscal_amount": "30.00", "status": "PAID", "provider": "", "provider_ref": "" }
   ],
   "totals": {
     "check_total": "50.00",
@@ -274,6 +276,7 @@ data class SettlementPartDto(
     val total_charged: String,
     val fiscal_amount: String,
     val status: String,        // PREPARED | PAID | FAILED
+    val provider: String,
     val provider_ref: String
 )
 

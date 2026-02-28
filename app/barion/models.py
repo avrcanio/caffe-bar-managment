@@ -441,6 +441,9 @@ class SettlementPart(models.Model):
         PAID = "PAID", "Paid"
         FAILED = "FAILED", "Failed"
 
+    class Provider(models.TextChoices):
+        VIVA = "VIVA", "Viva"
+
     barion_check = models.ForeignKey(
         "barion.Check",
         on_delete=models.CASCADE,
@@ -454,8 +457,33 @@ class SettlementPart(models.Model):
     total_charged = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     fiscal_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.PREPARED)
+    provider = models.CharField(max_length=20, blank=True, default="")
     external_txn_id = models.CharField(max_length=100, blank=True, default="")
     provider_ref = models.CharField(max_length=100, blank=True, default="")
+    card_masked_pan = models.CharField(max_length=32, blank=True, default="")
+    card_brand = models.CharField(max_length=50, blank=True, default="")
+    card_type = models.CharField(max_length=50, blank=True, default="")
+    card_auth_code = models.CharField(max_length=50, blank=True, default="")
+    card_rrn = models.CharField(max_length=50, blank=True, default="")
+    card_bank_id = models.CharField(max_length=50, blank=True, default="")
+    card_aid = models.CharField(max_length=64, blank=True, default="")
+    card_application_label = models.CharField(max_length=100, blank=True, default="")
+    provider_reference_number = models.CharField(max_length=50, blank=True, default="")
+    provider_tid = models.CharField(max_length=50, blank=True, default="")
+    provider_order_code = models.CharField(max_length=100, blank=True, default="")
+    provider_short_order_code = models.CharField(max_length=50, blank=True, default="")
+    provider_transaction_date = models.CharField(max_length=64, blank=True, default="")
+    provider_payment_method = models.CharField(max_length=50, blank=True, default="")
+    provider_account_number = models.CharField(max_length=64, blank=True, default="")
+    provider_verification_method = models.CharField(max_length=100, blank=True, default="")
+    provider_transaction_type_id = models.IntegerField(null=True, blank=True)
+    provider_transaction_event_id = models.IntegerField(null=True, blank=True)
+    provider_surcharge_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    provider_customer_trns = models.TextField(blank=True, default="")
+    provider_status = models.CharField(max_length=30, blank=True, default="")
+    provider_action = models.CharField(max_length=30, blank=True, default="")
+    provider_message = models.CharField(max_length=255, blank=True, default="")
+    provider_payload = models.JSONField(blank=True, default=dict)
     confirmed_at = models.DateTimeField(null=True, blank=True)
     confirmed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -481,6 +509,7 @@ class SettlementPart(models.Model):
         indexes = [
             models.Index(fields=["barion_check", "status"], name="idx_barion_sp_check_status"),
             models.Index(fields=["barion_check", "method"], name="idx_barion_sp_check_method"),
+            models.Index(fields=["provider"], name="idx_barion_sp_provider"),
             models.Index(fields=["external_txn_id"], name="idx_barion_sp_ext_txn"),
         ]
 

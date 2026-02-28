@@ -2367,9 +2367,13 @@ class PosSplitSettlementApiContractTests(TestCase):
 
         cash = next(row for row in payload["parts"] if row["method"] == "CASH")
         card = next(row for row in payload["parts"] if row["method"] == "CARD")
+        self.assertEqual(cash["method_display"], "Gotovina")
+        self.assertEqual(card["method_display"], "Kartica")
+        self.assertEqual(cash["provider"], "")
         self.assertEqual(float(cash["tip_amount"]), 0.00)
         self.assertEqual(float(cash["fiscal_amount"]), 30.00)
         self.assertEqual(float(cash["total_charged"]), 30.00)
+        self.assertEqual(card["provider"], "")
         self.assertEqual(float(card["tip_amount"]), 2.00)
         self.assertEqual(float(card["fiscal_amount"]), 22.00)
         self.assertEqual(float(card["total_charged"]), 22.00)
@@ -2456,6 +2460,71 @@ class PosSplitSettlementApiContractTests(TestCase):
             SettlementPart.objects.filter(barion_check=self.check, status=SettlementPart.Status.PREPARED).count(),
             1,
         )
+
+    def test_prepare_settlement_allows_switching_remaining_prepared_from_cash_to_card(self):
+        initial_prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "50.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(initial_prepare.status_code, 200, initial_prepare.content)
+        initial_cash_part = SettlementPart.objects.get(barion_check=self.check, method=SettlementPart.Method.CASH)
+
+        pay = self.client.post(
+            f"/api/pos/checks/{self.check.id}/settlements/parts/{initial_cash_part.id}/pay-cash/",
+            data={"amount": "20.00"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(pay.status_code, 200, pay.content)
+
+        switch_prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CARD", "amount": "30.00", "tip_amount": "3.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(switch_prepare.status_code, 200, switch_prepare.content)
+        payload = switch_prepare.json()
+        self.assertEqual(float(payload["totals"]["remaining_total"]), 30.00)
+        card_rows = [row for row in payload["parts"] if row["status"] == SettlementPart.Status.PREPARED]
+        self.assertEqual(len(card_rows), 1)
+        self.assertEqual(card_rows[0]["method"], SettlementPart.Method.CARD)
+        self.assertEqual(float(card_rows[0]["amount"]), 30.00)
+        self.assertEqual(float(card_rows[0]["tip_amount"]), 3.00)
+
+    def test_prepare_settlement_normalizes_single_card_amount_to_remaining(self):
+        initial_prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "50.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(initial_prepare.status_code, 200, initial_prepare.content)
+        initial_cash_part = SettlementPart.objects.get(barion_check=self.check, method=SettlementPart.Method.CASH)
+
+        pay = self.client.post(
+            f"/api/pos/checks/{self.check.id}/settlements/parts/{initial_cash_part.id}/pay-cash/",
+            data={"amount": "20.00"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(pay.status_code, 200, pay.content)
+
+        # Sent amount is stale/full check total from Android "full target".
+        switch_prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CARD", "amount": "50.00", "tip_amount": "0.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(switch_prepare.status_code, 200, switch_prepare.content)
+        payload = switch_prepare.json()
+        card_rows = [row for row in payload["parts"] if row["status"] == SettlementPart.Status.PREPARED]
+        self.assertEqual(len(card_rows), 1)
+        self.assertEqual(card_rows[0]["method"], SettlementPart.Method.CARD)
+        self.assertEqual(float(card_rows[0]["amount"]), 30.00)
 
     def test_pay_card_confirm_marks_partial_and_is_idempotent_by_external_txn(self):
         prepare = self.client.post(
@@ -2992,6 +3061,7 @@ class PosSplitSettlementApiContractTests(TestCase):
                 "approved": False,
                 "amount": "20.00",
                 "tip_amount": "2.00",
+                "provider": "VIVA",
                 "external_txn_id": "TXN-FAIL-01",
                 "provider_ref": "VIVA-DECLINED-01",
             },
@@ -3001,6 +3071,8 @@ class PosSplitSettlementApiContractTests(TestCase):
         self.assertEqual(failed.status_code, 200, failed.content)
         self.assertEqual(failed.json()["part_status"], SettlementPart.Status.FAILED)
         self.assertEqual(failed.json()["action"], "failed")
+        failed_card = next(row for row in failed.json()["parts"] if row["id"] == card_part.id)
+        self.assertEqual(failed_card["provider"], SettlementPart.Provider.VIVA)
 
         retry = self.client.post(
             f"/api/pos/checks/{self.check.id}/settlements/parts/{card_part.id}/pay-card/confirm/",
@@ -3008,8 +3080,37 @@ class PosSplitSettlementApiContractTests(TestCase):
                 "approved": True,
                 "amount": "20.00",
                 "tip_amount": "2.00",
+                "provider": "VIVA",
                 "external_txn_id": "TXN-OK-01",
                 "provider_ref": "VIVA-APPROVED-01",
+                "card_masked_pan": "**** **** **** 4242",
+                "card_brand": "VISA",
+                "card_type": "DEBIT",
+                "card_auth_code": "AUTH123",
+                "card_rrn": "RRN123456",
+                "card_bank_id": "BANK-01",
+                "card_aid": "A0000000031010",
+                "card_application_label": "VISA DEBIT",
+                "rrn": "RRN-VIVA-ALT-01",
+                "reference_number": "REF-778899",
+                "authorisation_code": "AUTH-778899",
+                "tid": "TID-16014031",
+                "order_code": "6058152276014031",
+                "short_order_code": "6058152276",
+                "transaction_date": "2026-02-27T16:03:53.7167+02:00",
+                "payment_method": "CARD_PRESENT",
+                "account_number": "539982******9303",
+                "verification_method": "CONTACTLESS - ONLINE PIN",
+                "aid": "A0000000041010",
+                "bank_id": "NET_MASTER",
+                "transaction_type_id": 5,
+                "transaction_event_id": 0,
+                "surcharge_amount": "0.00",
+                "customer_trns": "tip-test",
+                "provider_status": "success",
+                "provider_action": "sale",
+                "provider_message": "Transaction successful",
+                "provider_payload": {"raw": "callback", "status": "success"},
             },
             format="json",
             secure=True,
@@ -3017,3 +3118,112 @@ class PosSplitSettlementApiContractTests(TestCase):
         self.assertEqual(retry.status_code, 200, retry.content)
         self.assertEqual(retry.json()["part_status"], SettlementPart.Status.PAID)
         self.assertEqual(retry.json()["action"], "paid")
+        retry_card = next(row for row in retry.json()["parts"] if row["id"] == card_part.id)
+        self.assertEqual(retry_card["provider"], SettlementPart.Provider.VIVA)
+        self.assertEqual(retry_card["method_display"], "VISA: **** **** **** 4242")
+        self.assertEqual(retry_card["card_masked_pan"], "**** **** **** 4242")
+        self.assertEqual(retry_card["card_brand"], "VISA")
+        self.assertEqual(retry_card["card_type"], "DEBIT")
+        self.assertEqual(retry_card["card_auth_code"], "AUTH-778899")
+        self.assertEqual(retry_card["card_rrn"], "RRN-VIVA-ALT-01")
+        self.assertEqual(retry_card["card_bank_id"], "NET_MASTER")
+        self.assertEqual(retry_card["card_aid"], "A0000000041010")
+        self.assertEqual(retry_card["card_application_label"], "VISA DEBIT")
+        self.assertEqual(retry_card["provider_reference_number"], "REF-778899")
+        self.assertEqual(retry_card["provider_tid"], "TID-16014031")
+        self.assertEqual(retry_card["provider_order_code"], "6058152276014031")
+        self.assertEqual(retry_card["provider_short_order_code"], "6058152276")
+        self.assertEqual(retry_card["provider_transaction_date"], "2026-02-27T16:03:53.7167+02:00")
+        self.assertEqual(retry_card["provider_payment_method"], "CARD_PRESENT")
+        self.assertEqual(retry_card["provider_account_number"], "539982******9303")
+        self.assertEqual(retry_card["provider_verification_method"], "CONTACTLESS - ONLINE PIN")
+        self.assertEqual(retry_card["provider_transaction_type_id"], 5)
+        self.assertEqual(retry_card["provider_transaction_event_id"], 0)
+        self.assertEqual(float(retry_card["provider_surcharge_amount"]), 0.00)
+        self.assertEqual(retry_card["provider_customer_trns"], "tip-test")
+        self.assertEqual(retry_card["provider_status"], "success")
+        self.assertEqual(retry_card["provider_action"], "sale")
+        self.assertEqual(retry_card["provider_message"], "Transaction successful")
+        self.assertEqual(retry_card["provider_payload"], {"raw": "callback", "status": "success"})
+        card_part.refresh_from_db()
+        self.assertEqual(card_part.provider, SettlementPart.Provider.VIVA)
+        self.assertEqual(card_part.provider_ref, "VIVA-APPROVED-01")
+        self.assertEqual(card_part.card_masked_pan, "**** **** **** 4242")
+        self.assertEqual(card_part.card_brand, "VISA")
+        self.assertEqual(card_part.card_type, "DEBIT")
+        self.assertEqual(card_part.card_auth_code, "AUTH-778899")
+        self.assertEqual(card_part.card_rrn, "RRN-VIVA-ALT-01")
+        self.assertEqual(card_part.card_bank_id, "NET_MASTER")
+        self.assertEqual(card_part.card_aid, "A0000000041010")
+        self.assertEqual(card_part.card_application_label, "VISA DEBIT")
+        self.assertEqual(card_part.provider_reference_number, "REF-778899")
+        self.assertEqual(card_part.provider_tid, "TID-16014031")
+        self.assertEqual(card_part.provider_order_code, "6058152276014031")
+        self.assertEqual(card_part.provider_short_order_code, "6058152276")
+        self.assertEqual(card_part.provider_transaction_date, "2026-02-27T16:03:53.7167+02:00")
+        self.assertEqual(card_part.provider_payment_method, "CARD_PRESENT")
+        self.assertEqual(card_part.provider_account_number, "539982******9303")
+        self.assertEqual(card_part.provider_verification_method, "CONTACTLESS - ONLINE PIN")
+        self.assertEqual(card_part.provider_transaction_type_id, 5)
+        self.assertEqual(card_part.provider_transaction_event_id, 0)
+        self.assertEqual(float(card_part.provider_surcharge_amount), 0.00)
+        self.assertEqual(card_part.provider_customer_trns, "tip-test")
+        self.assertEqual(card_part.provider_status, "success")
+        self.assertEqual(card_part.provider_action, "sale")
+        self.assertEqual(card_part.provider_message, "Transaction successful")
+        self.assertEqual(card_part.provider_payload, {"raw": "callback", "status": "success"})
+
+    def test_part_level_card_confirm_rejects_unknown_provider(self):
+        prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CARD", "amount": "50.00", "tip_amount": "0.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.content)
+        card_part = SettlementPart.objects.get(barion_check=self.check, method=SettlementPart.Method.CARD)
+
+        response = self.client.post(
+            f"/api/pos/checks/{self.check.id}/settlements/parts/{card_part.id}/pay-card/confirm/",
+            data={
+                "approved": True,
+                "amount": "50.00",
+                "tip_amount": "0.00",
+                "provider": "OTHER",
+                "external_txn_id": "TXN-BAD-PROVIDER-01",
+            },
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("provider", response.json())
+
+    def test_part_level_card_confirm_returns_actual_method_for_non_card_part(self):
+        prepare = self.client.post(
+            f"/api/pos/checks/{self.check.id}/prepare-settlement/",
+            data={"parts": [{"method": "CASH", "amount": "50.00"}]},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(prepare.status_code, 200, prepare.content)
+        cash_part = SettlementPart.objects.get(barion_check=self.check, method=SettlementPart.Method.CASH)
+
+        response = self.client.post(
+            f"/api/pos/checks/{self.check.id}/settlements/parts/{cash_part.id}/pay-card/confirm/",
+            data={
+                "approved": True,
+                "amount": "50.00",
+                "tip_amount": "0.00",
+                "provider": "VIVA",
+                "external_txn_id": "TXN-WRONG-METHOD-01",
+            },
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 409, response.content)
+        payload = response.json()
+        self.assertEqual(payload.get("detail"), "Part nije CARD.")
+        self.assertEqual(payload.get("check_id"), self.check.id)
+        self.assertEqual(payload.get("part_id"), cash_part.id)
+        self.assertEqual(payload.get("actual_method"), SettlementPart.Method.CASH)
+        self.assertEqual(payload.get("expected_method"), SettlementPart.Method.CARD)
