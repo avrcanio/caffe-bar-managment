@@ -2,6 +2,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import check_password, make_password
+from django.core.exceptions import ValidationError
 from django.db import models
 
 
@@ -76,6 +77,21 @@ class PosDevice(models.Model):
     )
     name = models.CharField(max_length=255, blank=True, default="")
     is_active = models.BooleanField(default=True)
+    print_receiver_url = models.CharField(max_length=500, blank=True, default="")
+    receipt_printer = models.ForeignKey(
+        "pos.PosPrinterInventory",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    bar_printer = models.ForeignKey(
+        "pos.PosPrinterInventory",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
     registered_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self) -> str:
@@ -85,6 +101,40 @@ class PosDevice(models.Model):
     class Meta:
         verbose_name = "POS uređaj"
         verbose_name_plural = "POS uređaji"
+
+    def clean(self):
+        super().clean()
+        if self.pk and self.receipt_printer_id and self.receipt_printer and self.receipt_printer.device_id != self.pk:
+            raise ValidationError({"receipt_printer": "Odabrani printer ne pripada ovom uređaju."})
+        if self.pk and self.bar_printer_id and self.bar_printer and self.bar_printer.device_id != self.pk:
+            raise ValidationError({"bar_printer": "Odabrani printer ne pripada ovom uređaju."})
+
+
+class PosPrinterInventory(models.Model):
+    device = models.ForeignKey(
+        "pos.PosDevice",
+        on_delete=models.CASCADE,
+        related_name="printers",
+    )
+    name = models.CharField(max_length=255)
+    is_default = models.BooleanField(default=False)
+    status = models.CharField(max_length=120, blank=True, default="")
+    is_active = models.BooleanField(default=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    raw_payload = models.JSONField(blank=True, default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "POS printer"
+        verbose_name_plural = "POS printeri"
+        constraints = [
+            models.UniqueConstraint(fields=["device", "name"], name="uq_pos_printer_device_name"),
+        ]
+        ordering = ("-is_default", "name", "id")
+
+    def __str__(self) -> str:
+        return f"{self.name} [{self.device.device_id}]"
 
 
 class PosReceipt(models.Model):

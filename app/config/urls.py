@@ -81,6 +81,9 @@ from pos.api import (
     PosInvoicePaymentFlagView,
     PosShiftCashExpectedView,
     PosShiftCashHandoverView,
+    PosPrinterListView,
+    PosPrinterSyncView,
+    PosDevicePrinterSelectionView,
 )
 from ai.api import AIQueryView
 from ai.views import AiSearchView
@@ -177,6 +180,13 @@ urlpatterns = [
     path("api/pos/shift/cash-expected/", PosShiftCashExpectedView.as_view(), name="api-pos-shift-cash-expected"),
     path("api/pos/shift/cash-handover/", PosShiftCashHandoverView.as_view(), name="api-pos-shift-cash-handover"),
     path("api/pos/invoices/payment-flags/", PosInvoicePaymentFlagView.as_view(), name="api-pos-invoices-payment-flags"),
+    path("api/pos/printers/sync/", PosPrinterSyncView.as_view(), name="api-pos-printers-sync"),
+    path("api/pos/printers/", PosPrinterListView.as_view(), name="api-pos-printers-list"),
+    path(
+        "api/pos/devices/<str:device_id>/printer-selection/",
+        PosDevicePrinterSelectionView.as_view(),
+        name="api-pos-device-printer-selection",
+    ),
     path("api/pos/active-layout/", PosActiveLayoutView.as_view(), name="api-pos-active-layout"),
     path("api/pos/layouts/allowed/", PosAllowedLayoutsView.as_view(), name="api-pos-allowed-layouts"),
     path("api/pos/table-status/", PosTableStatusView.as_view(), name="api-pos-table-status"),

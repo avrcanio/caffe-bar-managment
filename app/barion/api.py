@@ -21,6 +21,7 @@ from rest_framework.views import APIView
 from artikli.models import Artikl, DrinkCategory
 from pos.fiscal import fiscalize_pos_receipt
 from pos.models import Pos, PosDevice
+from pos.print_bridge import send_bar_ticket_to_print_bridge, send_receipt_pdf_to_print_bridge
 from pos.security import is_recent_pin_verified, pin_verify_ttl_seconds
 from pos.services import create_pos_receipt
 from sales.models import SalesPriceItem, ShiftCashHandover, ShiftTurnover
@@ -368,12 +369,38 @@ class PrepareSettlementRequestSerializer(serializers.Serializer):
 class SettlementPartResponseSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     method = serializers.ChoiceField(choices=SettlementPart.Method.choices)
+    method_display = serializers.CharField()
     amount = serializers.DecimalField(max_digits=12, decimal_places=2)
     tip_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
     total_charged = serializers.DecimalField(max_digits=12, decimal_places=2)
     fiscal_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
     status = serializers.ChoiceField(choices=SettlementPart.Status.choices)
+    provider = serializers.CharField(allow_blank=True)
     provider_ref = serializers.CharField(allow_blank=True)
+    card_masked_pan = serializers.CharField(allow_blank=True)
+    card_brand = serializers.CharField(allow_blank=True)
+    card_type = serializers.CharField(allow_blank=True)
+    card_auth_code = serializers.CharField(allow_blank=True)
+    card_rrn = serializers.CharField(allow_blank=True)
+    card_bank_id = serializers.CharField(allow_blank=True)
+    card_aid = serializers.CharField(allow_blank=True)
+    card_application_label = serializers.CharField(allow_blank=True)
+    provider_reference_number = serializers.CharField(allow_blank=True)
+    provider_tid = serializers.CharField(allow_blank=True)
+    provider_order_code = serializers.CharField(allow_blank=True)
+    provider_short_order_code = serializers.CharField(allow_blank=True)
+    provider_transaction_date = serializers.CharField(allow_blank=True)
+    provider_payment_method = serializers.CharField(allow_blank=True)
+    provider_account_number = serializers.CharField(allow_blank=True)
+    provider_verification_method = serializers.CharField(allow_blank=True)
+    provider_transaction_type_id = serializers.IntegerField(allow_null=True)
+    provider_transaction_event_id = serializers.IntegerField(allow_null=True)
+    provider_surcharge_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    provider_customer_trns = serializers.CharField(allow_blank=True)
+    provider_status = serializers.CharField(allow_blank=True)
+    provider_action = serializers.CharField(allow_blank=True)
+    provider_message = serializers.CharField(allow_blank=True)
+    provider_payload = serializers.JSONField(required=False)
 
 
 class SettlementTotalsResponseSerializer(serializers.Serializer):
@@ -487,9 +514,47 @@ class SettlementPartPayCardConfirmRequestSerializer(serializers.Serializer):
     approved = serializers.BooleanField(required=True)
     amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0.01"))
     tip_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0.00"))
+    provider = serializers.CharField(required=False, allow_blank=True, max_length=20)
     external_txn_id = serializers.CharField(required=False, allow_blank=True, max_length=100)
     provider_ref = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    card_masked_pan = serializers.CharField(required=False, allow_blank=True, max_length=32)
+    card_brand = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    card_type = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    card_auth_code = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    card_rrn = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    card_bank_id = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    card_aid = serializers.CharField(required=False, allow_blank=True, max_length=64)
+    card_application_label = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    rrn = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    reference_number = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    authorisation_code = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    tid = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    order_code = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    short_order_code = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    transaction_date = serializers.CharField(required=False, allow_blank=True, max_length=64)
+    payment_method = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    account_number = serializers.CharField(required=False, allow_blank=True, max_length=64)
+    verification_method = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    aid = serializers.CharField(required=False, allow_blank=True, max_length=64)
+    bank_id = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    transaction_type_id = serializers.IntegerField(required=False, allow_null=True)
+    transaction_event_id = serializers.IntegerField(required=False, allow_null=True)
+    surcharge_amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, min_value=Decimal("0.00"))
+    customer_trns = serializers.CharField(required=False, allow_blank=True)
+    provider_status = serializers.CharField(required=False, allow_blank=True, max_length=30)
+    provider_action = serializers.CharField(required=False, allow_blank=True, max_length=30)
+    provider_message = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    provider_payload = serializers.JSONField(required=False)
     issue_receipt = serializers.BooleanField(required=False, default=False)
+
+    def validate_provider(self, value):
+        provider = str(value or "").strip().upper()
+        if not provider:
+            return ""
+        allowed = {SettlementPart.Provider.VIVA}
+        if provider not in allowed:
+            raise serializers.ValidationError("provider mora biti jedan od: VIVA.")
+        return provider
 
 
 class PayCardConfirmResponseSerializer(serializers.Serializer):
@@ -1174,16 +1239,55 @@ def _mark_all_items_paid(*, check: Check) -> None:
 
 
 def _serialize_settlement_parts(parts: list[SettlementPart]) -> list[dict]:
+    def _method_display(part: SettlementPart) -> str:
+        if part.method == SettlementPart.Method.CASH:
+            return "Gotovina"
+        brand = (part.card_brand or "").strip()
+        masked_pan = (part.card_masked_pan or "").strip()
+        if brand and masked_pan:
+            return f"{brand}: {masked_pan}"
+        if brand:
+            return brand
+        if masked_pan:
+            return masked_pan
+        return "Kartica"
+
     return [
         {
             "id": part.id,
             "method": part.method,
+            "method_display": _method_display(part),
             "amount": _money_str(part.amount),
             "tip_amount": _money_str(part.tip_amount),
             "total_charged": _money_str(part.total_charged),
             "fiscal_amount": _money_str(part.fiscal_amount),
             "status": part.status,
+            "provider": part.provider,
             "provider_ref": part.provider_ref,
+            "card_masked_pan": part.card_masked_pan,
+            "card_brand": part.card_brand,
+            "card_type": part.card_type,
+            "card_auth_code": part.card_auth_code,
+            "card_rrn": part.card_rrn,
+            "card_bank_id": part.card_bank_id,
+            "card_aid": part.card_aid,
+            "card_application_label": part.card_application_label,
+            "provider_reference_number": part.provider_reference_number,
+            "provider_tid": part.provider_tid,
+            "provider_order_code": part.provider_order_code,
+            "provider_short_order_code": part.provider_short_order_code,
+            "provider_transaction_date": part.provider_transaction_date,
+            "provider_payment_method": part.provider_payment_method,
+            "provider_account_number": part.provider_account_number,
+            "provider_verification_method": part.provider_verification_method,
+            "provider_transaction_type_id": part.provider_transaction_type_id,
+            "provider_transaction_event_id": part.provider_transaction_event_id,
+            "provider_surcharge_amount": _money_str(part.provider_surcharge_amount),
+            "provider_customer_trns": part.provider_customer_trns,
+            "provider_status": part.provider_status,
+            "provider_action": part.provider_action,
+            "provider_message": part.provider_message,
+            "provider_payload": part.provider_payload or {},
         }
         for part in parts
     ]
@@ -1311,7 +1415,12 @@ def _save_receipt_pdf_to_media(receipt, user) -> str | None:
     target_dir.mkdir(parents=True, exist_ok=True)
     filename = f"pos-receipt-{receipt.id}.pdf"
     target_path = target_dir / filename
-    target_path.write_bytes(response.content)
+    pdf_bytes = response.content
+    target_path.write_bytes(pdf_bytes)
+
+    # Auto print only after successful fiscalization.
+    if str(getattr(receipt, "status", "")).strip().lower() == "fiscalized":
+        send_receipt_pdf_to_print_bridge(receipt=receipt, pdf_bytes=pdf_bytes)
     return f"{settings.MEDIA_URL}racuni/{filename}"
 
 
@@ -1835,20 +1944,40 @@ class PosCheckSendToBarView(APIView):
 
     @staticmethod
     def _send_ticket_to_printer(ticket: dict) -> None:
-        if os.getenv("BARION_BAR_PRINTER_ENABLED", "true").lower() in {"0", "false", "no", "off"}:
-            raise RuntimeError("Bar printer nije konfiguriran.")
         if os.getenv("BARION_BAR_PRINTER_FAIL", "false").lower() in {"1", "true", "yes", "on"}:
             raise RuntimeError("Greška pri slanju na bar printer.")
-        # V1: printer integration is adapter-ready. Current deployment uses no-op success.
-        _ = ticket
+        send_bar_ticket_to_print_bridge(ticket)
 
     @staticmethod
     def _build_ticket_payload(*, request, check: Check, round_number: int, sent_items: list[CheckItem], sent_at):
         waiter_name = request.user.get_full_name().strip() or request.user.username
+        profile = getattr(request.user, "pos_profile", None)
+        device_id = str(getattr(profile, "registered_device_id", "") or "").strip()
+
+        def _modifier_lines_for_item(item: CheckItem) -> list[str]:
+            lines: list[str] = []
+            for row in _serialize_check_item_modifiers(item):
+                qty = int(row.get("quantity") or 1)
+                name = str(row.get("option_name") or "").strip()
+                if not name:
+                    continue
+                lines.append(f"{name} x{qty}" if qty > 1 else name)
+            return lines
+
+        def _compose_bar_note(*, note: str, modifier_lines: list[str]) -> str:
+            base_note = str(note or "").strip()
+            if not modifier_lines:
+                return base_note
+            mods_text = ", ".join(modifier_lines)
+            if base_note:
+                return f"{mods_text} | Napomena: {base_note}"
+            return mods_text
+
         return {
             "venue_name": os.getenv("BARION_VENUE_NAME", "Mozart"),
             "table_label": check.table.label,
             "check_id": check.id,
+            "device_id": device_id,
             "round_number": round_number,
             "waiter": waiter_name,
             "sent_at": sent_at.isoformat(),
@@ -1858,7 +1987,13 @@ class PosCheckSendToBarView(APIView):
                     "artikl_id": item.artikl_id,
                     "artikl_name": item.artikl.name,
                     "quantity": item.quantity,
-                    "note": item.note,
+                    "note": _compose_bar_note(
+                        note=item.note,
+                        modifier_lines=_modifier_lines_for_item(item),
+                    ),
+                    "note_raw": item.note,
+                    "modifiers": _serialize_check_item_modifiers(item),
+                    "modifier_lines": _modifier_lines_for_item(item),
                 }
                 for item in sent_items
             ],
@@ -1941,7 +2076,13 @@ class PosCheckSendToBarView(APIView):
                     )
 
                 unsent_items = list(
-                    CheckItem.objects.select_for_update().select_related("artikl")
+                    CheckItem.objects.select_for_update()
+                    .select_related("artikl")
+                    .prefetch_related(
+                        "modifier_selections__group",
+                        "modifier_selections__option",
+                        "modifier_selections__bundle_option__artikl",
+                    )
                     .filter(barion_check=check, sent_to_bar=False, line_type=CheckItem.LineType.NORMAL)
                     .order_by("id")
                 )
@@ -2022,6 +2163,7 @@ class PosCheckSettlementStateView(APIView):
                             "total_charged": "22.00",
                             "fiscal_amount": "22.00",
                             "status": "PAID",
+                            "provider": "VIVA",
                             "provider_ref": "VIVA-REF-001",
                         },
                         {
@@ -2032,6 +2174,7 @@ class PosCheckSettlementStateView(APIView):
                             "total_charged": "30.00",
                             "fiscal_amount": "30.00",
                             "status": "PREPARED",
+                            "provider": "",
                             "provider_ref": "",
                         },
                     ],
@@ -2210,19 +2353,6 @@ class PosCheckPrepareSettlementView(APIView):
             existing_parts = list(check.settlement_parts.select_for_update().order_by("id"))
             paid_parts = [part for part in existing_parts if part.status == SettlementPart.Status.PAID]
             mutable_parts = [part for part in existing_parts if part.status != SettlementPart.Status.PAID]
-            has_prepared_parts = any(part.status == SettlementPart.Status.PREPARED for part in mutable_parts)
-            if paid_parts and has_prepared_parts:
-                snapshot = _build_settlement_snapshot(check)
-                return Response(
-                    {
-                        "check_id": check.id,
-                        "settlement_status": check.settlement_status,
-                        "payment_status": check.payment_status,
-                        "parts": snapshot["parts"],
-                        "totals": snapshot["totals"],
-                        "actions": snapshot["actions"],
-                    }
-                )
 
             check_total = _check_remaining_amount(check)
             if not payload_parts:
@@ -2253,17 +2383,20 @@ class PosCheckPrepareSettlementView(APIView):
 
             allocated_total = sum((part["amount"] for part in normalized_parts), Decimal("0.00")).quantize(Decimal("0.01"))
             # Android "kompletna naplata" može poslati stari/full iznos checka.
-            # Ako je poslan samo jedan CASH part bez tipa, sigurnije ga je normalizirati
+            # Ako je poslan samo jedan part, sigurnije ga je normalizirati
             # na trenutno preostali iznos umjesto vraćanja 400.
-            if (
-                allocated_total > check_total
-                and len(normalized_parts) == 1
-                and normalized_parts[0]["method"] == SettlementPart.Method.CASH
-                and normalized_parts[0]["tip_amount"] == Decimal("0.00")
-            ):
-                normalized_parts[0]["amount"] = check_total
-                normalized_parts[0]["total_charged"] = check_total
-                normalized_parts[0]["fiscal_amount"] = check_total
+            if allocated_total > check_total and len(normalized_parts) == 1:
+                part = normalized_parts[0]
+                part["amount"] = check_total
+                if part["method"] == SettlementPart.Method.CARD and part["tip_amount"] > check_total:
+                    return Response(
+                        {"detail": "tip_amount ne može biti veći od amount nakon normalizacije preostalog iznosa."},
+                        status=400,
+                    )
+                part["total_charged"] = (
+                    (check_total + part["tip_amount"]) if part["method"] == SettlementPart.Method.CARD else check_total
+                ).quantize(Decimal("0.01"))
+                part["fiscal_amount"] = part["total_charged"]
                 allocated_total = check_total
             if allocated_total != check_total:
                 return Response(
@@ -2551,8 +2684,37 @@ class PosSettlementPartPayCardConfirmView(APIView):
         approved = bool(serializer.validated_data["approved"])
         requested_amount = serializer.validated_data.get("amount")
         requested_tip_amount = serializer.validated_data.get("tip_amount")
+        provider = str(serializer.validated_data.get("provider", "")).strip().upper()
         external_txn_id = str(serializer.validated_data.get("external_txn_id", "")).strip()
         provider_ref = str(serializer.validated_data.get("provider_ref", "")).strip()
+        card_masked_pan = str(serializer.validated_data.get("card_masked_pan", "")).strip()
+        card_brand = str(serializer.validated_data.get("card_brand", "")).strip()
+        card_type = str(serializer.validated_data.get("card_type", "")).strip()
+        card_auth_code = str(serializer.validated_data.get("card_auth_code", "")).strip()
+        card_rrn = str(serializer.validated_data.get("card_rrn", "")).strip()
+        card_bank_id = str(serializer.validated_data.get("card_bank_id", "")).strip()
+        card_aid = str(serializer.validated_data.get("card_aid", "")).strip()
+        card_application_label = str(serializer.validated_data.get("card_application_label", "")).strip()
+        rrn = str(serializer.validated_data.get("rrn", "")).strip()
+        reference_number = str(serializer.validated_data.get("reference_number", "")).strip()
+        authorisation_code = str(serializer.validated_data.get("authorisation_code", "")).strip()
+        tid = str(serializer.validated_data.get("tid", "")).strip()
+        order_code = str(serializer.validated_data.get("order_code", "")).strip()
+        short_order_code = str(serializer.validated_data.get("short_order_code", "")).strip()
+        transaction_date = str(serializer.validated_data.get("transaction_date", "")).strip()
+        payment_method = str(serializer.validated_data.get("payment_method", "")).strip()
+        account_number = str(serializer.validated_data.get("account_number", "")).strip()
+        verification_method = str(serializer.validated_data.get("verification_method", "")).strip()
+        aid = str(serializer.validated_data.get("aid", "")).strip()
+        bank_id = str(serializer.validated_data.get("bank_id", "")).strip()
+        transaction_type_id = serializer.validated_data.get("transaction_type_id")
+        transaction_event_id = serializer.validated_data.get("transaction_event_id")
+        surcharge_amount = serializer.validated_data.get("surcharge_amount")
+        customer_trns = str(serializer.validated_data.get("customer_trns", "")).strip()
+        provider_status = str(serializer.validated_data.get("provider_status", "")).strip()
+        provider_action = str(serializer.validated_data.get("provider_action", "")).strip()
+        provider_message = str(serializer.validated_data.get("provider_message", "")).strip()
+        provider_payload = serializer.validated_data.get("provider_payload")
 
         with transaction.atomic():
             check = Check.objects.select_for_update().filter(id=check_id).first()
@@ -2565,7 +2727,16 @@ class PosSettlementPartPayCardConfirmView(APIView):
             if not part:
                 return Response({"detail": "Settlement part ne postoji."}, status=status.HTTP_404_NOT_FOUND)
             if part.method != SettlementPart.Method.CARD:
-                return Response({"detail": "Part nije CARD."}, status=status.HTTP_409_CONFLICT)
+                return Response(
+                    {
+                        "detail": "Part nije CARD.",
+                        "check_id": check.id,
+                        "part_id": part.id,
+                        "actual_method": part.method,
+                        "expected_method": SettlementPart.Method.CARD,
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
 
             if requested_amount is not None:
                 normalized_requested_amount = Decimal(str(requested_amount)).quantize(Decimal("0.01"))
@@ -2597,15 +2768,107 @@ class PosSettlementPartPayCardConfirmView(APIView):
 
             if external_txn_id:
                 part.external_txn_id = external_txn_id
+            if provider:
+                part.provider = provider
             if provider_ref:
                 part.provider_ref = provider_ref
+            if card_masked_pan:
+                part.card_masked_pan = card_masked_pan
+            if card_brand:
+                part.card_brand = card_brand
+            if card_type:
+                part.card_type = card_type
+            if card_auth_code:
+                part.card_auth_code = card_auth_code
+            if card_rrn:
+                part.card_rrn = card_rrn
+            if card_bank_id:
+                part.card_bank_id = card_bank_id
+            if card_aid:
+                part.card_aid = card_aid
+            if card_application_label:
+                part.card_application_label = card_application_label
+            if rrn:
+                part.card_rrn = rrn
+            if reference_number:
+                part.provider_reference_number = reference_number
+            if authorisation_code:
+                part.card_auth_code = authorisation_code
+            if tid:
+                part.provider_tid = tid
+            if order_code:
+                part.provider_order_code = order_code
+            if short_order_code:
+                part.provider_short_order_code = short_order_code
+            if transaction_date:
+                part.provider_transaction_date = transaction_date
+            if payment_method:
+                part.provider_payment_method = payment_method
+            if account_number:
+                part.provider_account_number = account_number
+                if not part.card_masked_pan:
+                    part.card_masked_pan = account_number
+            if verification_method:
+                part.provider_verification_method = verification_method
+            if aid:
+                part.card_aid = aid
+            if bank_id:
+                part.card_bank_id = bank_id
+            if transaction_type_id is not None:
+                part.provider_transaction_type_id = int(transaction_type_id)
+            if transaction_event_id is not None:
+                part.provider_transaction_event_id = int(transaction_event_id)
+            if surcharge_amount is not None:
+                part.provider_surcharge_amount = Decimal(str(surcharge_amount)).quantize(Decimal("0.01"))
+            if customer_trns:
+                part.provider_customer_trns = customer_trns
+            if provider_status:
+                part.provider_status = provider_status
+            if provider_action:
+                part.provider_action = provider_action
+            if provider_message:
+                part.provider_message = provider_message
+            if provider_payload is not None:
+                part.provider_payload = provider_payload
 
             if not approved:
                 part.status = SettlementPart.Status.FAILED
                 part.confirmed_at = timezone.now()
                 part.confirmed_by = request.user
                 part.save(
-                    update_fields=["status", "confirmed_at", "confirmed_by", "external_txn_id", "provider_ref", "updated_at"]
+                    update_fields=[
+                        "status",
+                        "confirmed_at",
+                        "confirmed_by",
+                        "provider",
+                        "external_txn_id",
+                        "provider_ref",
+                        "card_masked_pan",
+                        "card_brand",
+                        "card_type",
+                        "card_auth_code",
+                        "card_rrn",
+                        "card_bank_id",
+                        "card_aid",
+                        "card_application_label",
+                        "provider_reference_number",
+                        "provider_tid",
+                        "provider_order_code",
+                        "provider_short_order_code",
+                        "provider_transaction_date",
+                        "provider_payment_method",
+                        "provider_account_number",
+                        "provider_verification_method",
+                        "provider_transaction_type_id",
+                        "provider_transaction_event_id",
+                        "provider_surcharge_amount",
+                        "provider_customer_trns",
+                        "provider_status",
+                        "provider_action",
+                        "provider_message",
+                        "provider_payload",
+                        "updated_at",
+                    ]
                 )
                 _recalculate_check_settlement_status(check)
                 check.save(update_fields=["settlement_status", "payment_status", "updated_at"])
@@ -2628,7 +2891,41 @@ class PosSettlementPartPayCardConfirmView(APIView):
             part.status = SettlementPart.Status.PAID
             part.confirmed_at = timezone.now()
             part.confirmed_by = request.user
-            part.save(update_fields=["status", "confirmed_at", "confirmed_by", "external_txn_id", "provider_ref", "updated_at"])
+            part.save(
+                update_fields=[
+                    "status",
+                    "confirmed_at",
+                    "confirmed_by",
+                    "provider",
+                    "external_txn_id",
+                    "provider_ref",
+                    "card_masked_pan",
+                    "card_brand",
+                    "card_type",
+                    "card_auth_code",
+                    "card_rrn",
+                    "card_bank_id",
+                    "card_aid",
+                    "card_application_label",
+                    "provider_reference_number",
+                    "provider_tid",
+                    "provider_order_code",
+                    "provider_short_order_code",
+                    "provider_transaction_date",
+                    "provider_payment_method",
+                    "provider_account_number",
+                    "provider_verification_method",
+                    "provider_transaction_type_id",
+                    "provider_transaction_event_id",
+                    "provider_surcharge_amount",
+                    "provider_customer_trns",
+                    "provider_status",
+                    "provider_action",
+                    "provider_message",
+                    "provider_payload",
+                    "updated_at",
+                ]
+            )
             _, allocations = _allocate_payment_to_items(check=check, amount=part.amount, with_allocations=True)
             issued_receipt = _create_receipt_for_part_payment(part=part, allocations=allocations, user=request.user)
 

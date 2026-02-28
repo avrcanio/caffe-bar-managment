@@ -9,7 +9,18 @@ from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.html import format_html
 
-from .models import Pos, PosProfile, PosReceipt, PosReceiptItem, PosScreen, PosScreenItem, PosMode, PosModeScreen, PosDevice
+from .models import (
+    Pos,
+    PosProfile,
+    PosReceipt,
+    PosReceiptItem,
+    PosScreen,
+    PosScreenItem,
+    PosMode,
+    PosModeScreen,
+    PosDevice,
+    PosPrinterInventory,
+)
 from .fiscal import fiscalize_pos_receipt
 
 
@@ -64,10 +75,27 @@ class PosProfileAdmin(admin.ModelAdmin):
 
 @admin.register(PosDevice)
 class PosDeviceAdmin(admin.ModelAdmin):
-    list_display = ("device_id", "name", "pos", "is_active", "registered_at")
+    list_display = (
+        "device_id",
+        "name",
+        "pos",
+        "is_active",
+        "print_receiver_url",
+        "receipt_printer",
+        "bar_printer",
+        "registered_at",
+    )
     list_filter = ("is_active", "pos")
     search_fields = ("device_id", "name")
-    autocomplete_fields = ("pos",)
+    autocomplete_fields = ("pos", "receipt_printer", "bar_printer")
+
+
+@admin.register(PosPrinterInventory)
+class PosPrinterInventoryAdmin(admin.ModelAdmin):
+    list_display = ("name", "device", "is_default", "status", "is_active", "last_seen_at")
+    list_filter = ("is_active", "is_default", "device__pos")
+    search_fields = ("name", "device__device_id", "device__name")
+    autocomplete_fields = ("device",)
 
 
 class PosReceiptItemInline(admin.TabularInline):

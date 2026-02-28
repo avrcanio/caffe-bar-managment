@@ -16,7 +16,6 @@ from accounting.models import JournalEntry, JournalItem
 from accounting.services import get_single_ledger, get_account_by_code, get_default_cash_account
 from sales.models import SalesInvoice, ShiftTurnover, ShiftTurnoverClose, ShiftTurnoverExpense, ShiftCashHandover
 from sales.fiscal import fiscalize_sales_invoice
-from pos.models import Pos
 from stock.models import WarehouseId
 from io import BytesIO
 
@@ -31,7 +30,7 @@ from reportlab.pdfbase.ttfonts import TTFont
 
 from pos.services import create_pos_receipt, create_pos_storno
 from pos.fiscal import fiscalize_pos_receipt
-from pos.models import PosReceipt, Pos, PosDevice
+from pos.models import PosReceipt, Pos, PosDevice, PosPrinterInventory
 from pos.security import is_recent_pin_verified, mark_pin_verified, pin_verify_ttl_seconds
 from rest_framework.authtoken.models import Token
 from sales.remaris_importer import import_sales_invoices, load_import_defaults
@@ -56,7 +55,53 @@ CASH_SURPLUS_ACCOUNT_CODE = "7815"
 class PosDeviceSerializer(serializers.ModelSerializer):
     class Meta:
         model = PosDevice
-        fields = ("id", "device_id", "pos", "name", "is_active", "registered_at")
+        fields = (
+            "id",
+            "device_id",
+            "pos",
+            "name",
+            "is_active",
+            "print_receiver_url",
+            "receipt_printer",
+            "bar_printer",
+            "registered_at",
+        )
+
+
+class PosPrinterInventorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PosPrinterInventory
+        fields = (
+            "id",
+            "device",
+            "name",
+            "is_default",
+            "status",
+            "is_active",
+            "last_seen_at",
+            "raw_payload",
+            "created_at",
+            "updated_at",
+        )
+
+
+class PosPrinterSyncPrinterRowSerializer(serializers.Serializer):
+    name = serializers.CharField(required=True, trim_whitespace=True)
+    is_default = serializers.BooleanField(required=False, default=False)
+    status = serializers.CharField(required=False, allow_blank=True, default="")
+    raw = serializers.JSONField(required=False, default=dict)
+
+
+class PosPrinterSyncRequestSerializer(serializers.Serializer):
+    device_id = serializers.CharField(required=True, trim_whitespace=True)
+    receiver_url = serializers.CharField(required=True, trim_whitespace=True)
+    printers = PosPrinterSyncPrinterRowSerializer(many=True, required=True)
+
+
+class PosDevicePrinterSelectionRequestSerializer(serializers.Serializer):
+    receipt_printer_id = serializers.IntegerField(required=False, allow_null=True)
+    bar_printer_id = serializers.IntegerField(required=False, allow_null=True)
+    receiver_url = serializers.CharField(required=False, allow_blank=True)
 
 
 class PosPinVerifyView(APIView):
@@ -433,9 +478,29 @@ class PosReceiptPrintView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, receipt_id: int):
-        receipt = PosReceipt.objects.filter(id=receipt_id).prefetch_related("items").first()
+        receipt = PosReceipt.objects.filter(id=receipt_id).prefetch_related("items", "barion_settlement_parts").first()
         if not receipt:
             return Response({"detail": "Račun ne postoji."}, status=status.HTTP_404_NOT_FOUND)
+
+        payment_type_raw = str(receipt.payment_type or "").strip().lower()
+        payment_type_label = "Kartica" if payment_type_raw == "card" else "Gotovina"
+        card_masked_pan = ""
+        card_brand = ""
+        if payment_type_raw == "card":
+            card_masked_pan = (
+                receipt.barion_settlement_parts.exclude(card_masked_pan="")
+                .order_by("-id")
+                .values_list("card_masked_pan", flat=True)
+                .first()
+                or ""
+            )
+            card_brand = (
+                receipt.barion_settlement_parts.exclude(card_brand="")
+                .order_by("-id")
+                .values_list("card_brand", flat=True)
+                .first()
+                or ""
+            )
 
         # Thermal roll: 80mm width, dynamic height
         line_h = 4 * mm
@@ -443,7 +508,9 @@ class PosReceiptPrintView(APIView):
         address = ""
         if company:
             address = " ".join(part for part in [company.address, company.postal_code, company.city] if part)
-        header_lines = 3  # title + receipt number + date
+        header_lines = 4  # title + receipt number + date + payment type
+        if card_masked_pan:
+            header_lines += 1
         if address:
             header_lines += 1
         if company and company.oib:
@@ -490,6 +557,12 @@ class PosReceiptPrintView(APIView):
         y -= line_h
         c.drawString(x_left, y, f"Datum: {receipt.issued_at:%d.%m.%Y %H:%M}")
         y -= line_h
+        c.drawString(x_left, y, f"Placanje: {payment_type_label}")
+        y -= line_h
+        if card_masked_pan:
+            brand_label = card_brand or "Kartica"
+            c.drawString(x_left, y, f"{brand_label}: {card_masked_pan}")
+            y -= line_h
 
         c.setFont(font_bold, 8)
         c.drawString(x_left, y, "Artikl")
@@ -588,6 +661,200 @@ class PosDetailView(APIView):
         serializer.is_valid(raise_exception=True)
         pos = serializer.save()
         return Response(PosSerializer(pos).data)
+
+
+class PosPrinterSyncView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _resolve_device_for_user(*, user, device_id: str):
+        device = (
+            PosDevice.objects.select_related("pos")
+            .filter(device_id=device_id, is_active=True, pos__is_active=True)
+            .first()
+        )
+        if not device:
+            return None, Response({"detail": "Uređaj nije pronađen ili nije aktivan."}, status=status.HTTP_404_NOT_FOUND)
+
+        profile = getattr(user, "pos_profile", None)
+        if profile and profile.is_registered and profile.registered_device_id and profile.registered_device_id != device_id:
+            return None, Response({"detail": "Korisnik nije registriran za ovaj uređaj."}, status=status.HTTP_403_FORBIDDEN)
+        return device, None
+
+    def post(self, request):
+        serializer = PosPrinterSyncRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        device_id = str(data["device_id"]).strip()
+        device, error = self._resolve_device_for_user(user=request.user, device_id=device_id)
+        if error:
+            return error
+
+        receiver_url = str(data["receiver_url"]).strip()
+        printer_rows = data.get("printers") or []
+        now = timezone.now()
+
+        seen_ids: list[int] = []
+        upserted_count = 0
+        for row in printer_rows:
+            name = str(row.get("name", "")).strip()
+            if not name:
+                continue
+            defaults = {
+                "is_default": bool(row.get("is_default", False)),
+                "status": str(row.get("status", "") or "").strip(),
+                "is_active": True,
+                "last_seen_at": now,
+                "raw_payload": row.get("raw") or {},
+            }
+            printer, _ = PosPrinterInventory.objects.update_or_create(
+                device=device,
+                name=name,
+                defaults=defaults,
+            )
+            seen_ids.append(printer.id)
+            upserted_count += 1
+
+        inactive_qs = device.printers.filter(is_active=True)
+        if seen_ids:
+            inactive_qs = inactive_qs.exclude(id__in=seen_ids)
+        inactive_ids = list(inactive_qs.values_list("id", flat=True))
+        inactive_count = inactive_qs.update(is_active=False)
+
+        update_fields = []
+        if device.print_receiver_url != receiver_url:
+            device.print_receiver_url = receiver_url
+            update_fields.append("print_receiver_url")
+        if device.receipt_printer_id and device.receipt_printer_id in inactive_ids:
+            device.receipt_printer = None
+            update_fields.append("receipt_printer")
+        if device.bar_printer_id and device.bar_printer_id in inactive_ids:
+            device.bar_printer = None
+            update_fields.append("bar_printer")
+        if update_fields:
+            device.save(update_fields=update_fields)
+
+        return Response(
+            {
+                "device_id": device.device_id,
+                "upserted_count": upserted_count,
+                "inactive_count": inactive_count,
+                "active_printer_ids": seen_ids,
+            }
+        )
+
+
+class PosPrinterListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _as_bool(value, *, default=False) -> bool:
+        if value is None:
+            return default
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def get(self, request):
+        device_id = str(request.GET.get("device_id", "") or "").strip()
+        if not device_id:
+            return Response({"detail": "device_id je obavezan."}, status=status.HTTP_400_BAD_REQUEST)
+
+        device = (
+            PosDevice.objects.select_related("pos")
+            .filter(device_id=device_id, is_active=True, pos__is_active=True)
+            .first()
+        )
+        if not device:
+            return Response({"detail": "Uređaj nije pronađen ili nije aktivan."}, status=status.HTTP_404_NOT_FOUND)
+
+        profile = getattr(request.user, "pos_profile", None)
+        if profile and profile.is_registered and profile.registered_device_id and profile.registered_device_id != device_id:
+            return Response({"detail": "Korisnik nije registriran za ovaj uređaj."}, status=status.HTTP_403_FORBIDDEN)
+
+        active_only = self._as_bool(request.GET.get("active_only"), default=True)
+        qs = device.printers.all().order_by("-is_default", "name", "id")
+        if active_only:
+            qs = qs.filter(is_active=True)
+
+        return Response(
+            {
+                "device_id": device.device_id,
+                "receiver_url": device.print_receiver_url,
+                "receipt_printer_id": device.receipt_printer_id,
+                "bar_printer_id": device.bar_printer_id,
+                "printers": PosPrinterInventorySerializer(qs, many=True).data,
+            }
+        )
+
+
+class PosDevicePrinterSelectionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, device_id: str):
+        serializer = PosDevicePrinterSelectionRequestSerializer(data=request.data or {})
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        if not data:
+            return Response({"detail": "Nema podataka za ažuriranje."}, status=status.HTTP_400_BAD_REQUEST)
+
+        device = (
+            PosDevice.objects.select_related("pos")
+            .filter(device_id=device_id, is_active=True, pos__is_active=True)
+            .first()
+        )
+        if not device:
+            return Response({"detail": "Uređaj nije pronađen ili nije aktivan."}, status=status.HTTP_404_NOT_FOUND)
+
+        profile = getattr(request.user, "pos_profile", None)
+        if profile and profile.is_registered and profile.registered_device_id and profile.registered_device_id != device_id:
+            return Response({"detail": "Korisnik nije registriran za ovaj uređaj."}, status=status.HTTP_403_FORBIDDEN)
+
+        update_fields = []
+        if "receiver_url" in data:
+            receiver_url = str(data.get("receiver_url", "") or "").strip()
+            if device.print_receiver_url != receiver_url:
+                device.print_receiver_url = receiver_url
+                update_fields.append("print_receiver_url")
+
+        for field_name in ("receipt_printer_id", "bar_printer_id"):
+            if field_name not in data:
+                continue
+            value = data.get(field_name)
+            target_field = "receipt_printer" if field_name == "receipt_printer_id" else "bar_printer"
+            if value is None:
+                setattr(device, target_field, None)
+                update_fields.append(target_field)
+                continue
+
+            printer = PosPrinterInventory.objects.filter(
+                id=value,
+                device=device,
+                is_active=True,
+            ).first()
+            if not printer:
+                return Response(
+                    {"detail": f"Printer {value} nije aktivan ili ne pripada uređaju {device_id}."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            setattr(device, target_field, printer)
+            update_fields.append(target_field)
+
+        if update_fields:
+            device.save(update_fields=sorted(set(update_fields)))
+
+        return Response(
+            {
+                "device_id": device.device_id,
+                "receiver_url_effective": device.print_receiver_url,
+                "receipt_printer": (
+                    PosPrinterInventorySerializer(device.receipt_printer).data if device.receipt_printer_id else None
+                ),
+                "bar_printer": (
+                    PosPrinterInventorySerializer(device.bar_printer).data if device.bar_printer_id else None
+                ),
+            }
+        )
 
 
 class PosShiftTurnoverView(APIView):
