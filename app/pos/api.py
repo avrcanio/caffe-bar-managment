@@ -502,6 +502,11 @@ class PosReceiptPrintView(APIView):
                 or ""
             )
 
+        tip_total = sum(
+            (part.tip_amount or Decimal("0.00")) for part in receipt.barion_settlement_parts.all()
+        ).quantize(Decimal("0.01"))
+        show_tip = tip_total > Decimal("0.00")
+
         # Thermal roll: 80mm width, dynamic height
         line_h = 4 * mm
         company = CompanyProfile.objects.first()
@@ -516,7 +521,7 @@ class PosReceiptPrintView(APIView):
         if company and company.oib:
             header_lines += 1
         header_h = (header_lines + 1) * line_h
-        totals_h = 20 * mm
+        totals_h = (20 + (4 if show_tip else 0)) * mm
         qr_h = 35 * mm if receipt.qr_payload else 0
         items_h = max(1, receipt.items.count()) * line_h
         height = header_h + items_h + totals_h + qr_h + 10 * mm
@@ -582,6 +587,9 @@ class PosReceiptPrintView(APIView):
         y -= line_h
         c.drawRightString(x_right, y, f"Ukupno: {receipt.total_amount:.2f} {receipt.currency}")
         y -= line_h
+        if show_tip:
+            c.drawRightString(x_right, y, f"Tip: {tip_total:.2f} {receipt.currency}")
+            y -= line_h
 
         if receipt.zki:
             c.setFont(font_regular, 7)
