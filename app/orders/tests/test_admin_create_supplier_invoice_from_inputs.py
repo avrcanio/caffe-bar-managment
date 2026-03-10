@@ -107,3 +107,18 @@ class CreateSupplierInvoiceFromInputsTests(TestCase):
         self.admin.create_supplier_invoice_from_inputs(request, qs)
 
         self.assertEqual(SupplierInvoice.objects.count(), 1)
+
+    def test_creates_incremented_invoice_when_same_supplier_invoice_number_exists(self):
+        SupplierInvoice.objects.create(
+            supplier=self.supplier,
+            invoice_number="INV-1",
+            invoice_date=timezone.localdate(),
+        )
+
+        request = self._get_request()
+        qs = WarehouseInput.objects.filter(id=self.input.id)
+        self.admin.create_supplier_invoice_from_inputs(request, qs)
+
+        self.assertEqual(SupplierInvoice.objects.count(), 2)
+        created = SupplierInvoice.objects.order_by("-id").first()
+        self.assertEqual(created.invoice_number, "INV-1 (1)")

@@ -37,7 +37,9 @@ from orders.api import (
     PurchaseOrderListCreateView,
     PurchaseOrderWarehouseInputCreateView,
     PurchaseOrderSendView,
+    SupplierInvoicePostView,
     SupplierArtiklListView,
+    WarehouseInputCreateSupplierInvoiceView,
 )
 from artikli.api import (
     ArtiklDetailView,
@@ -156,6 +158,8 @@ urlpatterns = [
     path('api/purchase-orders/<int:pk>/send/', PurchaseOrderSendView.as_view(), name='api-purchase-order-send'),
     path('api/purchase-orders/<int:pk>/warehouse-inputs/', PurchaseOrderWarehouseInputCreateView.as_view(), name='api-purchase-order-warehouse-input-create'),
     path('api/purchase-orders/<int:order_id>/items/', PurchaseOrderItemListCreateView.as_view(), name='api-purchase-order-item-list'),
+    path('api/warehouse-inputs/<int:pk>/create-supplier-invoice/', WarehouseInputCreateSupplierInvoiceView.as_view(), name='api-warehouse-input-create-supplier-invoice'),
+    path('api/supplier-invoices/<int:pk>/post/', SupplierInvoicePostView.as_view(), name='api-supplier-invoice-post'),
     path('api/purchase-order-items/<int:pk>/', PurchaseOrderItemDetailView.as_view(), name='api-purchase-order-item-detail'),
     path('api/purchase-order-items/<int:pk>/price/', PurchaseOrderItemPriceUpdateView.as_view(), name='api-purchase-order-item-price-update'),
     path('api/suppliers/', SupplierListView.as_view(), name='api-supplier-list'),

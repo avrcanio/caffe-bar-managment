@@ -11,7 +11,7 @@ from django.core.exceptions import ValidationError
 from django.http import HttpResponseRedirect
 from django.template.response import TemplateResponse
 from email.utils import formataddr, parseaddr
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.db.models import Sum
 from django.core.mail import EmailMessage
 from django.utils import timezone
@@ -111,6 +111,21 @@ def _extract_remaris_id(html_text):
     if match:
         return int(match.group(1))
     return None
+
+
+def _next_duplicate_supplier_invoice_number(supplier_id: int, base_number: str) -> str:
+    base = (base_number or "").strip()
+    if not base:
+        return "AUTO-1"
+    ordinal = 1
+    while True:
+        candidate = f"{base} ({ordinal})"
+        if not SupplierInvoice.objects.filter(
+            supplier_id=supplier_id,
+            invoice_number=candidate,
+        ).exists():
+            return candidate
+        ordinal += 1
 
 
 class PurchaseOrderItemInlineForm(forms.ModelForm):
@@ -1004,6 +1019,14 @@ class WarehouseInputAdmin(admin.ModelAdmin):
 
         supplier = inputs[0].supplier
         invoice_number = invoice_codes.pop() if invoice_codes else f"AUTO-{inputs[0].id}"
+        if SupplierInvoice.objects.filter(
+            supplier=supplier,
+            invoice_number=invoice_number,
+        ).exists():
+            invoice_number = _next_duplicate_supplier_invoice_number(
+                supplier.id,
+                invoice_number,
+            )
         invoice_date = max(inp.date for inp in inputs if inp.date)
         document_types = {inp.document_type_id for inp in inputs if inp.document_type_id}
         document_type = None
@@ -1034,18 +1057,26 @@ class WarehouseInputAdmin(admin.ModelAdmin):
         except Exception:
             cfg = None
 
-        invoice = SupplierInvoice.objects.create(
-            supplier=supplier,
-            invoice_number=invoice_number,
-            invoice_date=invoice_date,
-            deposit_total=totals.deposit_total,
-            total_net=totals.net_total,
-            total_vat=totals.vat_total,
-            total_gross=totals.gross_total,
-            document_type_id=document_type_id,
-            cash_account_id=cash_account_id,
-            paid_cash=force_cash,
-        )
+        try:
+            invoice = SupplierInvoice.objects.create(
+                supplier=supplier,
+                invoice_number=invoice_number,
+                invoice_date=invoice_date,
+                deposit_total=totals.deposit_total,
+                total_net=totals.net_total,
+                total_vat=totals.vat_total,
+                total_gross=totals.gross_total,
+                document_type_id=document_type_id,
+                cash_account_id=cash_account_id,
+                paid_cash=force_cash,
+            )
+        except IntegrityError as exc:
+            self.message_user(
+                request,
+                f"Ne mogu kreirati ulazni račun zbog duplikata broja ({invoice_number}): {exc}",
+                level=messages.ERROR,
+            )
+            return
         if cfg:
             update_fields = []
             if not invoice.cash_account_id and cfg.default_cash_account_id:

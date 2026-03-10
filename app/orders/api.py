@@ -3,6 +3,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from django.db import transaction
 from django.conf import settings
 from django.core.mail import EmailMessage
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import Count, Q, Sum
 from django.urls import reverse
 from email.utils import formataddr, parseaddr
@@ -16,10 +17,17 @@ from rest_framework.permissions import IsAuthenticated
 from drf_spectacular.utils import extend_schema
 
 from configuration.models import CompanyProfile, OrderEmailTemplate
+from accounting.services import (
+    compute_purchase_totals_from_items,
+    flatten_input_items,
+    post_purchase_invoice_close_receipt,
+    post_warehouse_input_to_journal,
+)
 from .models import (
     PurchaseOrder,
     PurchaseOrderItem,
     PurchaseOrderItemPriceAudit,
+    SupplierInvoice,
     WarehouseInput,
     WarehouseInputItem,
     SupplierPriceItem,
@@ -27,6 +35,7 @@ from .models import (
 )
 from .pdf import build_order_pdf
 from stock.models import WarehouseStock, WarehouseId
+from stock.services import get_stock_accounting_config, post_warehouse_input_to_stock
 
 
 class PurchaseOrderItemSerializer(serializers.ModelSerializer):
@@ -432,6 +441,183 @@ def _po_item_remaining_map(
     return out
 
 
+def _is_cash_payment_type(payment_type) -> bool:
+    if not payment_type:
+        return False
+    name = (getattr(payment_type, "name", "") or "").strip().lower()
+    return name == "gotovina" or getattr(payment_type, "id", None) == 3
+
+
+def _next_duplicate_invoice_number(supplier_id: int, base_number: str) -> str:
+    base = (base_number or "").strip()
+    if not base:
+        return "AUTO-1"
+    ordinal = 1
+    while True:
+        candidate = f"{base} ({ordinal})"
+        if not SupplierInvoice.objects.filter(
+            supplier_id=supplier_id,
+            invoice_number=candidate,
+        ).exists():
+            return candidate
+        ordinal += 1
+
+
+def _post_warehouse_input(warehouse_input: WarehouseInput, *, user) -> bool:
+    changed = False
+    if not warehouse_input.stock_move_id:
+        post_warehouse_input_to_stock(warehouse_input=warehouse_input)
+        warehouse_input.refresh_from_db(fields=["stock_move"])
+        changed = True
+    if not warehouse_input.journal_entry_id:
+        post_warehouse_input_to_journal(
+            warehouse_input=warehouse_input,
+            user=user,
+        )
+        warehouse_input.refresh_from_db(fields=["journal_entry"])
+        changed = True
+    return changed
+
+
+def _create_supplier_invoice_from_warehouse_input(
+    warehouse_input: WarehouseInput,
+) -> tuple[SupplierInvoice, bool]:
+    linked = warehouse_input.supplier_invoices.order_by("id").first()
+    if linked:
+        return linked, False
+    if not warehouse_input.stock_move_id or not warehouse_input.journal_entry_id:
+        raise DjangoValidationError("Primka mora biti proknjižena prije kreiranja ulaznog računa.")
+
+    invoice_code = (warehouse_input.invoice_code or "").strip()
+    if not invoice_code:
+        raise DjangoValidationError("Primka nema broj računa (invoice_code).")
+
+    supplier_id = warehouse_input.supplier_id
+    supplier = warehouse_input.supplier
+    if not supplier_id or not supplier:
+        raise DjangoValidationError("Primka nema dobavljača.")
+
+    invoice_number = invoice_code
+    if SupplierInvoice.objects.filter(
+        supplier_id=supplier_id,
+        invoice_number=invoice_number,
+    ).exists():
+        invoice_number = _next_duplicate_invoice_number(
+            supplier_id,
+            invoice_number,
+        )
+
+    items = list(warehouse_input.items.select_related("artikl__tax_group", "artikl__deposit"))
+    if not items:
+        raise DjangoValidationError("Primka nema stavki.")
+    totals = compute_purchase_totals_from_items(items, deposit_total=None)
+
+    force_cash = _is_cash_payment_type(warehouse_input.payment_type)
+    payment_terms = (
+        SupplierInvoice.PaymentTerms.CASH
+        if force_cash
+        else SupplierInvoice.PaymentTerms.DEFERRED
+    )
+    document_type_id = 3 if force_cash else warehouse_input.document_type_id
+
+    cfg = None
+    try:
+        cfg = get_stock_accounting_config()
+    except Exception:
+        cfg = None
+
+    invoice = SupplierInvoice.objects.create(
+        supplier=supplier,
+        invoice_number=invoice_number,
+        invoice_date=warehouse_input.date or timezone.localdate(),
+        payment_terms=payment_terms,
+        paid_cash=force_cash,
+        document_type_id=document_type_id,
+        deposit_total=totals.deposit_total,
+        total_net=totals.net_total,
+        total_vat=totals.vat_total,
+        total_gross=totals.gross_total,
+    )
+    update_fields: list[str] = []
+    if cfg:
+        if force_cash and not invoice.cash_account_id and cfg.default_cash_account_id:
+            invoice.cash_account = cfg.default_cash_account
+            update_fields.append("cash_account")
+        if invoice.deposit_total > 0 and not invoice.deposit_account_id:
+            if cfg.default_deposit_account_id:
+                invoice.deposit_account = cfg.default_deposit_account
+            else:
+                invoice.deposit_account_id = 1318
+            update_fields.append("deposit_account")
+    if not force_cash and not invoice.ap_account_id and document_type_id:
+        document_type = warehouse_input.document_type
+        if document_type and document_type.ap_account_id:
+            invoice.ap_account = document_type.ap_account
+            update_fields.append("ap_account")
+    if update_fields:
+        invoice.save(update_fields=update_fields)
+
+    invoice.inputs.add(warehouse_input)
+    return invoice, True
+
+
+def _post_supplier_invoice(invoice: SupplierInvoice, *, user) -> bool:
+    if invoice.journal_entry_id:
+        return False
+    if not invoice.document_type_id:
+        raise DjangoValidationError(f"Račun {invoice.id} nema document_type.")
+
+    cfg = None
+    try:
+        cfg = get_stock_accounting_config()
+    except Exception:
+        cfg = None
+
+    update_fields: list[str] = []
+    if not invoice.ap_account_id and invoice.document_type and invoice.document_type.ap_account_id:
+        invoice.ap_account = invoice.document_type.ap_account
+        update_fields.append("ap_account")
+    if invoice.payment_terms == invoice.PaymentTerms.CASH:
+        if not invoice.cash_account_id and cfg and cfg.default_cash_account_id:
+            invoice.cash_account = cfg.default_cash_account
+            update_fields.append("cash_account")
+    if invoice.deposit_total > 0 and not invoice.deposit_account_id and cfg and cfg.default_deposit_account_id:
+        invoice.deposit_account = cfg.default_deposit_account
+        update_fields.append("deposit_account")
+    if update_fields:
+        invoice.save(update_fields=update_fields)
+
+    if invoice.payment_terms == invoice.PaymentTerms.CASH and not invoice.cash_account_id:
+        raise DjangoValidationError(f"Račun {invoice.id} nema cash_account za gotovinu.")
+    if invoice.payment_terms == invoice.PaymentTerms.DEFERRED and not invoice.ap_account_id:
+        raise DjangoValidationError(f"Račun {invoice.id} nema ap_account za odgodu.")
+    if invoice.deposit_total > 0 and not invoice.deposit_account_id:
+        raise DjangoValidationError(f"Račun {invoice.id} ima depozit, ali nema deposit_account.")
+
+    items = flatten_input_items(invoice.inputs.all())
+    include_cash = invoice.payment_terms == invoice.PaymentTerms.CASH
+    entry = post_purchase_invoice_close_receipt(
+        document_type=invoice.document_type,
+        doc_date=invoice.invoice_date,
+        items=items,
+        ap_account=invoice.ap_account,
+        deposit_account=invoice.deposit_account,
+        cash_account=invoice.cash_account,
+        include_cash_payment=include_cash,
+        description=f"Ulazni racun {invoice.invoice_number}",
+        posted_by=user,
+    )
+    invoice.journal_entry = entry
+    if include_cash:
+        invoice.paid_cash = True
+        invoice.paid_at = invoice.paid_at or timezone.localdate()
+        invoice.payment_status = invoice.PaymentStatus.PAID
+    else:
+        invoice.payment_status = invoice.PaymentStatus.UNPAID
+    invoice.save(update_fields=["journal_entry", "paid_cash", "paid_at", "payment_status"])
+    return True
+
+
 class PurchaseOrderWarehouseInputItemCreateSerializer(serializers.Serializer):
     purchase_order_item_id = serializers.IntegerField()
     received_quantity = serializers.DecimalField(max_digits=12, decimal_places=4, min_value=Decimal("0"))
@@ -477,6 +663,7 @@ class PurchaseOrderWarehouseInputCreateSerializer(serializers.Serializer):
 class PurchaseOrderWarehouseInputCreateResponseSerializer(serializers.Serializer):
     warehouse_input = serializers.DictField()
     purchase_order = serializers.DictField()
+    automation = serializers.DictField(required=False)
 
 
 class PurchaseOrderWarehouseInputCreateView(APIView):
@@ -636,6 +823,35 @@ class PurchaseOrderWarehouseInputCreateView(APIView):
         WarehouseInputItem.objects.bulk_create(lines)
         wi.recalculate_total(persist=True)
 
+        automation = {
+            "warehouse_input_posted": False,
+            "supplier_invoice_created": False,
+            "supplier_invoice_posted": False,
+            "supplier_invoice_id": None,
+            "supplier_invoice_number": "",
+        }
+        try:
+            automation["warehouse_input_posted"] = _post_warehouse_input(
+                wi,
+                user=request.user,
+            ) or bool(wi.stock_move_id and wi.journal_entry_id)
+
+            invoice_code = (wi.invoice_code or "").strip()
+            if invoice_code:
+                supplier_invoice, created = _create_supplier_invoice_from_warehouse_input(wi)
+                automation["supplier_invoice_created"] = created
+                automation["supplier_invoice_id"] = supplier_invoice.id
+                automation["supplier_invoice_number"] = supplier_invoice.invoice_number
+                if _is_cash_payment_type(wi.payment_type):
+                    posted = _post_supplier_invoice(supplier_invoice, user=request.user)
+                    automation["supplier_invoice_posted"] = posted or bool(
+                        supplier_invoice.journal_entry_id
+                    )
+        except DjangoValidationError as exc:
+            transaction.set_rollback(True)
+            detail = "; ".join(exc.messages) if hasattr(exc, "messages") else str(exc)
+            return Response({"detail": detail}, status=400)
+
         received_by_artikl = _po_received_by_artikl(order)
         remaining_map = _po_item_remaining_map(po_items, received_by_artikl)
         if all(v["remaining"] == Decimal("0") for v in remaining_map.values()):
@@ -664,8 +880,107 @@ class PurchaseOrderWarehouseInputCreateView(APIView):
                     "status_label": order.get_status_display(),
                     "primka_created": order.primka_created,
                 },
+                "automation": automation,
             },
             status=201,
+        )
+
+
+class WarehouseInputCreateSupplierInvoiceResponseSerializer(serializers.Serializer):
+    warehouse_input_id = serializers.IntegerField()
+    supplier_invoice_id = serializers.IntegerField()
+    invoice_number = serializers.CharField()
+    created = serializers.BooleanField()
+    posted = serializers.BooleanField()
+
+
+class WarehouseInputCreateSupplierInvoiceView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        responses={200: WarehouseInputCreateSupplierInvoiceResponseSerializer},
+    )
+    @transaction.atomic
+    def post(self, request, pk):
+        warehouse_input = (
+            WarehouseInput.objects.select_related(
+                "supplier",
+                "document_type__ap_account",
+                "payment_type",
+            )
+            .prefetch_related("supplier_invoices", "items__artikl__tax_group", "items__artikl__deposit")
+            .filter(pk=pk)
+            .first()
+        )
+        if not warehouse_input:
+            return Response({"detail": "Primka ne postoji."}, status=404)
+
+        try:
+            supplier_invoice, created = _create_supplier_invoice_from_warehouse_input(warehouse_input)
+        except DjangoValidationError as exc:
+            detail = "; ".join(exc.messages) if hasattr(exc, "messages") else str(exc)
+            return Response({"detail": detail}, status=400)
+
+        return Response(
+            {
+                "warehouse_input_id": warehouse_input.id,
+                "supplier_invoice_id": supplier_invoice.id,
+                "invoice_number": supplier_invoice.invoice_number,
+                "created": created,
+                "posted": bool(supplier_invoice.journal_entry_id),
+            }
+        )
+
+
+class SupplierInvoicePostResponseSerializer(serializers.Serializer):
+    supplier_invoice_id = serializers.IntegerField()
+    journal_entry_id = serializers.IntegerField(allow_null=True)
+    posted = serializers.BooleanField()
+    already_posted = serializers.BooleanField()
+    payment_status = serializers.CharField()
+
+
+class SupplierInvoicePostView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        responses={200: SupplierInvoicePostResponseSerializer},
+    )
+    @transaction.atomic
+    def post(self, request, pk):
+        supplier_invoice = (
+            SupplierInvoice.objects.select_related(
+                "document_type__ap_account",
+                "cash_account",
+                "ap_account",
+                "deposit_account",
+                "journal_entry",
+            )
+            .prefetch_related("inputs__items__artikl__tax_group", "inputs__items__artikl__deposit")
+            .filter(pk=pk)
+            .first()
+        )
+        if not supplier_invoice:
+            return Response({"detail": "Ulazni račun ne postoji."}, status=404)
+
+        already_posted = bool(supplier_invoice.journal_entry_id)
+        posted = False
+        if not already_posted:
+            try:
+                posted = _post_supplier_invoice(supplier_invoice, user=request.user)
+            except DjangoValidationError as exc:
+                detail = "; ".join(exc.messages) if hasattr(exc, "messages") else str(exc)
+                return Response({"detail": detail}, status=400)
+            supplier_invoice.refresh_from_db(fields=["journal_entry", "payment_status"])
+
+        return Response(
+            {
+                "supplier_invoice_id": supplier_invoice.id,
+                "journal_entry_id": supplier_invoice.journal_entry_id,
+                "posted": posted,
+                "already_posted": already_posted,
+                "payment_status": supplier_invoice.payment_status,
+            }
         )
 
 
