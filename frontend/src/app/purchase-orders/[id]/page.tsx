@@ -75,11 +75,12 @@ export default function PurchaseOrderDetailPage() {
     new Date().toISOString().slice(0, 10)
   );
   const [receiptLines, setReceiptLines] = useState<ReceiptLineState[]>([]);
-  const [editingPriceItemId, setEditingPriceItemId] = useState<number | null>(null);
-  const [priceDraftByItemId, setPriceDraftByItemId] = useState<Record<number, string>>({});
-  const [priceReasonByItemId, setPriceReasonByItemId] = useState<Record<number, string>>({});
-  const [priceErrorByItemId, setPriceErrorByItemId] = useState<Record<number, string>>({});
-  const [priceSavingItemId, setPriceSavingItemId] = useState<number | null>(null);
+  const [showPriceAuditModal, setShowPriceAuditModal] = useState(false);
+  const [activePriceItemId, setActivePriceItemId] = useState<number | null>(null);
+  const [modalPriceDraft, setModalPriceDraft] = useState("");
+  const [modalReasonDraft, setModalReasonDraft] = useState("");
+  const [modalPriceError, setModalPriceError] = useState("");
+  const [modalPriceSaving, setModalPriceSaving] = useState(false);
   const [priceAuditByItemId, setPriceAuditByItemId] = useState<Record<number, PriceAuditState>>({});
   const [priceEditedItemId, setPriceEditedItemId] = useState<Record<number, boolean>>({});
 
@@ -184,7 +185,6 @@ export default function PurchaseOrderDetailPage() {
     normalizedStatusLabel === "potvrđena" ||
     normalizedStatusLabel === "djelomično zaprimljena";
   const isStatusActionEnabled = Boolean(canSendOrder || canCreateReceipt);
-  const hasOpenPriceEdit = editingPriceItemId !== null;
   const receiptTotalNet = useMemo(() => {
     const byId = new Map((order?.items || []).map((item) => [item.id, item]));
     return receiptLines.reduce((sum, line) => {
@@ -207,6 +207,101 @@ export default function PurchaseOrderDetailPage() {
     () => (order?.items || []).filter((item) => item.remainingQuantity > 0),
     [order?.items]
   );
+
+  const openPriceAuditModal = useCallback((itemId: number) => {
+    const line = receiptLines.find((value) => value.itemId === itemId);
+    setActivePriceItemId(itemId);
+    setModalPriceDraft(line?.expectedUnitPrice || "0.00");
+    setModalReasonDraft("");
+    setModalPriceError("");
+    setShowPriceAuditModal(true);
+  }, [receiptLines]);
+
+  const savePriceFromModal = useCallback(async () => {
+    if (!activePriceItemId) {
+      return;
+    }
+    const activeItem = receiptEligibleItems.find((item) => item.id === activePriceItemId);
+    if (!activeItem) {
+      setModalPriceError("Stavka više nije dostupna.");
+      return;
+    }
+
+    const normalizedInput = modalPriceDraft.trim();
+    const parsedPrice = Number(normalizedInput);
+    if (!normalizedInput || Number.isNaN(parsedPrice) || parsedPrice < 0) {
+      setModalPriceError("Unesi ispravnu cijenu (>= 0).");
+      return;
+    }
+    const newPrice = parsedPrice.toFixed(2);
+    const oldPrice = activeItem.price !== null ? Number(activeItem.price).toFixed(2) : "0.00";
+    if (newPrice === oldPrice) {
+      setReceiptLines((prev) =>
+        prev.map((row) =>
+          row.itemId === activePriceItemId
+            ? { ...row, expectedUnitPrice: newPrice }
+            : row
+        )
+      );
+      setShowPriceAuditModal(false);
+      setActivePriceItemId(null);
+      return;
+    }
+
+    const customReason = modalReasonDraft.trim();
+    const reason = customReason
+      ? `Korekcija ulazne cijene - ${customReason}`
+      : "Korekcija ulazne cijene";
+
+    setModalPriceSaving(true);
+    setModalPriceError("");
+    try {
+      const payload = await apiPatchJson<PricePatchResponse>(
+        `/api/purchase-order-items/${activePriceItemId}/price/`,
+        {
+          price: newPrice,
+          currency: "EUR",
+          reason,
+        },
+        { csrf: true }
+      );
+      const by = (
+        payload.audit?.changed_by?.full_name ||
+        payload.audit?.changed_by?.username ||
+        "Korisnik"
+      ).trim();
+      setPriceAuditByItemId((prev) => ({
+        ...prev,
+        [activePriceItemId]: {
+          oldPrice: payload.old_price,
+          newPrice: payload.new_price,
+          changedAt: payload.audit.changed_at,
+          changedBy: by,
+          reason: payload.audit.reason,
+        },
+      }));
+      setPriceEditedItemId((prev) => ({
+        ...prev,
+        [activePriceItemId]: true,
+      }));
+      setReceiptLines((prev) =>
+        prev.map((row) =>
+          row.itemId === activePriceItemId
+            ? { ...row, expectedUnitPrice: payload.new_price }
+            : row
+        )
+      );
+      await loadOrder();
+      setShowPriceAuditModal(false);
+      setActivePriceItemId(null);
+    } catch (err) {
+      setModalPriceError(
+        err instanceof Error ? err.message : "Promjena cijene nije uspjela."
+      );
+    } finally {
+      setModalPriceSaving(false);
+    }
+  }, [activePriceItemId, loadOrder, modalPriceDraft, modalReasonDraft, receiptEligibleItems]);
 
   const submitReceipt = useCallback(async () => {
     if (!order) {
@@ -253,6 +348,12 @@ export default function PurchaseOrderDetailPage() {
     receiptTotalNet,
     selectedWarehouseId,
   ]);
+  const activePriceItem =
+    activePriceItemId !== null
+      ? receiptEligibleItems.find((item) => item.id === activePriceItemId) || null
+      : null;
+  const activePriceAudit =
+    activePriceItemId !== null ? priceAuditByItemId[activePriceItemId] : null;
 
   return (
     <main className="min-h-screen bg-[#f2ebe0] text-[#121212]">
@@ -313,12 +414,6 @@ export default function PurchaseOrderDetailPage() {
                     type="button"
                     onClick={() => {
                       if (card.label === "Status" && canCreateReceipt && order) {
-                        if (hasOpenPriceEdit) {
-                          setError(
-                            "Prvo spremi ili odustani od otvorene izmjene cijene."
-                          );
-                          return;
-                        }
                         if (receiptEligibleItems.length === 0) {
                           setError("Nema preostalih količina za novu primku.");
                           return;
@@ -329,6 +424,12 @@ export default function PurchaseOrderDetailPage() {
                         setReceiptInvoiceCode("");
                         setReceiptDeliveryNote("");
                         setReceiptDocumentDate(new Date().toISOString().slice(0, 10));
+                        setShowPriceAuditModal(false);
+                        setActivePriceItemId(null);
+                        setModalPriceDraft("");
+                        setModalReasonDraft("");
+                        setModalPriceError("");
+                        setModalPriceSaving(false);
                         setReceiptLines(
                           receiptEligibleItems.map((item) => ({
                             itemId: item.id,
@@ -447,128 +548,7 @@ export default function PurchaseOrderDetailPage() {
                                 Audit
                               </span>
                             ) : null}
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setEditingPriceItemId(item.id);
-                                setPriceDraftByItemId((prev) => ({
-                                  ...prev,
-                                  [item.id]:
-                                    prev[item.id] !== undefined
-                                      ? prev[item.id]
-                                      : item.price !== null
-                                      ? item.price.toFixed(2)
-                                      : "0.00",
-                                }));
-                              }}
-                              className="rounded-full border border-black/20 bg-white/80 px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] text-black/70"
-                            >
-                              Uredi cijenu
-                            </button>
                           </div>
-                          {editingPriceItemId === item.id ? (
-                            <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-[0.8fr_1.4fr_auto_auto]">
-                              <input
-                                type="number"
-                                step="0.01"
-                                value={priceDraftByItemId[item.id] ?? ""}
-                                onChange={(event) => {
-                                  const value = event.target.value;
-                                  setPriceDraftByItemId((prev) => ({
-                                    ...prev,
-                                    [item.id]: value,
-                                  }));
-                                }}
-                                className="rounded-full border border-black/20 bg-white px-3 py-1 text-xs text-black/70"
-                              />
-                              <input
-                                value={priceReasonByItemId[item.id] ?? ""}
-                                onChange={(event) => {
-                                  const value = event.target.value;
-                                  setPriceReasonByItemId((prev) => ({
-                                    ...prev,
-                                    [item.id]: value,
-                                  }));
-                                }}
-                                placeholder="Razlog promjene"
-                                className="rounded-full border border-black/20 bg-white px-3 py-1 text-xs text-black/70"
-                              />
-                              <button
-                                type="button"
-                                onClick={async () => {
-                                  setPriceSavingItemId(item.id);
-                                  setPriceErrorByItemId((prev) => ({
-                                    ...prev,
-                                    [item.id]: "",
-                                  }));
-                                  try {
-                                    const payload = await apiPatchJson<PricePatchResponse>(
-                                      `/api/purchase-order-items/${item.id}/price/`,
-                                      {
-                                        price: priceDraftByItemId[item.id] ?? "0.00",
-                                        currency: "EUR",
-                                        reason: (priceReasonByItemId[item.id] ?? "").trim(),
-                                      },
-                                      { csrf: true }
-                                    );
-                                    const by = (
-                                      payload.audit?.changed_by?.full_name ||
-                                      payload.audit?.changed_by?.username ||
-                                      "Korisnik"
-                                    ).trim();
-                                    setPriceAuditByItemId((prev) => ({
-                                      ...prev,
-                                      [item.id]: {
-                                        oldPrice: payload.old_price,
-                                        newPrice: payload.new_price,
-                                        changedAt: payload.audit.changed_at,
-                                        changedBy: by,
-                                        reason: payload.audit.reason,
-                                      },
-                                    }));
-                                    setPriceEditedItemId((prev) => ({
-                                      ...prev,
-                                      [item.id]: true,
-                                    }));
-                                    setEditingPriceItemId(null);
-                                    await loadOrder();
-                                  } catch (err) {
-                                    setPriceErrorByItemId((prev) => ({
-                                      ...prev,
-                                      [item.id]:
-                                        err instanceof Error
-                                          ? err.message
-                                          : "Promjena cijene nije uspjela.",
-                                    }));
-                                  } finally {
-                                    setPriceSavingItemId(null);
-                                  }
-                                }}
-                                disabled={priceSavingItemId === item.id}
-                                className="rounded-full border border-black/20 bg-white px-3 py-1 text-[10px] uppercase tracking-[0.12em] text-black/70 disabled:opacity-60"
-                              >
-                                {priceSavingItemId === item.id ? "Spremam..." : "Spremi"}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setEditingPriceItemId(null);
-                                  setPriceErrorByItemId((prev) => ({
-                                    ...prev,
-                                    [item.id]: "",
-                                  }));
-                                }}
-                                className="rounded-full border border-black/20 bg-white px-3 py-1 text-[10px] uppercase tracking-[0.12em] text-black/70"
-                              >
-                                Odustani
-                              </button>
-                              {priceErrorByItemId[item.id] ? (
-                                <p className="md:col-span-4 text-xs text-red-600">
-                                  {priceErrorByItemId[item.id]}
-                                </p>
-                              ) : null}
-                            </div>
-                          ) : null}
                           <p className="mt-1 text-xs text-black/60">
                             Ukupno:{" "}
                             {item.price !== null
@@ -725,7 +705,7 @@ export default function PurchaseOrderDetailPage() {
                 return (
                   <div
                     key={item.id}
-                    className="grid grid-cols-1 gap-2 rounded-2xl border border-black/10 bg-white/70 px-3 py-3 md:grid-cols-[1.4fr_0.8fr_0.8fr_0.8fr_auto]"
+                    className="grid grid-cols-1 gap-2 rounded-2xl border border-black/10 bg-white/70 px-3 py-3 md:grid-cols-[1.2fr_0.7fr_0.9fr_0.7fr_auto]"
                   >
                     <p className="text-sm font-semibold">{item.name}</p>
                     <input
@@ -743,20 +723,13 @@ export default function PurchaseOrderDetailPage() {
                       className="rounded-full border border-black/20 bg-white px-3 py-1 text-xs text-black/70"
                     />
                     <input
-                      type="number"
-                      step="0.01"
+                      type="text"
+                      readOnly
                       value={line?.expectedUnitPrice || "0.00"}
-                      onChange={(event) => {
-                        const value = event.target.value;
-                        setReceiptLines((prev) =>
-                          prev.map((row) =>
-                            row.itemId === item.id
-                              ? { ...row, expectedUnitPrice: value }
-                              : row
-                          )
-                        );
+                      onClick={() => {
+                        openPriceAuditModal(item.id);
                       }}
-                      className="rounded-full border border-black/20 bg-white px-3 py-1 text-xs text-black/70"
+                      className="cursor-pointer rounded-full border border-black/20 bg-white px-3 py-1 text-xs text-black/70"
                     />
                     <label className="inline-flex items-center gap-2 text-xs uppercase tracking-[0.12em] text-black/60">
                       <input
@@ -795,12 +768,6 @@ export default function PurchaseOrderDetailPage() {
               </button>
               <button
                 onClick={async () => {
-                  if (hasOpenPriceEdit) {
-                    setReceiptError(
-                      "Prvo spremi ili odustani od otvorene izmjene cijene."
-                    );
-                    return;
-                  }
                   if (receiptEligibleItems.length === 0) {
                     setReceiptError("Nema preostalih količina za zaprimanje.");
                     return;
@@ -824,10 +791,74 @@ export default function PurchaseOrderDetailPage() {
                   }
                   await submitReceipt();
                 }}
-                disabled={creatingReceipt || hasOpenPriceEdit}
+                disabled={creatingReceipt}
                 className="flex-1 rounded-full bg-[#f27323] px-4 py-2 text-xs uppercase tracking-[0.2em] text-black shadow-[0_12px_24px_rgba(242,115,35,0.35)] disabled:opacity-60"
               >
                 {creatingReceipt ? "Kreiram..." : "Kreiraj primku"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {showPriceAuditModal && activePriceItem ? (
+        <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/55 px-6">
+          <div className="w-full max-w-xl rounded-3xl border border-black/15 bg-white p-6 shadow-[0_30px_60px_rgba(10,10,10,0.3)]">
+            <h4 className={`${dmSerif.className} text-xl`}>Audit promjene cijene</h4>
+            <p className="mt-2 text-sm text-black/70">{activePriceItem.name}</p>
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <input
+                type="number"
+                step="0.01"
+                value={modalPriceDraft}
+                onChange={(event) => setModalPriceDraft(event.target.value)}
+                disabled={modalPriceSaving}
+                className="rounded-full border border-black/20 bg-white px-4 py-2 text-sm text-black/80"
+              />
+              <input
+                value={modalReasonDraft}
+                onChange={(event) => setModalReasonDraft(event.target.value)}
+                placeholder="Custom razlog (opcionalno)"
+                disabled={modalPriceSaving}
+                className="rounded-full border border-black/20 bg-white px-4 py-2 text-sm text-black/80"
+              />
+            </div>
+            <div className="mt-4 rounded-2xl border border-black/10 bg-[#f6f2ea] p-4 text-sm text-black/75">
+              {activePriceAudit ? (
+                <p>
+                  Zadnji audit: {activePriceAudit.oldPrice} → {activePriceAudit.newPrice}
+                  {" • "}Tko: {activePriceAudit.changedBy}
+                  {" • "}Kada: {new Date(activePriceAudit.changedAt).toLocaleString("hr-HR")}
+                  {" • "}Razlog: {activePriceAudit.reason}
+                </p>
+              ) : (
+                <p>Nema prethodnog audita za ovu stavku.</p>
+              )}
+            </div>
+            {modalPriceError ? (
+              <p className="mt-3 text-sm text-red-600">{modalPriceError}</p>
+            ) : null}
+            <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+              <button
+                type="button"
+                onClick={() => {
+                  if (modalPriceSaving) {
+                    return;
+                  }
+                  setShowPriceAuditModal(false);
+                  setActivePriceItemId(null);
+                  setModalPriceError("");
+                }}
+                className="flex-1 rounded-full border border-black/20 px-4 py-2 text-xs uppercase tracking-[0.2em] text-black/70"
+              >
+                Odustani
+              </button>
+              <button
+                type="button"
+                onClick={savePriceFromModal}
+                disabled={modalPriceSaving}
+                className="flex-1 rounded-full bg-[#f27323] px-4 py-2 text-xs uppercase tracking-[0.2em] text-black shadow-[0_12px_24px_rgba(242,115,35,0.35)] disabled:opacity-60"
+              >
+                {modalPriceSaving ? "Spremam..." : "Spremi"}
               </button>
             </div>
           </div>

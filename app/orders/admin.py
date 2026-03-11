@@ -1715,9 +1715,8 @@ class PurchaseOrderAdmin(admin.ModelAdmin):
         return super().has_delete_permission(request, obj)
 
     def has_change_permission(self, request, obj=None):
-        # Use Django's built-in "view-only" change form (no save buttons, no inline edits)
-        # by denying change permission for received orders.
-        if obj and obj.status in (PurchaseOrder.STATUS_RECEIVED, PurchaseOrder.STATUS_RECEIVED_ALL):
+        # Keep fully received orders in Django's built-in view-only mode.
+        if obj and obj.status == PurchaseOrder.STATUS_RECEIVED_ALL:
             return False
         return super().has_change_permission(request, obj)
 
@@ -1786,8 +1785,8 @@ class PurchaseOrderAdmin(admin.ModelAdmin):
                         order.status = PurchaseOrder.STATUS_RECEIVED_ALL
                         order.save(update_fields=["status"])
                     elif order.status not in (PurchaseOrder.STATUS_RECEIVED, PurchaseOrder.STATUS_RECEIVED_ALL):
-                        # Partial deliveries: keep order editable locked via STATUS_RECEIVED, but still
-                        # allow creating additional primke until fully received.
+                        # Partial deliveries: mark STATUS_RECEIVED and still allow
+                        # creating additional primke until fully received.
                         order.status = PurchaseOrder.STATUS_RECEIVED
                         order.save(update_fields=["status"])
 
