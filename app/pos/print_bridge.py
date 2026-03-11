@@ -48,6 +48,10 @@ def _bridge_token() -> str:
     return str(os.getenv("PRINT_BRIDGE_API_TOKEN", "")).strip()
 
 
+def _resolve_receiver_token(*, device) -> str:
+    return str(getattr(device, "print_receiver_token", "") or "").strip() if device else ""
+
+
 def _get_device_model():
     from pos.models import PosDevice
 
@@ -69,9 +73,20 @@ def _get_device_for_receipt(receipt):
         if device:
             return device
 
+    def _fallback_single_active_device():
+        active_devices = list(
+            PosDevice.objects.select_related("receipt_printer", "bar_printer")
+            .filter(is_active=True)
+            .order_by("id")[:2]
+        )
+        if len(active_devices) == 1:
+            logger.warning("Receipt missing pos/device binding; falling back to the only active POS device.")
+            return active_devices[0]
+        return None
+
     pos_id = getattr(receipt, "pos_id", None)
     if not pos_id:
-        return None
+        return _fallback_single_active_device()
 
     devices = list(
         PosDevice.objects.select_related("receipt_printer", "bar_printer")
@@ -80,19 +95,32 @@ def _get_device_for_receipt(receipt):
     )
     if len(devices) == 1:
         return devices[0]
+    if not devices:
+        return _fallback_single_active_device()
     return None
 
 
 def _get_device_for_bar_ticket(ticket: dict[str, Any]):
     device_id = str(ticket.get("device_id", "") or "").strip()
-    if not device_id:
-        return None
     PosDevice = _get_device_model()
-    return (
+    if device_id:
+        return (
+            PosDevice.objects.select_related("receipt_printer", "bar_printer")
+            .filter(device_id=device_id, is_active=True)
+            .first()
+        )
+
+    # Fallback for legacy/partially configured clients that do not send device_id:
+    # if there is exactly one active POS device, use it for bar printing.
+    active_devices = list(
         PosDevice.objects.select_related("receipt_printer", "bar_printer")
-        .filter(device_id=device_id, is_active=True)
-        .first()
+        .filter(is_active=True)
+        .order_by("id")[:2]
     )
+    if len(active_devices) == 1:
+        logger.warning("Bar ticket missing device_id; falling back to the only active POS device.")
+        return active_devices[0]
+    return None
 
 
 def _post_job(payload: dict[str, Any]) -> dict[str, Any]:
@@ -205,7 +233,8 @@ def send_bar_ticket_to_print_bridge(ticket: dict[str, Any]) -> None:
         receiver_url = str(os.getenv("BARION_BAR_RECEIVER_URL", "")).strip()
     if not printer_name:
         printer_name = str(os.getenv("BARION_BAR_PRINTER_NAME", "")).strip()
-    if not receiver_url or not printer_name:
+    receiver_token = _resolve_receiver_token(device=device)
+    if not receiver_url or not printer_name or not receiver_token:
         raise RuntimeError("Bar printer nije konfiguriran.")
 
     normalized_items = []
@@ -240,6 +269,7 @@ def send_bar_ticket_to_print_bridge(ticket: dict[str, Any]) -> None:
         "target": {
             "receiver_url": receiver_url,
             "printer_name": printer_name,
+            "receiver_token": receiver_token,
         },
         "payload": {
             "filename": (
@@ -292,9 +322,10 @@ def send_receipt_pdf_to_print_bridge(*, receipt, pdf_bytes: bytes) -> None:
         receiver_url = str(os.getenv("POS_RECEIPT_RECEIVER_URL", "")).strip()
     if not printer_name:
         printer_name = str(os.getenv("POS_RECEIPT_PRINTER_NAME", "")).strip()
+    receiver_token = _resolve_receiver_token(device=device)
 
-    if not receiver_url or not printer_name:
-        logger.info("Skipping receipt print bridge dispatch: missing receiver/printer config.")
+    if not receiver_url or not printer_name or not receiver_token:
+        logger.info("Skipping receipt print bridge dispatch: missing receiver/printer/token config.")
         return
 
     payload = {
@@ -302,6 +333,7 @@ def send_receipt_pdf_to_print_bridge(*, receipt, pdf_bytes: bytes) -> None:
         "target": {
             "receiver_url": receiver_url,
             "printer_name": printer_name,
+            "receiver_token": receiver_token,
         },
         "payload": {
             "filename": f"pos-receipt-{receipt.id}.pdf",

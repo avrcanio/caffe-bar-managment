@@ -1,4 +1,5 @@
 import os
+import secrets
 
 from django import forms
 from django.contrib import admin, messages
@@ -81,6 +82,7 @@ class PosDeviceAdmin(admin.ModelAdmin):
         "pos",
         "is_active",
         "print_receiver_url",
+        "print_receiver_token_masked",
         "receipt_printer",
         "bar_printer",
         "registered_at",
@@ -88,6 +90,18 @@ class PosDeviceAdmin(admin.ModelAdmin):
     list_filter = ("is_active", "pos")
     search_fields = ("device_id", "name")
     autocomplete_fields = ("pos", "receipt_printer", "bar_printer")
+
+    @admin.display(description="receiver token")
+    def print_receiver_token_masked(self, obj):
+        token = str(getattr(obj, "print_receiver_token", "") or "").strip()
+        if not token:
+            return "-"
+        return f"{token[:6]}...{token[-4:]}"
+
+    def save_model(self, request, obj, form, change):
+        if not str(obj.print_receiver_token or "").strip():
+            obj.print_receiver_token = secrets.token_hex(64)
+        super().save_model(request, obj, form, change)
 
 
 @admin.register(PosPrinterInventory)

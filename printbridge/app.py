@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 class TargetModel(BaseModel):
     receiver_url: str
     printer_name: str
+    receiver_token: str = Field(min_length=1)
 
 
 class JobRequest(BaseModel):
@@ -40,10 +41,6 @@ _worker_task: asyncio.Task | None = None
 
 def _bridge_token() -> str:
     return str(os.getenv("PRINT_BRIDGE_API_TOKEN", "")).strip()
-
-
-def _receiver_token() -> str:
-    return str(os.getenv("PRINT_BRIDGE_RECEIVER_TOKEN", "")).strip()
 
 
 def _require_auth(authorization: str | None = Header(default=None)):
@@ -76,7 +73,6 @@ def _retry_delays() -> list[int]:
 async def _worker_loop():
     delays = _retry_delays()
     timeout = float(os.getenv("PRINT_BRIDGE_RECEIVER_TIMEOUT", "10"))
-    receiver_token = _receiver_token()
 
     while True:
         job_id = await _queue.get()
@@ -90,6 +86,7 @@ async def _worker_loop():
 
         for delay in delays:
             headers = {"Content-Type": "application/json"}
+            receiver_token = str(job.body.target.receiver_token or "").strip()
             if receiver_token:
                 headers["X-Bridge-Token"] = receiver_token
 

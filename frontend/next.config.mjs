@@ -6,13 +6,14 @@ const nextConfig = {
   async headers() {
     return [
       {
-        source: "/download/:path*",
+        source: "/download/Blagajna.appinstaller",
         headers: [
+          { key: "Content-Type", value: "application/appinstaller" },
           { key: "Cache-Control", value: "no-store" },
         ],
       },
       {
-        source: "/download/Blagajna.appinstaller",
+        source: "/download/:file*.appinstaller",
         headers: [
           { key: "Content-Type", value: "application/appinstaller" },
           { key: "Cache-Control", value: "no-store" },
@@ -22,6 +23,13 @@ const nextConfig = {
         source: "/download/:file*.msix",
         headers: [
           { key: "Content-Type", value: "application/msix" },
+          { key: "Cache-Control", value: "public, max-age=31536000, immutable" },
+        ],
+      },
+      {
+        source: "/download/:file*.msixbundle",
+        headers: [
+          { key: "Content-Type", value: "application/msixbundle" },
           { key: "Cache-Control", value: "no-store" },
         ],
       },
@@ -30,6 +38,27 @@ const nextConfig = {
         headers: [
           { key: "Content-Type", value: "application/pkix-cert" },
           { key: "Cache-Control", value: "no-store" },
+        ],
+      },
+      {
+        source: "/download/:file*.ps1",
+        headers: [
+          { key: "Content-Type", value: "text/plain; charset=utf-8" },
+          { key: "Cache-Control", value: "no-store" },
+        ],
+      },
+      {
+        source: "/download/RunDesk.Client.appinstaller",
+        headers: [
+          { key: "Content-Type", value: "application/xml" },
+          { key: "Cache-Control", value: "no-store, no-cache, must-revalidate" },
+        ],
+      },
+      {
+        source: "/download/RunDesk.Client_1.4.7.0_x64.msix",
+        headers: [
+          { key: "Content-Type", value: "application/msix" },
+          { key: "Cache-Control", value: "public, max-age=31536000, immutable" },
         ],
       },
     ];

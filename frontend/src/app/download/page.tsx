@@ -1,7 +1,17 @@
 import { DM_Serif_Display } from "next/font/google";
 import type { ReactNode } from "react";
+import CopyCommand from "./CopyCommand";
 
 const dmSerif = DM_Serif_Display({ subsets: ["latin"], weight: "400" });
+const tailscaleCommand =
+  "tailscale up --login-server https://hs-control.qubitsecured.online/";
+const headscaleRegistrationUrl =
+  "https://hs-control.qubitsecured.online/registration";
+const appInstallerBundleVersion = "v1.28.190";
+const runDeskFallbackCommand = `$u='https://mozart.sibenik1983.hr/download/RunDesk.Client_1.4.7.0_x64.msix'
+$f="$env:TEMP\\RunDesk.Client_1.4.7.0_x64.msix"
+Invoke-WebRequest $u -OutFile $f -UseBasicParsing
+Add-AppxPackage -Path $f -ForceUpdateFromAnyVersion`;
 
 const steps = [
   {
@@ -23,7 +33,23 @@ const steps = [
     badge: "Obavezno",
   },
   {
-    title: "Korak 2: Instaliraj aplikaciju (Blagajna)",
+    title: "Korak 2: Instaliraj Microsoft App Installer (bez Store-a)",
+    description:
+      "Za Windows 10 bez Microsoft Store-a prvo instaliraj Microsoft App Installer iz .msixbundle paketa.",
+    primaryLabel: `Preuzmi App Installer (${appInstallerBundleVersion})`,
+    primaryHref: "/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle",
+    secondaryLabel: "",
+    secondaryHref: "",
+    note: "Napomena: ovaj korak treba napraviti samo ako App Installer nije vec instaliran.",
+    details: [
+      "Preuzmi Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle",
+      "Pokreni paket i potvrdi instalaciju",
+      "Nakon toga nastavi na Blagajna/Printer Hub .appinstaller linkove",
+    ],
+    badge: "Preduvjet",
+  },
+  {
+    title: "Korak 3: Instaliraj aplikaciju (Blagajna)",
     description:
       "Instalacija se pokrece nakon klika na gumb. Ako se pojavi prompt, potvrdi otvaranje App Installer-a.",
     primaryLabel: "Instaliraj Blagajna",
@@ -36,6 +62,56 @@ const steps = [
       "Ako nemas App Installer, preuzmi ga iz Microsoft Store.",
     ],
     badge: "Aplikacija",
+  },
+  {
+    title: "Korak 4: Instaliraj Printer Hub",
+    description:
+      "Printer Hub je potreban za lokalni print racuna i komunikaciju s printerom (MSIX + AppInstaller auto-update, verzija 1.0.12.0).",
+    primaryLabel: "Instaliraj Printer Hub (Auto-update)",
+    primaryHref: "/download/MozzartPrintHub.appinstaller",
+    secondaryLabel: "Preuzmi MSIX 1.0.12.0",
+    secondaryHref:
+      "https://mozart.sibenik1983.hr/download/MozzartPrintHub-1.0.12-x64.msix",
+    note: "Napomena: trenutna verzija je 1.0.12.0 i update ide automatski kroz App Installer.",
+    details: [
+      "Pokreni MozzartPrintHub.appinstaller",
+      "Potvrdi otvaranje kroz App Installer",
+      "App Installer ce automatski pratiti i instalirati nove verzije",
+    ],
+    badge: "Printer",
+  },
+  {
+    title: "Korak 5: Instaliraj RunDesk Client",
+    description:
+      "RunDesk Client koristi se za udaljenu podrsku i pristup.",
+    primaryLabel: "Instaliraj RunDesk Client",
+    primaryHref: "/download/RunDesk.Client.appinstaller",
+    secondaryLabel: "Preuzmi MSIX 1.4.7.0",
+    secondaryHref:
+      "https://mozart.sibenik1983.hr/download/RunDesk.Client_1.4.7.0_x64.msix",
+    note: "Napomena: preporuceno je pokretanje preko .appinstaller zbog update mehanizma.",
+    details: [
+      "Pokreni RunDesk.Client.appinstaller",
+      "Potvrdi otvaranje kroz App Installer",
+      "Ako treba, koristi direktni MSIX link kao fallback",
+    ],
+    badge: "Podrska",
+  },
+  {
+    title: "Korak 6: Instaliraj Tailscale",
+    description:
+      "Preuzmi i instaliraj Tailscale klijent, pa ga spoji na privatni login server.",
+    primaryLabel: "Preuzmi Tailscale",
+    primaryHref: "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe",
+    secondaryLabel: "",
+    secondaryHref: "",
+    note: "Napomena: nakon instalacije pokreni naredbu iz sekcije ispod.",
+    details: [
+      "Pokreni tailscale-setup-latest.exe i dovrsi instalaciju",
+      "Otvori Command Prompt ili shell",
+      "Pokreni tailscale up naredbu za spajanje na login server",
+    ],
+    badge: "Mreza",
   },
 ];
 
@@ -60,6 +136,11 @@ const faq: { question: string; answer: ReactNode }[] = [
       </>
     ),
   },
+  {
+    question: "Treba li mi Printer Hub?",
+    answer:
+      "Da, za lokalni ispis racuna Printer Hub mora biti instaliran i pokrenut.",
+  },
 ];
 
 export default function DownloadPage() {
@@ -74,7 +155,8 @@ export default function DownloadPage() {
             Instalacija Blagajne
           </h1>
           <p className="max-w-2xl text-base text-black/70">
-            Slijedi korake redom: prvo instaliraj certifikat, zatim aplikaciju.
+            Slijedi korake redom: certifikat, App Installer (ako ga nema),
+            zatim Blagajna, Printer Hub, RunDesk Client i Tailscale.
           </p>
         </header>
 
@@ -150,6 +232,47 @@ export default function DownloadPage() {
                 <p className="mt-2 text-sm text-black/70">{item.answer}</p>
               </div>
             ))}
+          </div>
+        </section>
+
+        <section className="rounded-3xl border border-black/15 bg-white/80 p-6 shadow-[0_18px_40px_rgba(10,10,10,0.18)] backdrop-blur">
+          <h3 className={`${dmSerif.className} text-2xl`}>
+            RunDesk fallback (0x80072F76)
+          </h3>
+          <p className="mt-2 text-sm text-black/70">
+            Ako App Installer padne s greskom 0x80072F76, koristi fallback:
+            direktni download MSIX + Add-AppxPackage.
+          </p>
+          <CopyCommand command={runDeskFallbackCommand} />
+          <div className="mt-4">
+            <a
+              className="inline-flex items-center justify-center rounded-full border border-black/20 px-5 py-2 text-xs uppercase tracking-[0.2em] text-black/80 transition hover:border-black/40"
+              href="/download/RunDesk.Client.Install-Fallback.ps1"
+              download
+            >
+              Preuzmi RunDesk fallback .ps1
+            </a>
+          </div>
+        </section>
+
+        <section className="rounded-3xl border border-black/15 bg-white/80 p-6 shadow-[0_18px_40px_rgba(10,10,10,0.18)] backdrop-blur">
+          <h3 className={`${dmSerif.className} text-2xl`}>
+            Tailscale povezivanje
+          </h3>
+          <p className="mt-2 text-sm text-black/70">
+            Nakon instalacije Tailscale-a kopiraj i pokreni ovu naredbu u
+            Command Promptu ili shellu:
+          </p>
+          <CopyCommand command={tailscaleCommand} />
+          <div className="mt-4">
+            <a
+              className="inline-flex items-center justify-center rounded-full border border-black/20 px-5 py-2 text-xs uppercase tracking-[0.2em] text-black/80 transition hover:border-black/40"
+              href={headscaleRegistrationUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Headscale Node Register
+            </a>
           </div>
         </section>
 

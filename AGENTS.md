@@ -10,6 +10,8 @@ These instructions apply when working in this repository (`/srv/mozzart`).
 
 ## Docker / Deploy Conventions
 
+- Backend work/services must run inside the `mozzart` Docker environment.
+- Frontend work/services must run inside the `mozzart-frontend` Docker environment.
 - Do not expose internal services publicly.
   - Use `expose:` (internal) instead of `ports:` unless explicitly requested.
 - Keep services on the existing Docker network.

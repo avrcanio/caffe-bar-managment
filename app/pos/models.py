@@ -78,6 +78,7 @@ class PosDevice(models.Model):
     name = models.CharField(max_length=255, blank=True, default="")
     is_active = models.BooleanField(default=True)
     print_receiver_url = models.CharField(max_length=500, blank=True, default="")
+    print_receiver_token = models.CharField(max_length=255, blank=True, default="")
     receipt_printer = models.ForeignKey(
         "pos.PosPrinterInventory",
         null=True,

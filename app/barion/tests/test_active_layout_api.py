@@ -1927,7 +1927,7 @@ class PosCheckSendToBarApiTests(TestCase):
         self.assertEqual(second.status_code, 409, second.content)
         self.assertEqual(second.json()["detail"], "Nema novih stavki za slanje na šank.")
 
-    def test_rolls_back_item_flags_on_printer_error(self):
+    def test_keeps_item_flags_and_returns_warning_on_printer_error(self):
         with patch.dict(os.environ, {"BARION_BAR_PRINTER_FAIL": "1"}, clear=False):
             response = self.client.post(
                 f"/api/pos/checks/{self.check.id}/send-to-bar/",
@@ -1935,17 +1935,20 @@ class PosCheckSendToBarApiTests(TestCase):
                 format="json",
                 secure=True,
             )
-        self.assertEqual(response.status_code, 503, response.content)
-        self.assertIn("Greška pri slanju", response.json()["detail"])
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertFalse(payload["printed"])
+        self.assertIn("Greška pri slanju", payload["print_error"])
+        self.assertEqual(payload["sent_items_count"], 2)
 
         self.item_1.refresh_from_db()
         self.item_2.refresh_from_db()
-        self.assertFalse(self.item_1.sent_to_bar)
-        self.assertFalse(self.item_2.sent_to_bar)
-        self.assertIsNone(self.item_1.round_number)
-        self.assertIsNone(self.item_2.round_number)
-        self.assertIsNone(self.item_1.sent_at)
-        self.assertIsNone(self.item_2.sent_at)
+        self.assertTrue(self.item_1.sent_to_bar)
+        self.assertTrue(self.item_2.sent_to_bar)
+        self.assertEqual(self.item_1.round_number, 1)
+        self.assertEqual(self.item_2.round_number, 1)
+        self.assertIsNotNone(self.item_1.sent_at)
+        self.assertIsNotNone(self.item_2.sent_at)
 
     def test_ignores_non_normal_lines_for_send_to_bar(self):
         CheckItem.objects.create(

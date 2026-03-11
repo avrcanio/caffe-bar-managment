@@ -353,6 +353,8 @@ class SendCheckToBarResponseSerializer(serializers.Serializer):
     sent_items_count = serializers.IntegerField()
     sent_at = serializers.DateTimeField()
     ticket = serializers.JSONField()
+    printed = serializers.BooleanField(required=False)
+    print_error = serializers.CharField(required=False, allow_blank=True)
 
 
 class SettlementPartRequestSerializer(serializers.Serializer):
@@ -2008,11 +2010,10 @@ class PosCheckSendToBarView(APIView):
         responses={
             200: OpenApiResponse(
                 response=SendCheckToBarResponseSerializer,
-                description="Runda uspješno poslana na šank.",
+                description="Runda poslana na šank; printanje je best-effort i može vratiti upozorenje.",
             ),
             404: OpenApiResponse(response=ErrorSerializer, description="Check ne postoji."),
             409: OpenApiResponse(response=ErrorSerializer, description="Nema novih stavki ili check nije OPEN."),
-            503: OpenApiResponse(response=ErrorSerializer, description="Greška printera ili printer nije konfiguriran."),
         },
         examples=[
             OpenApiExample(
@@ -2028,6 +2029,8 @@ class PosCheckSendToBarView(APIView):
                     "round_number": 3,
                     "sent_items_count": 2,
                     "sent_at": "2026-02-23T12:34:56+01:00",
+                    "printed": True,
+                    "print_error": "",
                     "ticket": {
                         "venue_name": "Mozart",
                         "table_label": "T12",
@@ -2051,71 +2054,93 @@ class PosCheckSendToBarView(APIView):
                 status_codes=["409"],
             ),
             OpenApiExample(
-                "Printer error 503",
-                value={"detail": "Greška pri slanju na bar printer."},
+                "Printer warning 200",
+                value={
+                    "check_id": 123,
+                    "round_number": 3,
+                    "sent_items_count": 2,
+                    "sent_at": "2026-02-23T12:34:56+01:00",
+                    "printed": False,
+                    "print_error": "Greška pri slanju na bar printer.",
+                    "ticket": {
+                        "venue_name": "Mozart",
+                        "table_label": "T12",
+                        "check_id": 123,
+                        "round_number": 3,
+                        "waiter": "ivan",
+                        "sent_at": "2026-02-23T12:34:56+01:00",
+                        "items": [
+                            {"id": 9001, "artikl_id": 501, "artikl_name": "Gin tonic", "quantity": "1.0000", "note": ""}
+                        ],
+                    },
+                },
                 response_only=True,
-                status_codes=["503"],
+                status_codes=["200"],
             ),
         ],
     )
     def post(self, request, check_id: int):
+        with transaction.atomic():
+            check = (
+                Check.objects.select_for_update()
+                .filter(id=check_id)
+                .select_related("table")
+                .first()
+            )
+            if not check:
+                return Response({"detail": "Check ne postoji."}, status=status.HTTP_404_NOT_FOUND)
+            if check.status != Check.Status.OPEN:
+                return Response(
+                    {"detail": "Check nije otvoren pa nije moguće poslati rundu na šank."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            unsent_items = list(
+                CheckItem.objects.select_for_update()
+                .select_related("artikl")
+                .prefetch_related(
+                    "modifier_selections__group",
+                    "modifier_selections__option",
+                    "modifier_selections__bundle_option__artikl",
+                )
+                .filter(barion_check=check, sent_to_bar=False, line_type=CheckItem.LineType.NORMAL)
+                .order_by("id")
+            )
+            if not unsent_items:
+                return Response(
+                    {"detail": "Nema novih stavki za slanje na šank."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+
+            max_round = (
+                CheckItem.objects.filter(barion_check=check, round_number__isnull=False)
+                .aggregate(max_round=Max("round_number"))
+                .get("max_round")
+            )
+            next_round = (max_round or 0) + 1
+            sent_at = timezone.now()
+
+            for item in unsent_items:
+                item.round_number = next_round
+                item.sent_to_bar = True
+                item.sent_at = sent_at
+                item.save(update_fields=["round_number", "sent_to_bar", "sent_at", "updated_at"])
+
+            ticket = self._build_ticket_payload(
+                request=request,
+                check=check,
+                round_number=next_round,
+                sent_items=unsent_items,
+                sent_at=sent_at,
+            )
+
+        printed = True
+        print_error = ""
         try:
-            with transaction.atomic():
-                check = (
-                    Check.objects.select_for_update()
-                    .filter(id=check_id)
-                    .select_related("table")
-                    .first()
-                )
-                if not check:
-                    return Response({"detail": "Check ne postoji."}, status=status.HTTP_404_NOT_FOUND)
-                if check.status != Check.Status.OPEN:
-                    return Response(
-                        {"detail": "Check nije otvoren pa nije moguće poslati rundu na šank."},
-                        status=status.HTTP_409_CONFLICT,
-                    )
-
-                unsent_items = list(
-                    CheckItem.objects.select_for_update()
-                    .select_related("artikl")
-                    .prefetch_related(
-                        "modifier_selections__group",
-                        "modifier_selections__option",
-                        "modifier_selections__bundle_option__artikl",
-                    )
-                    .filter(barion_check=check, sent_to_bar=False, line_type=CheckItem.LineType.NORMAL)
-                    .order_by("id")
-                )
-                if not unsent_items:
-                    return Response(
-                        {"detail": "Nema novih stavki za slanje na šank."},
-                        status=status.HTTP_409_CONFLICT,
-                    )
-
-                max_round = (
-                    CheckItem.objects.filter(barion_check=check, round_number__isnull=False)
-                    .aggregate(max_round=Max("round_number"))
-                    .get("max_round")
-                )
-                next_round = (max_round or 0) + 1
-                sent_at = timezone.now()
-
-                for item in unsent_items:
-                    item.round_number = next_round
-                    item.sent_to_bar = True
-                    item.sent_at = sent_at
-                    item.save(update_fields=["round_number", "sent_to_bar", "sent_at", "updated_at"])
-
-                ticket = self._build_ticket_payload(
-                    request=request,
-                    check=check,
-                    round_number=next_round,
-                    sent_items=unsent_items,
-                    sent_at=sent_at,
-                )
-                self._send_ticket_to_printer(ticket)
+            self._send_ticket_to_printer(ticket)
         except RuntimeError as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            printed = False
+            print_error = str(exc)
 
         return Response(
             {
@@ -2124,6 +2149,8 @@ class PosCheckSendToBarView(APIView):
                 "sent_items_count": len(unsent_items),
                 "sent_at": sent_at.isoformat(),
                 "ticket": ticket,
+                "printed": printed,
+                "print_error": print_error,
             }
         )
 

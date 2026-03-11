@@ -62,6 +62,7 @@ class PosDeviceSerializer(serializers.ModelSerializer):
             "name",
             "is_active",
             "print_receiver_url",
+            "print_receiver_token",
             "receipt_printer",
             "bar_printer",
             "registered_at",
@@ -95,6 +96,7 @@ class PosPrinterSyncPrinterRowSerializer(serializers.Serializer):
 class PosPrinterSyncRequestSerializer(serializers.Serializer):
     device_id = serializers.CharField(required=True, trim_whitespace=True)
     receiver_url = serializers.CharField(required=True, trim_whitespace=True)
+    receiver_token = serializers.CharField(required=False, allow_blank=True)
     printers = PosPrinterSyncPrinterRowSerializer(many=True, required=True)
 
 
@@ -102,6 +104,7 @@ class PosDevicePrinterSelectionRequestSerializer(serializers.Serializer):
     receipt_printer_id = serializers.IntegerField(required=False, allow_null=True)
     bar_printer_id = serializers.IntegerField(required=False, allow_null=True)
     receiver_url = serializers.CharField(required=False, allow_blank=True)
+    receiver_token = serializers.CharField(required=False, allow_blank=True)
 
 
 class PosPinVerifyView(APIView):
@@ -700,6 +703,7 @@ class PosPrinterSyncView(APIView):
             return error
 
         receiver_url = str(data["receiver_url"]).strip()
+        receiver_token = str(data.get("receiver_token", "") or "").strip()
         printer_rows = data.get("printers") or []
         now = timezone.now()
 
@@ -734,6 +738,9 @@ class PosPrinterSyncView(APIView):
         if device.print_receiver_url != receiver_url:
             device.print_receiver_url = receiver_url
             update_fields.append("print_receiver_url")
+        if "receiver_token" in data and device.print_receiver_token != receiver_token:
+            device.print_receiver_token = receiver_token
+            update_fields.append("print_receiver_token")
         if device.receipt_printer_id and device.receipt_printer_id in inactive_ids:
             device.receipt_printer = None
             update_fields.append("receipt_printer")
@@ -788,6 +795,7 @@ class PosPrinterListView(APIView):
             {
                 "device_id": device.device_id,
                 "receiver_url": device.print_receiver_url,
+                "receiver_token_set": bool(device.print_receiver_token),
                 "receipt_printer_id": device.receipt_printer_id,
                 "bar_printer_id": device.bar_printer_id,
                 "printers": PosPrinterInventorySerializer(qs, many=True).data,
@@ -824,6 +832,11 @@ class PosDevicePrinterSelectionView(APIView):
             if device.print_receiver_url != receiver_url:
                 device.print_receiver_url = receiver_url
                 update_fields.append("print_receiver_url")
+        if "receiver_token" in data:
+            receiver_token = str(data.get("receiver_token", "") or "").strip()
+            if device.print_receiver_token != receiver_token:
+                device.print_receiver_token = receiver_token
+                update_fields.append("print_receiver_token")
 
         for field_name in ("receipt_printer_id", "bar_printer_id"):
             if field_name not in data:
@@ -855,6 +868,7 @@ class PosDevicePrinterSelectionView(APIView):
             {
                 "device_id": device.device_id,
                 "receiver_url_effective": device.print_receiver_url,
+                "receiver_token_set": bool(device.print_receiver_token),
                 "receipt_printer": (
                     PosPrinterInventorySerializer(device.receipt_printer).data if device.receipt_printer_id else None
                 ),
