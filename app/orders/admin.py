@@ -1914,6 +1914,22 @@ class SupplierPriceItemAdminForm(forms.ModelForm):
         model = SupplierPriceItem
         fields = "__all__"
 
+    def clean(self):
+        cleaned_data = super().clean()
+        unit_of_measure = cleaned_data.get("unit_of_measure")
+        artikl = cleaned_data.get("artikl")
+        if not unit_of_measure and artikl:
+            detail = getattr(artikl, "detail", None)
+            default_uom = getattr(detail, "unit_of_measure", None) if detail else None
+            if default_uom:
+                cleaned_data["unit_of_measure"] = default_uom
+            else:
+                self.add_error(
+                    "unit_of_measure",
+                    "Odaberite jedinicu mjere ili postavite zadanu na artiklu.",
+                )
+        return cleaned_data
+
     def clean_price(self):
         value = self.cleaned_data.get("price")
         if value is None:
@@ -1978,8 +1994,8 @@ class SupplierPriceListAdmin(admin.ModelAdmin):
             fields = "__all__"
 
     form = SupplierPriceListAdminForm
-    list_display = ("supplier", "created_at", "valid_from", "valid_to", "currency", "is_active")
+    list_display = ("supplier", "name", "created_at", "valid_from", "valid_to", "currency", "is_active")
     list_filter = ("supplier", "is_active")
-    search_fields = ("supplier__name",)
+    search_fields = ("supplier__name", "name")
     autocomplete_fields = ("supplier",)
     inlines = [SupplierPriceItemInline]

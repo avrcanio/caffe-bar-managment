@@ -295,6 +295,12 @@ class PurchaseOrderItemPriceAudit(models.Model):
 
 
 class SupplierPriceList(models.Model):
+    name = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name="naziv cjenika",
+    )
     supplier = models.ForeignKey(
         "contacts.Supplier",
         on_delete=models.CASCADE,
@@ -308,6 +314,8 @@ class SupplierPriceList(models.Model):
     is_active = models.BooleanField(default=True, verbose_name="aktivno")
 
     def __str__(self) -> str:
+        if self.name:
+            return f"{self.supplier} - {self.name}"
         return f"{self.supplier} ({self.created_at:%Y-%m-%d})"
 
     class Meta:
