@@ -695,6 +695,8 @@ class ItemBundleOption(models.Model):
         related_name="barion_bundle_options",
     )
     price_delta = models.DecimalField(max_digits=12, decimal_places=4, default=Decimal("0.0000"))
+    affects_stock = models.BooleanField(default=False)
+    stock_ratio = models.DecimalField(max_digits=12, decimal_places=4, default=Decimal("0.0000"))
     is_active = models.BooleanField(default=True)
     sort_order = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -711,6 +713,12 @@ class ItemBundleOption(models.Model):
     def clean(self):
         if self.group_id and self.group.type != ItemModifierGroup.Type.BUNDLE:
             raise ValidationError("ItemBundleOption je dozvoljen samo za group.type=bundle.")
+        ratio = Decimal(str(self.stock_ratio or "0.0000")).quantize(Decimal("0.0001"))
+        if ratio < Decimal("0.0000"):
+            raise ValidationError("stock_ratio mora biti >= 0.")
+        self.stock_ratio = ratio
+        if self.affects_stock and self.artikl_id and not self.artikl.is_stock_item:
+            raise ValidationError("Bundle opcija koja utječe na stock mora koristiti skladisni artikl.")
 
     def save(self, *args, **kwargs):
         self.full_clean()
@@ -758,6 +766,83 @@ class ItemModifierGroupAssignment(models.Model):
 
     def __str__(self) -> str:
         return f"{self.artikl_id} -> {self.group.code}"
+
+
+class ItemModifierDefaultSelection(models.Model):
+    assignment = models.ForeignKey(
+        "barion.ItemModifierGroupAssignment",
+        on_delete=models.CASCADE,
+        related_name="default_selections",
+    )
+    option = models.ForeignKey(
+        "barion.ItemModifierOption",
+        on_delete=models.PROTECT,
+        related_name="default_assignments",
+        null=True,
+        blank=True,
+    )
+    bundle_option = models.ForeignKey(
+        "barion.ItemBundleOption",
+        on_delete=models.PROTECT,
+        related_name="default_assignments",
+        null=True,
+        blank=True,
+    )
+    quantity = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Item modifier default selection"
+        verbose_name_plural = "Item modifier default selections"
+        ordering = ["assignment_id", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["assignment", "option"],
+                condition=Q(option__isnull=False),
+                name="uniq_barion_default_selection_assignment_option",
+            ),
+            models.UniqueConstraint(
+                fields=["assignment", "bundle_option"],
+                condition=Q(bundle_option__isnull=False),
+                name="uniq_barion_default_selection_assignment_bundle_option",
+            ),
+            models.CheckConstraint(
+                check=(
+                    (Q(option__isnull=False) & Q(bundle_option__isnull=True))
+                    | (Q(option__isnull=True) & Q(bundle_option__isnull=False))
+                ),
+                name="chk_barion_default_selection_one_option_source",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        if self.option_id:
+            return f"{self.assignment_id}: {self.option.name}"
+        if self.bundle_option_id:
+            return f"{self.assignment_id}: {self.bundle_option.artikl.name} x{self.quantity}"
+        return f"{self.assignment_id}: -"
+
+    def clean(self):
+        if self.option_id and self.quantity != 1:
+            raise ValidationError("Simple default selection quantity mora biti 1.")
+        if self.quantity <= 0:
+            raise ValidationError("quantity mora biti >= 1.")
+
+        if self.assignment_id and self.option_id:
+            if self.assignment.group_id != self.option.group_id:
+                raise ValidationError("Option ne pripada assignment.group.")
+            if self.assignment.group.type != ItemModifierGroup.Type.SIMPLE:
+                raise ValidationError("Simple default selection zahtijeva group.type=simple.")
+
+        if self.assignment_id and self.bundle_option_id:
+            if self.assignment.group_id != self.bundle_option.group_id:
+                raise ValidationError("Bundle option ne pripada assignment.group.")
+            if self.assignment.group.type != ItemModifierGroup.Type.BUNDLE:
+                raise ValidationError("Bundle default selection zahtijeva group.type=bundle.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
 
 
 class CheckItemModifierSelection(models.Model):

@@ -17,6 +17,7 @@ from .models import (
     Check,
     CheckItem,
     ItemBundleOption,
+    ItemModifierDefaultSelection,
     ItemModifierGroup,
     ItemModifierGroupAssignment,
     ItemModifierOption,
@@ -483,7 +484,7 @@ class ItemModifierOptionInline(admin.TabularInline):
 class ItemBundleOptionInline(admin.TabularInline):
     model = ItemBundleOption
     extra = 0
-    fields = ("artikl", "price_delta", "is_active", "sort_order")
+    fields = ("artikl", "price_delta", "affects_stock", "stock_ratio", "is_active", "sort_order")
     autocomplete_fields = ("artikl",)
     ordering = ("sort_order", "artikl__name")
 
@@ -514,11 +515,18 @@ class ItemModifierOptionAdmin(admin.ModelAdmin):
 
 @admin.register(ItemBundleOption)
 class ItemBundleOptionAdmin(admin.ModelAdmin):
-    list_display = ("artikl", "group", "price_delta", "is_active", "sort_order")
+    list_display = ("artikl", "group", "price_delta", "affects_stock", "stock_ratio", "is_active", "sort_order")
     list_filter = ("is_active", "group")
     search_fields = ("artikl__name", "artikl__code", "group__name", "group__code")
     autocomplete_fields = ("artikl", "group")
     ordering = ("group__name", "sort_order", "artikl__name")
+
+
+class ItemModifierDefaultSelectionInline(admin.TabularInline):
+    model = ItemModifierDefaultSelection
+    extra = 0
+    fields = ("option", "bundle_option", "quantity")
+    autocomplete_fields = ("option", "bundle_option")
 
 
 @admin.register(ItemModifierGroupAssignment)
@@ -528,6 +536,21 @@ class ItemModifierGroupAssignmentAdmin(admin.ModelAdmin):
     search_fields = ("artikl__name", "artikl__code", "group__name", "group__code")
     autocomplete_fields = ("artikl", "group")
     ordering = ("artikl__name", "group__name")
+    inlines = [ItemModifierDefaultSelectionInline]
+
+
+@admin.register(ItemModifierDefaultSelection)
+class ItemModifierDefaultSelectionAdmin(admin.ModelAdmin):
+    list_display = ("assignment", "option", "bundle_option", "quantity", "created_at")
+    list_filter = ("assignment__group", "assignment__artikl")
+    search_fields = (
+        "assignment__artikl__name",
+        "assignment__group__name",
+        "option__name",
+        "bundle_option__artikl__name",
+    )
+    autocomplete_fields = ("assignment", "option", "bundle_option")
+    ordering = ("assignment__artikl__name", "assignment__group__name", "id")
 
 
 @admin.register(CheckItemModifierSelection)

@@ -18,13 +18,15 @@ from rest_framework.response import Response
 from rest_framework import serializers
 from rest_framework.views import APIView
 
-from artikli.models import Artikl, DrinkCategory
+from artikli.models import Artikl, DrinkCategory, Normativ
 from pos.fiscal import fiscalize_pos_receipt
 from pos.models import Pos, PosDevice
 from pos.print_bridge import send_bar_ticket_to_print_bridge, send_receipt_pdf_to_print_bridge
 from pos.security import is_recent_pin_verified, pin_verify_ttl_seconds
 from pos.services import create_pos_receipt
 from sales.models import SalesPriceItem, ShiftCashHandover, ShiftTurnover
+from stock.models import StockMove
+from stock.services import post_stock_out
 
 from .models import (
     BarionRuntimeMode,
@@ -164,6 +166,7 @@ class CheckItemSerializer(serializers.Serializer):
     note = serializers.CharField()
     modifiers = serializers.ListField(child=serializers.JSONField(), required=False)
     display_lines = serializers.ListField(child=serializers.CharField(), required=False)
+    modifiers_auto_applied = serializers.BooleanField(required=False)
 
 
 class CheckItemsTotalsSerializer(serializers.Serializer):
@@ -288,6 +291,8 @@ class ProductModifierOptionSerializer(serializers.Serializer):
     artikl_id = serializers.IntegerField(allow_null=True, required=False)
     artikl_name = serializers.CharField(allow_null=True, required=False)
     price_delta = serializers.DecimalField(max_digits=12, decimal_places=4, required=False)
+    is_default = serializers.BooleanField(required=False)
+    default_quantity = serializers.IntegerField(required=False, allow_null=True)
 
 
 class ProductModifierGroupSerializer(serializers.Serializer):
@@ -586,7 +591,12 @@ def _resolve_effective_mode(*, requested_mode: str | None) -> tuple[str, BarionR
 def _active_modifier_assignments_for_artikl(artikl_id: int):
     return (
         ItemModifierGroupAssignment.objects.select_related("group")
-        .prefetch_related("group__options", "group__bundle_options__artikl")
+        .prefetch_related(
+            "group__options",
+            "group__bundle_options__artikl",
+            "default_selections__option",
+            "default_selections__bundle_option__artikl",
+        )
         .filter(
             artikl_id=artikl_id,
             is_active=True,
@@ -594,6 +604,35 @@ def _active_modifier_assignments_for_artikl(artikl_id: int):
         )
         .order_by("group__sort_order", "group__name", "id")
     )
+
+
+def _default_modifier_ids_for_artikl(artikl_id: int) -> list[tuple[str, int, int]]:
+    assignments = list(_active_modifier_assignments_for_artikl(artikl_id))
+    normalized: list[tuple[str, int, int]] = []
+    simple_seen: set[int] = set()
+    bundle_qty: dict[int, int] = {}
+
+    for assignment in assignments:
+        for selection in assignment.default_selections.all().order_by("id"):
+            if selection.option_id:
+                if not selection.option.is_active:
+                    continue
+                option_id = int(selection.option_id)
+                if option_id in simple_seen:
+                    continue
+                normalized.append(("simple", option_id, 1))
+                simple_seen.add(option_id)
+                continue
+            if not selection.bundle_option_id:
+                continue
+            if not selection.bundle_option.is_active:
+                continue
+            option_id = int(selection.bundle_option_id)
+            bundle_qty[option_id] = bundle_qty.get(option_id, 0) + int(selection.quantity or 1)
+
+    for option_id, quantity in bundle_qty.items():
+        normalized.append(("bundle", option_id, quantity))
+    return normalized
 
 
 def _resolve_group_min_max(assignment: ItemModifierGroupAssignment) -> tuple[int, int]:
@@ -857,6 +896,72 @@ def _serialize_bundle_breakdown(modifier_ids: list[tuple[str, int, int]]) -> lis
         )
     rows.sort(key=lambda row: (str(row["artikl_name"]).lower(), int(row["bundle_option_id"])))
     return rows
+
+
+def _add_stock_line(lines_by_artikl: dict[int, dict], *, artikl: Artikl, quantity: Decimal) -> None:
+    qty = Decimal(str(quantity)).quantize(Decimal("0.0001"))
+    if qty <= Decimal("0.0000"):
+        return
+    line = lines_by_artikl.get(artikl.id)
+    if not line:
+        line = {"artikl": artikl, "quantity": Decimal("0.0000")}
+        lines_by_artikl[artikl.id] = line
+    line["quantity"] = (Decimal(str(line["quantity"])) + qty).quantize(Decimal("0.0001"))
+
+
+def _build_stock_out_lines_for_check_items(items: list[CheckItem]) -> tuple[list[dict], list[str]]:
+    lines_by_artikl: dict[int, dict] = {}
+    skipped: list[str] = []
+
+    for item in items:
+        if item.line_type != CheckItem.LineType.NORMAL:
+            continue
+        artikl = item.artikl
+        if not artikl:
+            skipped.append(f"Stavka {item.id} nema artikl.")
+            continue
+
+        qty = Decimal(str(item.quantity or "0.0000")).quantize(Decimal("0.0001"))
+        if qty <= Decimal("0.0000"):
+            continue
+
+        if artikl.is_stock_item:
+            _add_stock_line(lines_by_artikl, artikl=artikl, quantity=qty)
+        else:
+            normativ = Normativ.objects.filter(product=artikl, is_active=True).first()
+            if normativ:
+                for nitem in normativ.items.select_related("ingredient").all():
+                    ingredient = nitem.ingredient
+                    ing_qty = (Decimal(str(nitem.qty or "0.0000")) * qty).quantize(Decimal("0.0001"))
+                    if not ingredient or ing_qty <= Decimal("0.0000"):
+                        continue
+                    _add_stock_line(lines_by_artikl, artikl=ingredient, quantity=ing_qty)
+            else:
+                skipped.append(f"Artikl {artikl} nije skladisni i nema normativ.")
+
+        selections = item.modifier_selections.select_related("bundle_option__artikl").all()
+        for selection in selections:
+            if not selection.bundle_option_id:
+                continue
+            bundle = selection.bundle_option
+            if not bundle.affects_stock:
+                continue
+            if Decimal(str(bundle.stock_ratio or "0.0000")) <= Decimal("0.0000"):
+                continue
+            stock_artikl = bundle.artikl
+            if not stock_artikl or not stock_artikl.is_stock_item:
+                skipped.append(
+                    f"Bundle option {bundle.id} za item {item.id} nema validan skladisni artikl."
+                )
+                continue
+            extra_qty = (
+                qty
+                * Decimal(str(selection.quantity or 1))
+                * Decimal(str(bundle.stock_ratio or "0.0000"))
+            ).quantize(Decimal("0.0001"))
+            _add_stock_line(lines_by_artikl, artikl=stock_artikl, quantity=extra_qty)
+
+    return list(lines_by_artikl.values()), skipped
 
 
 def _allowed_layout_assignments_qs(user):
@@ -3300,6 +3405,18 @@ class PosCheckIssueReceiptView(APIView):
                 )
 
             if check.status != Check.Status.OPEN:
+                if check.status == Check.Status.CLOSED and not check.pos_receipt_id:
+                    check.status = Check.Status.OPEN
+                    check.closed_at = None
+                    check.closed_by = None
+                    check.save(update_fields=["status", "closed_at", "closed_by", "updated_at"])
+                else:
+                    return Response(
+                        {"detail": "Check nije otvoren pa nije moguće izdati račun."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+            if check.status != Check.Status.OPEN:
                 return Response(
                     {"detail": "Check nije otvoren pa nije moguće izdati račun."},
                     status=status.HTTP_409_CONFLICT,
@@ -3317,7 +3434,11 @@ class PosCheckIssueReceiptView(APIView):
                         status=status.HTTP_409_CONFLICT,
                     )
 
-            check_items = list(check.items.select_related("artikl").order_by("id"))
+            check_items = list(
+                check.items.select_related("artikl")
+                .prefetch_related("modifier_selections__bundle_option__artikl")
+                .order_by("id")
+            )
             if not check_items:
                 return Response({"detail": "Check nema stavki."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -3357,6 +3478,32 @@ class PosCheckIssueReceiptView(APIView):
                 except Exception as exc:
                     return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
             _save_receipt_pdf_to_media(receipt, request.user)
+
+            if warehouse:
+                stock_reference = f"Barion check {check.id} receipt {receipt.id}"
+                already_posted = StockMove.objects.filter(
+                    move_type=StockMove.MoveType.OUT,
+                    purpose=StockMove.Purpose.SALE,
+                    reference=stock_reference,
+                ).exists()
+                if not already_posted:
+                    stock_lines, _skipped = _build_stock_out_lines_for_check_items(check_items)
+                    if stock_lines:
+                        try:
+                            post_stock_out(
+                                warehouse=warehouse,
+                                items=stock_lines,
+                                move_date=receipt.issued_at,
+                                reference=stock_reference,
+                                note=f"Robno razduzenje Barion check #{check.id}, receipt #{receipt.id}",
+                                purpose=StockMove.Purpose.SALE,
+                                auto_cogs=False,
+                                posted_by=request.user,
+                            )
+                        except ValidationError as exc:
+                            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+                        except Exception as exc:
+                            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
             if settlement_parts:
                 for part in settlement_parts:
@@ -3451,7 +3598,7 @@ class PosCheckItemsView(APIView):
     @staticmethod
     def _serialize_item(item: CheckItem) -> dict:
         modifiers = _serialize_check_item_modifiers(item)
-        return {
+        payload = {
             "id": item.id,
             "check_id": item.barion_check_id,
             "artikl_id": item.artikl_id,
@@ -3470,6 +3617,10 @@ class PosCheckItemsView(APIView):
             "modifiers": modifiers,
             "display_lines": _build_check_item_display_lines(item),
         }
+        auto_applied = getattr(item, "_modifiers_auto_applied", None)
+        if auto_applied is not None:
+            payload["modifiers_auto_applied"] = bool(auto_applied)
+        return payload
 
     @staticmethod
     def _get_totals(check: Check) -> dict:
@@ -3549,6 +3700,7 @@ class PosCheckItemsView(APIView):
         serializer = CreateCheckItemRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+        modifiers_provided = "modifiers" in serializer.initial_data
 
         with transaction.atomic():
             check = Check.objects.select_for_update().filter(id=check_id).first()
@@ -3564,7 +3716,12 @@ class PosCheckItemsView(APIView):
             artikl = Artikl.objects.filter(id=artikl_id).first()
             if not artikl:
                 return Response({"detail": "Artikl ne postoji."}, status=status.HTTP_404_NOT_FOUND)
-            modifier_ids = _normalize_modifier_ids(data.get("modifiers"))
+            if modifiers_provided:
+                modifier_ids = _normalize_modifier_ids(data.get("modifiers"))
+                modifiers_auto_applied = False
+            else:
+                modifier_ids = _default_modifier_ids_for_artikl(artikl_id)
+                modifiers_auto_applied = bool(modifier_ids)
             note = data.get("note", "")
             try:
                 _enforce_qty_customization_rule(
@@ -3601,6 +3758,7 @@ class PosCheckItemsView(APIView):
                 modifier_ids=modifier_ids,
                 allowed_option_to_assignment=allowed_option_to_assignment,
             )
+            check_item._modifiers_auto_applied = modifiers_auto_applied
             _sync_settlement_after_items_changed(check=check, user=request.user)
 
             placements = list(
@@ -3627,7 +3785,7 @@ class PosCheckItemDetailView(APIView):
     @staticmethod
     def _serialize_item(item: CheckItem) -> dict:
         modifiers = _serialize_check_item_modifiers(item)
-        return {
+        payload = {
             "id": item.id,
             "check_id": item.barion_check_id,
             "artikl_id": item.artikl_id,
@@ -3646,6 +3804,10 @@ class PosCheckItemDetailView(APIView):
             "modifiers": modifiers,
             "display_lines": _build_check_item_display_lines(item),
         }
+        auto_applied = getattr(item, "_modifiers_auto_applied", None)
+        if auto_applied is not None:
+            payload["modifiers_auto_applied"] = bool(auto_applied)
+        return payload
 
     @extend_schema(
         description=(
@@ -3689,8 +3851,12 @@ class PosCheckItemDetailView(APIView):
             target_artikl_id = data.get("artikl_id", item.artikl_id)
             target_quantity = data.get("quantity", item.quantity)
             target_note = data.get("note", item.note)
+            modifiers_auto_applied = False
             if "modifiers" in data:
                 target_modifier_ids = _normalize_modifier_ids(data.get("modifiers"))
+            elif "artikl_id" in data:
+                target_modifier_ids = _default_modifier_ids_for_artikl(target_artikl_id)
+                modifiers_auto_applied = bool(target_modifier_ids)
             else:
                 target_modifier_ids = []
                 for selection in item.modifier_selections.all():
@@ -3732,6 +3898,8 @@ class PosCheckItemDetailView(APIView):
                     modifier_ids=target_modifier_ids,
                     allowed_option_to_assignment=allowed_option_to_assignment,
                 )
+                if "artikl_id" in data:
+                    item._modifiers_auto_applied = modifiers_auto_applied
             _sync_settlement_after_items_changed(check=item.barion_check, user=request.user)
 
         return Response(self._serialize_item(item))
@@ -4364,10 +4532,22 @@ class PosProductModifiersView(APIView):
         modifier_groups: list[dict] = []
         for assignment in assignments:
             group = assignment.group
+            default_map: dict[tuple[str, int], int] = {}
+            for default_sel in assignment.default_selections.all().order_by("id"):
+                if default_sel.option_id and default_sel.option and default_sel.option.is_active:
+                    default_map[("simple", int(default_sel.option_id))] = 1
+                elif (
+                    default_sel.bundle_option_id
+                    and default_sel.bundle_option
+                    and default_sel.bundle_option.is_active
+                ):
+                    key = ("bundle", int(default_sel.bundle_option_id))
+                    default_map[key] = default_map.get(key, 0) + int(default_sel.quantity or 1)
             options = []
             for option in group.options.all():
                 if not option.is_active:
                     continue
+                default_qty = default_map.get(("simple", int(option.id)))
                 options.append(
                     {
                         "id": option.id,
@@ -4378,11 +4558,14 @@ class PosProductModifiersView(APIView):
                         "artikl_id": None,
                         "artikl_name": None,
                         "price_delta": Decimal("0.0000"),
+                        "is_default": bool(default_qty),
+                        "default_quantity": default_qty if default_qty else None,
                     }
                 )
             for option in group.bundle_options.all():
                 if not option.is_active:
                     continue
+                default_qty = default_map.get(("bundle", int(option.id)))
                 options.append(
                     {
                         "id": option.id,
@@ -4393,6 +4576,8 @@ class PosProductModifiersView(APIView):
                         "artikl_id": option.artikl_id,
                         "artikl_name": option.artikl.name,
                         "price_delta": option.price_delta,
+                        "is_default": bool(default_qty),
+                        "default_quantity": default_qty if default_qty else None,
                     }
                 )
             options.sort(key=lambda row: (int(row["sort_order"]), str(row["name"]).lower(), int(row["id"])))

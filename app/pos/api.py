@@ -506,7 +506,8 @@ class PosReceiptPrintView(APIView):
             )
 
         tip_total = sum(
-            (part.tip_amount or Decimal("0.00")) for part in receipt.barion_settlement_parts.all()
+            ((part.tip_amount or Decimal("0.00")) for part in receipt.barion_settlement_parts.all()),
+            Decimal("0.00"),
         ).quantize(Decimal("0.01"))
         show_tip = tip_total > Decimal("0.00")
 

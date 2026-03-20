@@ -10,12 +10,13 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from artikli.models import Artikl, DrinkCategory
+from artikli.models import Artikl, DrinkCategory, Normativ, NormativItem
 from barion.models import (
     BarionRuntimeMode,
     Check,
     CheckItem,
     CheckItemModifierSelection,
+    ItemModifierDefaultSelection,
     ItemModifierGroup,
     ItemBundleOption,
     ItemModifierGroupAssignment,
@@ -32,6 +33,7 @@ from barion.models import (
 from configuration.models import TaxGroup
 from pos.models import PosProfile, PosReceipt
 from sales.models import SalesPriceItem, SalesPriceList
+from stock.models import StockLot, StockMove, WarehouseId
 
 
 class PosActiveLayoutApiTests(TestCase):
@@ -1433,6 +1435,90 @@ class PosCheckItemsApiTests(TestCase):
         self.assertEqual(float(payload["unit_price"]), 165.0)
         self.assertTrue(any(row["option_type"] == "bundle" for row in payload["modifiers"]))
 
+    def test_create_item_without_modifiers_applies_assignment_defaults(self):
+        assignment = ItemModifierGroupAssignment.objects.get(artikl=self.artikl_boca, group=self.bundle_group)
+        ItemModifierDefaultSelection.objects.create(
+            assignment=assignment,
+            bundle_option=self.bundle_opt_rb,
+            quantity=2,
+        )
+        ItemModifierDefaultSelection.objects.create(
+            assignment=assignment,
+            bundle_option=self.bundle_opt_juice,
+            quantity=2,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            f"/api/pos/checks/{self.check.id}/items/",
+            data={
+                "artikl_id": self.artikl_boca.id,
+                "quantity": "1.0000",
+                "unit_price": "1.0000",
+                "vat_rate": "0.2500",
+            },
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        payload = response.json()
+        self.assertEqual(float(payload["unit_price"]), 165.0)
+        self.assertEqual(payload.get("modifiers_auto_applied"), True)
+        by_id = {row["option_id"]: row for row in payload["modifiers"]}
+        self.assertEqual(by_id[self.bundle_opt_rb.id]["quantity"], 2)
+        self.assertEqual(by_id[self.bundle_opt_juice.id]["quantity"], 2)
+
+    def test_create_item_with_explicit_modifiers_overrides_defaults(self):
+        assignment = ItemModifierGroupAssignment.objects.get(artikl=self.artikl_kava, group=self.coffee_group)
+        ItemModifierDefaultSelection.objects.create(
+            assignment=assignment,
+            option=self.opt_natren,
+            quantity=1,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            f"/api/pos/checks/{self.check.id}/items/",
+            data={
+                "artikl_id": self.artikl_kava.id,
+                "quantity": "1.0000",
+                "unit_price": "2.5000",
+                "vat_rate": "0.2500",
+                "modifiers": [self.opt_cold_milk.id],
+            },
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        payload = response.json()
+        self.assertEqual(payload.get("modifiers_auto_applied"), False)
+        self.assertEqual(len(payload["modifiers"]), 1)
+        self.assertEqual(payload["modifiers"][0]["option_id"], self.opt_cold_milk.id)
+
+    def test_product_modifiers_endpoint_includes_default_flags(self):
+        assignment = ItemModifierGroupAssignment.objects.get(artikl=self.artikl_boca, group=self.bundle_group)
+        ItemModifierDefaultSelection.objects.create(
+            assignment=assignment,
+            bundle_option=self.bundle_opt_rb,
+            quantity=2,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(
+            f"/api/pos/products/{self.artikl_boca.id}/modifiers/",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(len(payload["modifier_groups"]), 1)
+        options = payload["modifier_groups"][0]["options"]
+        rb = next(row for row in options if row["id"] == self.bundle_opt_rb.id)
+        juice = next(row for row in options if row["id"] == self.bundle_opt_juice.id)
+        self.assertEqual(rb["is_default"], True)
+        self.assertEqual(rb["default_quantity"], 2)
+        self.assertEqual(juice["is_default"], False)
+        self.assertIsNone(juice["default_quantity"])
+
     def test_product_bundle_price_endpoint_returns_server_calculation(self):
         self.client.force_authenticate(user=self.user)
         response = self.client.post(
@@ -2269,6 +2355,191 @@ class PosCheckIssueReceiptApiTests(TestCase):
         receipt = PosReceipt.objects.get(id=response.json()["receipt_id"])
         receipt_quantities = sorted([str(row.quantity) for row in receipt.items.order_by("id")])
         self.assertEqual(receipt_quantities, ["-2.0000", "2.0000"])
+
+
+class PosCheckIssueReceiptStockEffectsApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="barion-issue-stock-user",
+            email="barion-issue-stock@example.com",
+            password="pass1234",
+        )
+        self.profile = PosProfile.objects.create(user=self.user)
+        self.profile.set_pin("1234")
+        self.profile.save(update_fields=["pin_hash"])
+        self.client.force_authenticate(user=self.user)
+
+        self.tax_group = TaxGroup.objects.create(name="PDV 25 stock", code="PDV25ST", rate="0.2500")
+        self.warehouse = WarehouseId.objects.create(rm_id=901, name="Sank")
+        self.table = Table.objects.create(label="TR-STOCK", capacity=4, shape=Table.Shape.SQUARE, is_vip=False)
+        self.layout = Layout.objects.create(name="Main stock", is_active=True)
+        self.zone = Zone.objects.create(layout=self.layout, name="Main", order=1)
+        self.layout_table = LayoutTable.objects.create(
+            layout=self.layout,
+            table=self.table,
+            zone=self.zone,
+            x=0,
+            y=0,
+            w=90,
+            h=90,
+            rotation=0,
+            z_index=1,
+            is_enabled=True,
+        )
+        self.check = Check.objects.create(table=self.table, status=Check.Status.OPEN, opened_by=self.user)
+        TableState.objects.create(
+            layout_table=self.layout_table,
+            state=TableState.State.OPEN,
+            open_check_id=self.check.id,
+            updated_by=self.user,
+        )
+
+        self.product = Artikl.objects.create(
+            rm_id=3001,
+            name="Bulk drink",
+            code="BLKDRINK",
+            is_sellable=True,
+            is_stock_item=False,
+            tax_group=self.tax_group,
+        )
+        self.base_ingredient = Artikl.objects.create(
+            rm_id=3002,
+            name="Bulk powder stock",
+            code="BLKPOW",
+            is_sellable=False,
+            is_stock_item=True,
+            tax_group=self.tax_group,
+        )
+        self.milk_ingredient = Artikl.objects.create(
+            rm_id=3003,
+            name="Milk stock",
+            code="MILKST",
+            is_sellable=False,
+            is_stock_item=True,
+            tax_group=self.tax_group,
+        )
+
+        normativ = Normativ.objects.create(product=self.product, is_active=True)
+        NormativItem.objects.create(normativ=normativ, ingredient=self.base_ingredient, qty="0.0500")
+
+        self.bundle_group = ItemModifierGroup.objects.create(
+            name="Bulk addon stock",
+            code="bulk-addon-stock",
+            type=ItemModifierGroup.Type.BUNDLE,
+            selection_mode=ItemModifierGroup.SelectionMode.MULTIPLE,
+            min_select=0,
+            max_select=5,
+            allow_note=False,
+        )
+        assignment = ItemModifierGroupAssignment.objects.create(
+            artikl=self.product,
+            group=self.bundle_group,
+            is_active=True,
+            is_required=False,
+        )
+        self.milk_bundle = ItemBundleOption.objects.create(
+            group=self.bundle_group,
+            artikl=self.milk_ingredient,
+            price_delta="1.0000",
+            affects_stock=True,
+            stock_ratio="0.4000",
+            is_active=True,
+        )
+        ItemModifierDefaultSelection.objects.create(
+            assignment=assignment,
+            bundle_option=self.milk_bundle,
+            quantity=1,
+        )
+
+        self.item = CheckItem.objects.create(
+            barion_check=self.check,
+            artikl=self.product,
+            quantity="1.0000",
+            unit_price="10.0000",
+            vat_rate="0.2500",
+        )
+        CheckItemModifierSelection.objects.create(
+            check_item=self.item,
+            group=self.bundle_group,
+            bundle_option=self.milk_bundle,
+            quantity=2,
+        )
+
+        StockLot.objects.create(
+            warehouse=self.warehouse,
+            artikl=self.base_ingredient,
+            received_at=timezone.now(),
+            unit_cost="1.0000",
+            qty_in="5.0000",
+            qty_remaining="5.0000",
+        )
+        StockLot.objects.create(
+            warehouse=self.warehouse,
+            artikl=self.milk_ingredient,
+            received_at=timezone.now(),
+            unit_cost="1.0000",
+            qty_in="5.0000",
+            qty_remaining="5.0000",
+        )
+
+    def _verify_pin(self):
+        response = self.client.post(
+            "/api/pos/pin/verify/",
+            data={"pin": "1234"},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+
+    def test_issue_receipt_posts_stock_from_normativ_and_modifier_effect(self):
+        self._verify_pin()
+        response = self.client.post(
+            f"/api/pos/checks/{self.check.id}/issue-receipt/",
+            data={"fiscalize": False, "payment_type": "cash", "warehouse_id": self.warehouse.rm_id},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        receipt_id = response.json()["receipt_id"]
+        stock_ref = f"Barion check {self.check.id} receipt {receipt_id}"
+        move = StockMove.objects.get(
+            move_type=StockMove.MoveType.OUT,
+            purpose=StockMove.Purpose.SALE,
+            reference=stock_ref,
+        )
+        by_artikl = {line.artikl_id: line for line in move.lines.all()}
+        self.assertEqual(str(by_artikl[self.base_ingredient.rm_id].quantity), "0.0500")
+        self.assertEqual(str(by_artikl[self.milk_ingredient.rm_id].quantity), "0.8000")
+
+    def test_issue_receipt_stock_posting_is_idempotent(self):
+        self._verify_pin()
+        first = self.client.post(
+            f"/api/pos/checks/{self.check.id}/issue-receipt/",
+            data={"fiscalize": False, "payment_type": "cash", "warehouse_id": self.warehouse.rm_id},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(first.status_code, 200, first.content)
+        first_receipt = first.json()["receipt_id"]
+        self.assertEqual(
+            StockMove.objects.filter(reference=f"Barion check {self.check.id} receipt {first_receipt}").count(),
+            1,
+        )
+
+        second = self.client.post(
+            f"/api/pos/checks/{self.check.id}/issue-receipt/",
+            data={"fiscalize": False, "payment_type": "cash", "warehouse_id": self.warehouse.rm_id},
+            format="json",
+            secure=True,
+        )
+        self.assertEqual(second.status_code, 200, second.content)
+        self.assertEqual(second.json()["receipt_id"], first_receipt)
+        self.assertEqual(
+            StockMove.objects.filter(reference=f"Barion check {self.check.id} receipt {first_receipt}").count(),
+            1,
+        )
 
 
 class PosSplitSettlementApiContractTests(TestCase):
