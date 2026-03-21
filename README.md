@@ -4,6 +4,7 @@
 
 - Always check running services with `docker compose ps` before doing anything else.
 - Run commands inside the Docker containers (e.g., the `web` service) instead of installing dependencies locally.
+- Deployment root on the target server is `/opt/stacks/mozart`.
 
 ## Where Django Lives (Backend)
 
@@ -23,3 +24,11 @@ docker compose exec web python manage.py migrate
 docker compose exec web python manage.py makemigrations
 docker compose exec web python manage.py shell
 ```
+
+## Migration helpers
+
+- DB dump: `./scripts/migration/create_db_dump.sh`
+- DB restore: `./scripts/migration/restore_db_dump.sh /path/to/mozzart_<timestamp>.dump`
+- Shared DB prep: `./scripts/migration/ensure_shared_postgis.sh`
+- Stack verification: `./scripts/migration/verify_stack.sh`
+- Runbook: `documents/technical/server-migration.md`

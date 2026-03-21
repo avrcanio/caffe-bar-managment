@@ -1,38 +1,4 @@
 services:
-  postgis:
-    image: postgis/postgis:16-3.4
-    container_name: postgis-postgis-1
-    environment:
-      POSTGRES_USER: postgis
-      POSTGRES_PASSWORD: postgis
-      POSTGRES_DB: mozzart_db
-    ports:
-      - "127.0.0.1:5432:5432"
-    volumes:
-      - postgis_postgis_data16:/var/lib/postgresql/data
-    networks:
-      - hetzner_net
-  tailscale-postgis:
-    image: tailscale/tailscale:latest
-    container_name: tailscale-postgis
-    environment:
-      TS_AUTHKEY: ${TS_AUTHKEY_POSTGIS}
-      TS_STATE_DIR: /var/lib/tailscale
-      TS_USERSPACE: "false"
-      TS_EXTRA_ARGS: >-
-        --login-server=https://hs-control.qubitsecured.online
-        --hostname=tailscale-postgis
-    volumes:
-      - tailscale_postgis_state:/var/lib/tailscale
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    depends_on:
-      - postgis
-    restart: unless-stopped
-    network_mode: service:postgis
   redis:
     image: redis:7-alpine
     container_name: mozzart-redis
@@ -94,10 +60,18 @@ services:
     depends_on:
       - redis
       - print_bridge
-    ports:
-      - "8003:8000"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.routers.mozzart-web.rule=Host(`mozart.sibenik1983.hr`) && (PathPrefix(`/api`) || PathPrefix(`/admin`) || PathPrefix(`/media`) || PathPrefix(`/static`) || PathPrefix(`/inventory`) || PathPrefix(`/download`))"
+      - "traefik.http.routers.mozzart-web.entrypoints=websecure"
+      - "traefik.http.routers.mozzart-web.tls=true"
+      - "traefik.http.routers.mozzart-web.tls.certresolver=cloudflare"
+      - "traefik.http.routers.mozzart-web.priority=120"
+      - "traefik.http.services.mozzart-web.loadbalancer.server.port=8000"
     networks:
       - hetzner_net
+      - proxy
   celery_worker:
     build: .
     container_name: mozzart-celery-worker
@@ -141,12 +115,20 @@ services:
     command: sh -lc "npm install && npm run build && npm run start -- -p 3000"
     volumes:
       - ./frontend:/app
-    ports:
-      - "3001:3000"
     depends_on:
       - web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.routers.mozzart-frontend.rule=Host(`mozart.sibenik1983.hr`)"
+      - "traefik.http.routers.mozzart-frontend.entrypoints=websecure"
+      - "traefik.http.routers.mozzart-frontend.tls=true"
+      - "traefik.http.routers.mozzart-frontend.tls.certresolver=cloudflare"
+      - "traefik.http.routers.mozzart-frontend.priority=10"
+      - "traefik.http.services.mozzart-frontend.loadbalancer.server.port=3000"
     networks:
       - hetzner_net
+      - proxy
   webterm:
     build: ./webterm
     container_name: mozzart-webterm
@@ -155,7 +137,7 @@ services:
       HISTFILE: /tmp/.bash_history
       HOME: /home/codex
     volumes:
-      - /srv/mozzart:/workspace
+      - /opt/stacks/mozart:/workspace
       - webterm_home:/home/codex
     working_dir: /workspace
     expose:
@@ -175,10 +157,9 @@ services:
 networks:
   hetzner_net:
     external: true
+  proxy:
+    external: true
 
 volumes:
-  postgis_postgis_data16:
-    external: true
-  tailscale_postgis_state:
   tailscale_print_bridge_state:
   webterm_home:

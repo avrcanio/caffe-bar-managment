@@ -223,7 +223,7 @@ curl -X POST 'https://mozart.sibenik1983.hr/api/mailbox/sync/' \
 
 ## Build & start (produkcija)
 ```
-cd /srv/mozzart/frontend
+cd /opt/stacks/mozart/frontend
 npm run build
 npm run start
 ```
