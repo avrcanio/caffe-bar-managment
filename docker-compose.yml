@@ -63,7 +63,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
-      - "traefik.http.routers.mozzart-web.rule=Host(`mozart.sibenik1983.hr`) && (PathPrefix(`/api`) || PathPrefix(`/admin`) || PathPrefix(`/media`) || PathPrefix(`/static`) || PathPrefix(`/inventory`) || PathPrefix(`/download`))"
+      - "traefik.http.routers.mozzart-web.rule=Host(`mozart.sibenik1983.hr`) && (PathPrefix(`/api`) || PathPrefix(`/admin`) || PathPrefix(`/media`) || PathPrefix(`/static`) || PathPrefix(`/inventory`) || PathPrefix(`/download`) || PathPrefix(`/orders/confirm`))"
       - "traefik.http.routers.mozzart-web.entrypoints=websecure"
       - "traefik.http.routers.mozzart-web.tls=true"
       - "traefik.http.routers.mozzart-web.tls.certresolver=cloudflare"
