@@ -214,7 +214,19 @@ class PurchaseOrderListCreateView(generics.ListCreateAPIView):
             .order_by()
         )
         response = super().list(request, *args, **kwargs)
+        paginated_count = queryset.count()
+        paginated_next = None
+        paginated_previous = None
+        paginated_results = response.data
+        if isinstance(response.data, dict):
+            paginated_count = response.data.get("count", paginated_count)
+            paginated_next = response.data.get("next")
+            paginated_previous = response.data.get("previous")
+            paginated_results = response.data.get("results", response.data)
         response.data = {
+            "count": paginated_count,
+            "next": paginated_next,
+            "previous": paginated_previous,
             "summary": {
                 "count": queryset.count(),
                 "total_net": summary["total_net"] or 0,
@@ -228,9 +240,7 @@ class PurchaseOrderListCreateView(generics.ListCreateAPIView):
                     for item in status_counts
                 },
             },
-            "results": response.data["results"]
-            if isinstance(response.data, dict) and "results" in response.data
-            else response.data,
+            "results": paginated_results,
         }
         return response
 
