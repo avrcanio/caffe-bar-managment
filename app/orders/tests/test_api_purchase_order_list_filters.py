@@ -160,3 +160,41 @@ class PurchaseOrderListFilterApiTests(TestCase):
         second_page = self.client.get(body["next"], secure=True)
         self.assertEqual(second_page.status_code, 200, second_page.json())
         self.assertEqual(second_page.json()["results"][0]["id"], second.id)
+
+    def test_purchase_order_list_uses_stable_id_tiebreaker_for_equal_dates(self):
+        ordered_at = timezone.now()
+        first = self._create_order(
+            supplier=self.supplier_one,
+            status=PurchaseOrder.STATUS_CREATED,
+            ordered_at=ordered_at,
+        )
+        second = self._create_order(
+            supplier=self.supplier_one,
+            status=PurchaseOrder.STATUS_CREATED,
+            ordered_at=ordered_at,
+        )
+        third = self._create_order(
+            supplier=self.supplier_one,
+            status=PurchaseOrder.STATUS_CREATED,
+            ordered_at=ordered_at,
+        )
+
+        response = self.client.get(
+            "/api/purchase-orders/?status=created&page_size=2",
+            secure=True,
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        body = response.json()
+        self.assertEqual(
+            [item["id"] for item in body["results"]],
+            [third.id, second.id],
+        )
+        self.assertIsNotNone(body["next"])
+
+        second_page = self.client.get(body["next"], secure=True)
+        self.assertEqual(second_page.status_code, 200, second_page.json())
+        self.assertEqual(
+            [item["id"] for item in second_page.json()["results"]],
+            [first.id],
+        )

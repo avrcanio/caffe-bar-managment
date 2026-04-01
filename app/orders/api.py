@@ -153,7 +153,7 @@ class PurchaseOrderListCreateView(generics.ListCreateAPIView):
     queryset = (
         PurchaseOrder.objects.select_related("supplier", "payment_type", "created_by")
         .prefetch_related("items__artikl__detail__base_group")
-        .order_by("-ordered_at")
+        .order_by("-ordered_at", "-id")
     )
     serializer_class = PurchaseOrderSerializer
     permission_classes = [IsAuthenticated]
