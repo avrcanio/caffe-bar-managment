@@ -161,13 +161,13 @@ class PurchaseOrderListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         qs = super().get_queryset()
-        status = self.request.query_params.get("status")
+        statuses = self._get_status_filters()
         supplier = self.request.query_params.get("supplier")
         ordered_from = self.request.query_params.get("ordered_from")
         ordered_to = self.request.query_params.get("ordered_to")
 
-        if status:
-            qs = qs.filter(status=status)
+        if statuses:
+            qs = qs.filter(status__in=statuses)
         if supplier:
             qs = qs.filter(supplier_id=supplier)
 
@@ -190,6 +190,16 @@ class PurchaseOrderListCreateView(generics.ListCreateAPIView):
                     qs = qs.filter(ordered_at__date__lte=d)
 
         return qs
+
+    def _get_status_filters(self):
+        raw_statuses = self.request.query_params.getlist("status")
+        statuses = []
+        for raw_status in raw_statuses:
+            for candidate in raw_status.split(","):
+                normalized = candidate.strip()
+                if normalized and normalized not in statuses:
+                    statuses.append(normalized)
+        return statuses
 
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
