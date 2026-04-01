@@ -245,6 +245,25 @@ class PurchaseOrderListCreateView(generics.ListCreateAPIView):
         return response
 
 
+def _serialize_purchase_order_detail(view_or_none, instance, request=None):
+    po_items = list(instance.items.all().order_by("id"))
+    received_by_artikl = _po_received_by_artikl(instance)
+    remaining_by_item_id = _po_item_remaining_map(po_items, received_by_artikl)
+    serializer_context = {
+        "remaining_by_item_id": remaining_by_item_id,
+    }
+    if request is not None:
+        serializer_context["request"] = request
+    if view_or_none is not None:
+        serializer_context["format"] = getattr(view_or_none, "format_kwarg", None)
+        serializer_context["view"] = view_or_none
+    serializer = PurchaseOrderSerializer(
+        instance,
+        context=serializer_context,
+    )
+    return serializer.data
+
+
 class PurchaseOrderDetailView(generics.RetrieveUpdateAPIView):
     queryset = (
         PurchaseOrder.objects.select_related("supplier", "payment_type", "created_by")
@@ -255,17 +274,7 @@ class PurchaseOrderDetailView(generics.RetrieveUpdateAPIView):
 
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
-        po_items = list(instance.items.all().order_by("id"))
-        received_by_artikl = _po_received_by_artikl(instance)
-        remaining_by_item_id = _po_item_remaining_map(po_items, received_by_artikl)
-        serializer = self.get_serializer(
-            instance,
-            context={
-                **self.get_serializer_context(),
-                "remaining_by_item_id": remaining_by_item_id,
-            },
-        )
-        return Response(serializer.data)
+        return Response(_serialize_purchase_order_detail(self, instance, request=request))
 
 
 class PurchaseOrderItemListCreateView(generics.ListCreateAPIView):
@@ -334,6 +343,15 @@ class PurchaseOrderItemPriceUpdateResponseSerializer(serializers.Serializer):
     new_price = serializers.CharField()
     audit = serializers.DictField()
     po_totals = serializers.DictField()
+
+
+class PurchaseOrderStatusTransitionSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(
+        choices=(
+            PurchaseOrder.STATUS_CONFIRMED,
+            PurchaseOrder.STATUS_RECEIVED_ALL,
+        )
+    )
 
 
 class PurchaseOrderItemPriceUpdateView(APIView):
@@ -1078,6 +1096,63 @@ class PurchaseOrderSendView(APIView):
             order.save(update_fields=["status"])
 
         return Response({"detail": "Narudzba poslana.", "order_id": order.id})
+
+
+class PurchaseOrderStatusTransitionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        request=PurchaseOrderStatusTransitionSerializer,
+        responses={200: PurchaseOrderSerializer},
+    )
+    @transaction.atomic
+    def post(self, request, pk):
+        serializer = PurchaseOrderStatusTransitionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        target_status = serializer.validated_data["status"]
+
+        order = (
+            PurchaseOrder.objects.select_for_update()
+            .select_related("supplier", "payment_type", "created_by")
+            .prefetch_related("items__artikl__detail__base_group")
+            .filter(pk=pk)
+            .first()
+        )
+        if not order:
+            return Response({"detail": "Narudzba ne postoji."}, status=404)
+
+        current_status = order.status
+        allowed_transitions = {
+            PurchaseOrder.STATUS_CREATED: PurchaseOrder.STATUS_CONFIRMED,
+            PurchaseOrder.STATUS_SENT: PurchaseOrder.STATUS_CONFIRMED,
+            PurchaseOrder.STATUS_RECEIVED: PurchaseOrder.STATUS_RECEIVED_ALL,
+        }
+        expected_target = allowed_transitions.get(current_status)
+        if expected_target != target_status:
+            return Response(
+                {
+                    "detail": (
+                        f"Rucna promjena statusa iz '{current_status}' u "
+                        f"'{target_status}' nije dopustena."
+                    )
+                },
+                status=400,
+            )
+
+        update_fields = ["status"]
+        order.status = target_status
+        if target_status == PurchaseOrder.STATUS_CONFIRMED:
+            order.confirmed_at = timezone.now()
+            update_fields.append("confirmed_at")
+        order.save(update_fields=update_fields)
+
+        return Response(
+            _serialize_purchase_order_detail(
+                None,
+                order,
+                request=request,
+            )
+        )
 
 
 class SupplierArtiklListView(APIView):
