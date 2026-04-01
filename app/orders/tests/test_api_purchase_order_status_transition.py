@@ -1,6 +1,7 @@
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework.test import APIClient
 
 from configuration.models import PaymentType
@@ -36,6 +37,7 @@ class PurchaseOrderStatusTransitionApiTests(TestCase):
 
     def test_created_order_can_transition_to_confirmed(self):
         order = self._create_order(status=PurchaseOrder.STATUS_CREATED)
+        baseline = order.updated_at
 
         response = self.client.post(
             f"/api/purchase-orders/{order.id}/status/",
@@ -48,8 +50,23 @@ class PurchaseOrderStatusTransitionApiTests(TestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, PurchaseOrder.STATUS_CONFIRMED)
         self.assertIsNotNone(order.confirmed_at)
+        self.assertGreater(order.updated_at, baseline)
         self.assertEqual(response.json()["status"], PurchaseOrder.STATUS_CONFIRMED)
         self.assertEqual(response.json()["status_display"], "Potvrđena")
+        self.assertIn("updated_at", response.json())
+        self.assertEqual(parse_datetime(response.json()["updated_at"]), order.updated_at)
+
+    def test_purchase_order_detail_exposes_updated_at(self):
+        order = self._create_order(status=PurchaseOrder.STATUS_CREATED)
+
+        response = self.client.get(
+            f"/api/purchase-orders/{order.id}/",
+            secure=True,
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.assertIn("updated_at", response.json())
+        self.assertIsNotNone(response.json()["updated_at"])
 
     def test_sent_order_can_transition_to_confirmed(self):
         order = self._create_order(status=PurchaseOrder.STATUS_SENT)

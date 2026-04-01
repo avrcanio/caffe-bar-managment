@@ -84,6 +84,7 @@ class PurchaseOrderItemSerializer(serializers.ModelSerializer):
 
 class PurchaseOrderSerializer(serializers.ModelSerializer):
     ordered_at = serializers.DateTimeField(required=False)
+    updated_at = serializers.DateTimeField(read_only=True)
     supplier_name = serializers.CharField(source="supplier.name", read_only=True)
     payment_type_name = serializers.CharField(
         source="payment_type.name", read_only=True
@@ -101,6 +102,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             "supplier",
             "supplier_name",
             "ordered_at",
+            "updated_at",
             "status",
             "status_display",
             "payment_type",
@@ -1113,8 +1115,6 @@ class PurchaseOrderStatusTransitionView(APIView):
 
         order = (
             PurchaseOrder.objects.select_for_update()
-            .select_related("supplier", "payment_type", "created_by")
-            .prefetch_related("items__artikl__detail__base_group")
             .filter(pk=pk)
             .first()
         )
@@ -1145,6 +1145,11 @@ class PurchaseOrderStatusTransitionView(APIView):
             order.confirmed_at = timezone.now()
             update_fields.append("confirmed_at")
         order.save(update_fields=update_fields)
+        order = (
+            PurchaseOrder.objects.select_related("supplier", "payment_type", "created_by")
+            .prefetch_related("items__artikl__detail__base_group")
+            .get(pk=order.pk)
+        )
 
         return Response(
             _serialize_purchase_order_detail(

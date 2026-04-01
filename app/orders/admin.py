@@ -1671,7 +1671,7 @@ class PurchaseOrderAdmin(admin.ModelAdmin):
             fields = "__all__"
 
     form = PurchaseOrderAdminForm
-    list_display = ("id", "supplier", "ordered_at", "status_badge", "total_net", "total_gross", "payment_type", "primka_created", "created_by")
+    list_display = ("id", "supplier", "ordered_at", "updated_at", "status_badge", "total_net", "total_gross", "payment_type", "primka_created", "created_by")
     list_filter = ("supplier", "ordered_at", "status", "payment_type", "primka_created", "created_by")
     search_fields = ("id", "supplier__name", "created_by__username")
     autocomplete_fields = ("supplier",)
@@ -1692,6 +1692,7 @@ class PurchaseOrderAdmin(admin.ModelAdmin):
         "confirmation_token",
         "confirmation_sent_at",
         "confirmed_at",
+        "updated_at",
         "total_net",
         "tax_group_totals",
         "total_deposit",
@@ -1703,6 +1704,7 @@ class PurchaseOrderAdmin(admin.ModelAdmin):
         "confirmation_token",
         "confirmation_sent_at",
         "confirmed_at",
+        "updated_at",
         "total_net",
         "tax_group_totals",
         "total_deposit",

@@ -5,9 +5,10 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from configuration.models import PaymentType
+from configuration.models import PaymentType, TaxGroup
 from contacts.models import Supplier
-from orders.models import PurchaseOrder
+from artikli.models import Artikl, UnitOfMeasureData
+from orders.models import PurchaseOrder, PurchaseOrderItem
 
 
 class PurchaseOrderListFilterApiTests(TestCase):
@@ -27,6 +28,17 @@ class PurchaseOrderListFilterApiTests(TestCase):
         )
         self.supplier_one = Supplier.objects.create(rm_id=1, name="Dobavljac 1")
         self.supplier_two = Supplier.objects.create(rm_id=2, name="Dobavljac 2")
+        self.tax_group = TaxGroup.objects.create(name="PDV 25", rate="0.25")
+        self.unit = UnitOfMeasureData.objects.create(
+            rm_id=1,
+            name="kom",
+        )
+        self.artikl = Artikl.objects.create(
+            rm_id=1,
+            code="ART-1",
+            name="Test artikl",
+            tax_group=self.tax_group,
+        )
 
     def _create_order(self, *, supplier, status, ordered_at):
         return PurchaseOrder.objects.create(
@@ -198,3 +210,48 @@ class PurchaseOrderListFilterApiTests(TestCase):
             [item["id"] for item in second_page.json()["results"]],
             [first.id],
         )
+
+    def test_purchase_order_list_exposes_updated_at(self):
+        order = self._create_order(
+            supplier=self.supplier_one,
+            status=PurchaseOrder.STATUS_CREATED,
+            ordered_at=timezone.now(),
+        )
+
+        response = self.client.get("/api/purchase-orders/?status=created", secure=True)
+
+        self.assertEqual(response.status_code, 200, response.json())
+        payload = response.json()["results"][0]
+        self.assertEqual(payload["id"], order.id)
+        self.assertIn("updated_at", payload)
+        self.assertIsNotNone(payload["updated_at"])
+
+    def test_purchase_order_item_change_updates_parent_updated_at(self):
+        order = self._create_order(
+            supplier=self.supplier_one,
+            status=PurchaseOrder.STATUS_CREATED,
+            ordered_at=timezone.now(),
+        )
+        baseline = order.updated_at
+
+        item = PurchaseOrderItem.objects.create(
+            order=order,
+            artikl=self.artikl,
+            quantity="2",
+            unit_of_measure=self.unit,
+            price="10.00",
+        )
+
+        order.refresh_from_db()
+        self.assertGreater(order.updated_at, baseline)
+        updated_at_after_create = order.updated_at
+
+        item.quantity = "3"
+        item.save()
+        order.refresh_from_db()
+        self.assertGreater(order.updated_at, updated_at_after_create)
+        updated_at_after_update = order.updated_at
+
+        item.delete()
+        order.refresh_from_db()
+        self.assertGreater(order.updated_at, updated_at_after_update)
