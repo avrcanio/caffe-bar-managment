@@ -527,8 +527,8 @@ class ShiftCashHandoverAdmin(admin.ModelAdmin):
 @admin.register(SalesInvoiceItem)
 class SalesInvoiceItemAdmin(admin.ModelAdmin):
     list_display = ("invoice", "product_name", "artikl", "quantity", "amount", "stock_out_done", "stock_move_link")
-    class DrinkCategoryTreeCountFilter(TreeRelatedFieldListFilter):
-        title = "kategorija napitaka"
+    class CategoryTreeCountFilter(TreeRelatedFieldListFilter):
+        title = "kategorija"
 
         def __init__(self, field, request, params, model, model_admin, field_path):
             super().__init__(field, request, params, model, model_admin, field_path)
@@ -546,10 +546,10 @@ class SalesInvoiceItemAdmin(admin.ModelAdmin):
                 base_qs = base_qs.filter(**date_filters)
 
             raw_counts = {
-                row["artikl__drink_category_id"]: row["c"]
+                row["artikl__category_id"]: row["c"]
                 for row in base_qs
-                .filter(artikl__drink_category_id__isnull=False)
-                .values("artikl__drink_category_id")
+                .filter(artikl__category_id__isnull=False)
+                .values("artikl__category_id")
                 .annotate(c=Count("id"))
             }
 
@@ -643,7 +643,7 @@ class SalesInvoiceItemAdmin(admin.ModelAdmin):
 
     list_filter = (
         "invoice__issued_on",
-        ("artikl__drink_category", DrinkCategoryTreeCountFilter),
+        ("artikl__category", CategoryTreeCountFilter),
         ArtiklInSalesFilter,
         StockOutDoneFilter,
     )

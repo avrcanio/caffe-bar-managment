@@ -6,13 +6,13 @@ from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 
-from artikli.models import Artikl, DrinkCategory
+from artikli.models import Artikl, Category
 from sales.models import SalesInvoiceItem
 
 
 class Command(BaseCommand):
     help = (
-        "Postavlja sort_order za DrinkCategory na zadanom MPTT levelu prema ukupno prodanoj količini artikala "
+        "Postavlja sort_order za Category na zadanom MPTT levelu prema ukupno prodanoj količini artikala "
         "(od najveće prema najmanjoj), bez dupliranja iste ciljne kategorije."
     )
 
@@ -37,9 +37,9 @@ class Command(BaseCommand):
 
     def _resolve_target_category(
         self,
-        category: DrinkCategory | None,
+        category: Category | None,
         target_level: int,
-    ) -> DrinkCategory | None:
+    ) -> Category | None:
         if not category:
             return None
         path = list(category.get_ancestors(include_self=True))
@@ -68,7 +68,7 @@ class Command(BaseCommand):
             .order_by("-total_qty")
         )
 
-        artikli_by_id = Artikl.objects.select_related("drink_category").in_bulk(
+        artikli_by_id = Artikl.objects.select_related("category").in_bulk(
             [row["artikl_id"] for row in sales_rows]
         )
 
@@ -77,7 +77,7 @@ class Command(BaseCommand):
         for row in sales_rows:
             artikl = artikli_by_id.get(row["artikl_id"])
             target_category = self._resolve_target_category(
-                getattr(artikl, "drink_category", None),
+                getattr(artikl, "category", None),
                 target_level=target_level,
             )
             if not target_category or target_category.id in seen_target_ids:
@@ -106,5 +106,5 @@ class Command(BaseCommand):
 
         if updates:
             with transaction.atomic():
-                DrinkCategory.objects.bulk_update(updates, ["sort_order"])
+                Category.objects.bulk_update(updates, ["sort_order"])
         self.stdout.write(self.style.SUCCESS(f"Ažuriran sort_order za {len(updates)} kategorija."))

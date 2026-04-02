@@ -41,8 +41,8 @@ Relevantne datoteke:
 - `najprodavaniji artikli jučer` → po količini (qty).
 - `najprodavaniji artikli jučer financijski` → po iznosu (amount).
 
-### 2.8. Prodaja po kategoriji pića (DrinkCategory)
-- Logika prepoznaje `DrinkCategory` iz upita i koristi najviši parent koji još uvijek sadrži taj naziv (npr. “Pivo”), te uključuje sve potomke.
+### 2.8. Prodaja po kategoriji (Category)
+- Logika prepoznaje `Category` iz upita i koristi najviši parent koji još uvijek sadrži taj naziv (npr. “Pivo”), te uključuje sve potomke.
 - Podržani sinonimi:
   - pivo: pivo, piva, pive
   - vino: vino, vina
@@ -87,4 +87,3 @@ Relevantne datoteke:
 - `app/config/urls.py`
 - `app/templates/ai/search.html`
 - `frontend/src/app/ai/page.tsx`
-

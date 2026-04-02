@@ -15,7 +15,7 @@ from .models import (
     ArtiklDetail,
     BaseGroupData,
     Deposit,
-    DrinkCategory,
+    Category,
     KeyboardGroupData,
     Normativ,
     NormativItem,
@@ -26,6 +26,15 @@ from sales.models import SalesInvoiceItem
 from stock.models import StockCostSnapshot, StockLot, WarehouseId
 from .remaris_parser import parse_bool, parse_decimal, parse_hidden_inputs, parse_int
 from .remaris_connector import RemarisConnector
+
+
+class SafeTreeRelatedFieldListFilter(TreeRelatedFieldListFilter):
+    def queryset(self, request, queryset):
+        try:
+            return super().queryset(request, queryset)
+        except self.other_model.DoesNotExist:
+            # Stale admin filter links can reference categories that have since been removed.
+            return queryset.none()
 
 
 @admin.action(description="Import artikli from Remaris", permissions=["change"])
@@ -161,7 +170,7 @@ class ArtiklAdmin(admin.ModelAdmin):
                     self.initial["tax_group"] = tg
 
     form = ArtiklAdminForm
-    autocomplete_fields = ("drink_category",)
+    autocomplete_fields = ("category",)
     list_display = (
         "rm_id",
         "code",
@@ -169,7 +178,7 @@ class ArtiklAdmin(admin.ModelAdmin):
         "deposit",
         "tax_group",
         "pnp_category",
-        "drink_category",
+        "category",
         "is_sellable",
         "is_stock_item",
         "normativ_cost_fifo",
@@ -179,7 +188,7 @@ class ArtiklAdmin(admin.ModelAdmin):
     actions = [import_artikli_from_remaris, import_artikl_details_from_remaris]
     inlines = []
     readonly_fields = ("image_preview", "normativ_link", "normativ_cost_fifo_readonly")
-    list_filter = (("drink_category", TreeRelatedFieldListFilter), "is_sellable", "is_stock_item")
+    list_filter = (("category", SafeTreeRelatedFieldListFilter), "is_sellable", "is_stock_item")
     fields = (
         "rm_id",
         "code",
@@ -187,7 +196,7 @@ class ArtiklAdmin(admin.ModelAdmin):
         "deposit",
         "tax_group",
         "pnp_category",
-        "drink_category",
+        "category",
         "is_sellable",
         "is_stock_item",
         "image",
@@ -366,8 +375,8 @@ class DepositAdmin(admin.ModelAdmin):
     }
 
 
-@admin.register(DrinkCategory)
-class DrinkCategoryAdmin(DraggableMPTTAdmin):
+@admin.register(Category)
+class CategoryAdmin(DraggableMPTTAdmin):
     autocomplete_fields = ("parent",)
     list_display = ("tree_actions", "indented_title", "parent", "sort_order", "is_active")
     list_filter = ("is_active",)

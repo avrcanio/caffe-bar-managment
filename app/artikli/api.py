@@ -13,7 +13,7 @@ from rest_framework.views import APIView
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from PIL import Image, ImageOps
 
-from .models import Artikl, DrinkCategory
+from .models import Artikl, Category
 from stock.models import WarehouseStock
 from stock.services import refresh_warehouse_stock_for_product_code
 
@@ -23,14 +23,14 @@ logger = logging.getLogger(__name__)
 class ArtiklSerializer(serializers.ModelSerializer):
     image_46x75 = serializers.SerializerMethodField()
     image_125x200 = serializers.SerializerMethodField()
-    drink_category_id = serializers.PrimaryKeyRelatedField(
-        source="drink_category",
-        queryset=DrinkCategory.objects.all(),
+    category_id = serializers.PrimaryKeyRelatedField(
+        source="category",
+        queryset=Category.objects.all(),
         allow_null=True,
         required=False,
     )
-    drink_category_name = serializers.CharField(
-        source="drink_category.name",
+    category_name = serializers.CharField(
+        source="category.name",
         read_only=True,
     )
 
@@ -43,8 +43,8 @@ class ArtiklSerializer(serializers.ModelSerializer):
             "image",
             "image_46x75",
             "image_125x200",
-            "drink_category_id",
-            "drink_category_name",
+            "category_id",
+            "category_name",
             "is_sellable",
             "is_stock_item",
         ]
@@ -68,14 +68,14 @@ class ArtiklDetailSerializer(serializers.ModelSerializer):
     warehouse_stock = serializers.SerializerMethodField()
     image_46x75 = serializers.SerializerMethodField()
     image_125x200 = serializers.SerializerMethodField()
-    drink_category_id = serializers.PrimaryKeyRelatedField(
-        source="drink_category",
-        queryset=DrinkCategory.objects.all(),
+    category_id = serializers.PrimaryKeyRelatedField(
+        source="category",
+        queryset=Category.objects.all(),
         allow_null=True,
         required=False,
     )
-    drink_category_name = serializers.CharField(
-        source="drink_category.name",
+    category_name = serializers.CharField(
+        source="category.name",
         read_only=True,
     )
 
@@ -89,8 +89,8 @@ class ArtiklDetailSerializer(serializers.ModelSerializer):
             "image_46x75",
             "image_125x200",
             "warehouse_stock",
-            "drink_category_id",
-            "drink_category_name",
+            "category_id",
+            "category_name",
             "is_sellable",
             "is_stock_item",
         ]
@@ -134,11 +134,11 @@ class ArtiklListView(generics.ListCreateAPIView):
     @extend_schema(
         parameters=[
             OpenApiParameter(
-                name="drink_category_id",
+                name="category_id",
                 type=int,
                 required=False,
                 location=OpenApiParameter.QUERY,
-                description="Filtriraj artikle po drink kategoriji.",
+                description="Filtriraj artikle po kategoriji.",
             ),
             OpenApiParameter(
                 name="q",
@@ -169,13 +169,13 @@ class ArtiklListView(generics.ListCreateAPIView):
     def get_queryset(self):
         qs = super().get_queryset()
 
-        raw_category_id = self.request.query_params.get("drink_category_id")
+        raw_category_id = self.request.query_params.get("category_id")
         if raw_category_id not in (None, ""):
             try:
                 category_id = int(raw_category_id)
             except (TypeError, ValueError):
-                raise ValidationError({"drink_category_id": "drink_category_id mora biti cijeli broj."})
-            qs = qs.filter(drink_category_id=category_id)
+                raise ValidationError({"category_id": "category_id mora biti cijeli broj."})
+            qs = qs.filter(category_id=category_id)
 
         q = str(self.request.query_params.get("q", "")).strip()
         if q:
@@ -229,10 +229,10 @@ class UnitOfMeasureListView(generics.ListAPIView):
     serializer_class = UnitOfMeasureSerializer
 
 
-class DrinkCategorySerializer(serializers.ModelSerializer):
+class CategorySerializer(serializers.ModelSerializer):
     parent_id = serializers.PrimaryKeyRelatedField(
         source="parent",
-        queryset=DrinkCategory.objects.all(),
+        queryset=Category.objects.all(),
         allow_null=True,
         required=False,
     )
@@ -240,7 +240,7 @@ class DrinkCategorySerializer(serializers.ModelSerializer):
     level = serializers.IntegerField(read_only=True)
 
     class Meta:
-        model = DrinkCategory
+        model = Category
         fields = [
             "id",
             "name",
@@ -252,9 +252,9 @@ class DrinkCategorySerializer(serializers.ModelSerializer):
         ]
 
 
-class DrinkCategoryListView(generics.ListCreateAPIView):
-    queryset = DrinkCategory.objects.all().order_by("tree_id", "lft")
-    serializer_class = DrinkCategorySerializer
+class CategoryListView(generics.ListCreateAPIView):
+    queryset = Category.objects.all().order_by("tree_id", "lft")
+    serializer_class = CategorySerializer
 
     @extend_schema(
         parameters=[
@@ -299,9 +299,9 @@ class DrinkCategoryListView(generics.ListCreateAPIView):
         return qs
 
 
-class DrinkCategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = DrinkCategory.objects.all()
-    serializer_class = DrinkCategorySerializer
+class CategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
+    queryset = Category.objects.all()
+    serializer_class = CategorySerializer
 
 
 class ArtiklImage46x75View(APIView):

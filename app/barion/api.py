@@ -18,7 +18,7 @@ from rest_framework.response import Response
 from rest_framework import serializers
 from rest_framework.views import APIView
 
-from artikli.models import Artikl, DrinkCategory, Normativ
+from artikli.models import Artikl, Category, Normativ
 from pos.fiscal import fiscalize_pos_receipt
 from pos.models import Pos, PosDevice
 from pos.print_bridge import send_bar_ticket_to_print_bridge, send_receipt_pdf_to_print_bridge
@@ -261,14 +261,14 @@ class PosProductSearchItemSerializer(serializers.Serializer):
     name = serializers.CharField()
     code = serializers.CharField(allow_null=True, allow_blank=True)
     image_46x75 = serializers.CharField(allow_null=True)
-    drink_category_id = serializers.IntegerField(allow_null=True)
-    drink_category_name = serializers.CharField(allow_null=True)
+    category_id = serializers.IntegerField(allow_null=True)
+    category_name = serializers.CharField(allow_null=True)
     unit_price = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True)
     tax_rate = serializers.DecimalField(max_digits=5, decimal_places=4, allow_null=True)
     popularity_score = serializers.DecimalField(max_digits=14, decimal_places=4, allow_null=True)
 
 
-class PosDrinkCategoryDisplayItemSerializer(serializers.Serializer):
+class PosCategoryDisplayItemSerializer(serializers.Serializer):
     id = serializers.IntegerField()
     name = serializers.CharField()
     parent_id = serializers.IntegerField(allow_null=True)
@@ -276,10 +276,10 @@ class PosDrinkCategoryDisplayItemSerializer(serializers.Serializer):
     popularity_score = serializers.DecimalField(max_digits=14, decimal_places=4, allow_null=True)
 
 
-class PosDrinkCategoryDisplayResponseSerializer(serializers.Serializer):
+class PosCategoryDisplayResponseSerializer(serializers.Serializer):
     root_id = serializers.IntegerField()
     display_level = serializers.IntegerField()
-    categories = PosDrinkCategoryDisplayItemSerializer(many=True)
+    categories = PosCategoryDisplayItemSerializer(many=True)
 
 
 class ProductModifierOptionSerializer(serializers.Serializer):
@@ -4359,7 +4359,7 @@ class PosProductSearchView(APIView):
             .values("unit_price_gross")[:1]
         )
         return (
-            Artikl.objects.select_related("drink_category", "tax_group")
+            Artikl.objects.select_related("category", "tax_group")
             .annotate(
                 active_unit_price=Subquery(
                     active_price_subquery,
@@ -4367,7 +4367,7 @@ class PosProductSearchView(APIView):
                 )
             )
             .filter(is_sellable=True, active_unit_price__isnull=False)
-            .filter(Q(drink_category__isnull=True) | Q(drink_category__is_active=True))
+            .filter(Q(category__isnull=True) | Q(category__is_active=True))
         )
 
     @extend_schema(
@@ -4381,7 +4381,7 @@ class PosProductSearchView(APIView):
                 description="Text query for product code/name.",
             ),
             OpenApiParameter(
-                name="drink_category_id",
+                name="category_id",
                 type=int,
                 required=False,
                 location=OpenApiParameter.QUERY,
@@ -4420,19 +4420,19 @@ class PosProductSearchView(APIView):
 
         qs = self._priced_sellable_queryset()
 
-        raw_drink_category_id = request.query_params.get("drink_category_id")
-        if raw_drink_category_id not in (None, ""):
+        raw_category_id = request.query_params.get("category_id")
+        if raw_category_id not in (None, ""):
             try:
-                drink_category_id = int(raw_drink_category_id)
+                category_id = int(raw_category_id)
             except (TypeError, ValueError):
-                return Response({"detail": "drink_category_id mora biti broj."}, status=status.HTTP_400_BAD_REQUEST)
-            root_category = DrinkCategory.objects.filter(id=drink_category_id, is_active=True).first()
+                return Response({"detail": "category_id mora biti broj."}, status=status.HTTP_400_BAD_REQUEST)
+            root_category = Category.objects.filter(id=category_id, is_active=True).first()
             if not root_category:
                 return Response([])
             qs = qs.filter(
-                drink_category__tree_id=root_category.tree_id,
-                drink_category__lft__gte=root_category.lft,
-                drink_category__rght__lte=root_category.rght,
+                category__tree_id=root_category.tree_id,
+                category__lft__gte=root_category.lft,
+                category__rght__lte=root_category.rght,
             )
 
         q = (request.query_params.get("q") or "").strip()
@@ -4503,8 +4503,8 @@ class PosProductSearchView(APIView):
                     "name": artikl.name,
                     "code": artikl.code,
                     "image_46x75": image_46x75,
-                    "drink_category_id": artikl.drink_category_id,
-                    "drink_category_name": artikl.drink_category.name if artikl.drink_category_id else None,
+                    "category_id": artikl.category_id,
+                    "category_name": artikl.category.name if artikl.category_id else None,
                     "unit_price": artikl.active_unit_price,
                     "tax_rate": artikl.tax_group.rate if artikl.tax_group_id else None,
                     "popularity_score": artikl.popularity_score,
@@ -4655,20 +4655,20 @@ class PosProductBundlePriceView(APIView):
         )
 
 
-class PosDrinkCategoriesDisplayView(APIView):
+class PosCategoriesDisplayView(APIView):
     permission_classes = [IsAuthenticated]
 
     @staticmethod
-    def _priced_category_ids_for_subtree(root: DrinkCategory) -> set[int]:
+    def _priced_category_ids_for_subtree(root: Category) -> set[int]:
         now = timezone.now()
         return set(
             Artikl.objects.filter(
                 is_sellable=True,
-                drink_category__isnull=False,
-                drink_category__is_active=True,
-                drink_category__tree_id=root.tree_id,
-                drink_category__lft__gte=root.lft,
-                drink_category__rght__lte=root.rght,
+                category__isnull=False,
+                category__is_active=True,
+                category__tree_id=root.tree_id,
+                category__lft__gte=root.lft,
+                category__rght__lte=root.rght,
                 sales_price_items__is_active=True,
                 sales_price_items__price_list__is_active=True,
                 sales_price_items__price_list__valid_from__lte=now,
@@ -4677,22 +4677,22 @@ class PosDrinkCategoriesDisplayView(APIView):
                 Q(sales_price_items__price_list__valid_to__isnull=True)
                 | Q(sales_price_items__price_list__valid_to__gte=now)
             )
-            .values_list("drink_category_id", flat=True)
+            .values_list("category_id", flat=True)
             .distinct()
         )
 
     @staticmethod
-    def _popularity_by_category_for_subtree(*, root: DrinkCategory, popularity_field: str) -> dict[int, Decimal]:
+    def _popularity_by_category_for_subtree(*, root: Category, popularity_field: str) -> dict[int, Decimal]:
         now = timezone.now()
         direct_map: dict[int, Decimal] = {}
         priced_rows = (
             Artikl.objects.filter(
                 is_sellable=True,
-                drink_category__isnull=False,
-                drink_category__is_active=True,
-                drink_category__tree_id=root.tree_id,
-                drink_category__lft__gte=root.lft,
-                drink_category__rght__lte=root.rght,
+                category__isnull=False,
+                category__is_active=True,
+                category__tree_id=root.tree_id,
+                category__lft__gte=root.lft,
+                category__rght__lte=root.rght,
                 sales_price_items__is_active=True,
                 sales_price_items__price_list__is_active=True,
                 sales_price_items__price_list__valid_from__lte=now,
@@ -4708,7 +4708,7 @@ class PosDrinkCategoriesDisplayView(APIView):
                     output_field=DecimalField(max_digits=14, decimal_places=4),
                 )
             )
-            .values_list("drink_category_id", "popularity_score")
+            .values_list("category_id", "popularity_score")
         )
         for category_id, popularity_score in priced_rows:
             popularity = Decimal(str(popularity_score or "0.0000")).quantize(Decimal("0.0001"))
@@ -4719,7 +4719,7 @@ class PosDrinkCategoriesDisplayView(APIView):
 
     @extend_schema(
         description=(
-            "Returns display drink categories for POS by root category. "
+            "Returns display categories for POS by root category. "
             "Selection is active-only and prefers deepest available level with sellable products that have active sales price."
         ),
         parameters=[
@@ -4731,7 +4731,7 @@ class PosDrinkCategoriesDisplayView(APIView):
             ),
         ],
         responses={
-            200: PosDrinkCategoryDisplayResponseSerializer,
+            200: PosCategoryDisplayResponseSerializer,
             400: ErrorSerializer,
             404: ErrorSerializer,
         },
@@ -4748,7 +4748,7 @@ class PosDrinkCategoriesDisplayView(APIView):
         except (TypeError, ValueError):
             return Response({"detail": "root_id mora biti broj."}, status=status.HTTP_400_BAD_REQUEST)
 
-        root = DrinkCategory.objects.filter(id=root_id, is_active=True).first()
+        root = Category.objects.filter(id=root_id, is_active=True).first()
         if not root:
             return Response({"detail": "Aktivna root kategorija ne postoji."}, status=status.HTTP_404_NOT_FOUND)
         try:
@@ -4762,7 +4762,7 @@ class PosDrinkCategoriesDisplayView(APIView):
         )
 
         subtree = list(
-            DrinkCategory.objects.filter(
+            Category.objects.filter(
                 tree_id=root.tree_id,
                 lft__gte=root.lft,
                 rght__lte=root.rght,

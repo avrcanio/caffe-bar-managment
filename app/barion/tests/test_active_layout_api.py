@@ -10,7 +10,7 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from artikli.models import Artikl, DrinkCategory, Normativ, NormativItem
+from artikli.models import Artikl, Category, Normativ, NormativItem
 from barion.models import (
     BarionRuntimeMode,
     Check,
@@ -1550,8 +1550,8 @@ class PosProductSearchApiTests(TestCase):
             password="pass1234",
         )
         self.tax_group = TaxGroup.objects.create(name="PDV 25", code="PDV25", rate="0.2500")
-        self.cat_hot = DrinkCategory.objects.create(name="Topli napitci")
-        self.cat_soft = DrinkCategory.objects.create(name="Sokovi")
+        self.cat_hot = Category.objects.create(name="Topli napitci")
+        self.cat_soft = Category.objects.create(name="Sokovi")
         self.price_list = SalesPriceList.objects.create(
             name="POS test cjenik",
             is_active=True,
@@ -1564,7 +1564,7 @@ class PosProductSearchApiTests(TestCase):
             code="KAVA01",
             is_sellable=True,
             is_stock_item=False,
-            drink_category=self.cat_hot,
+            category=self.cat_hot,
             tax_group=self.tax_group,
         )
         self.cola = Artikl.objects.create(
@@ -1572,7 +1572,7 @@ class PosProductSearchApiTests(TestCase):
             code="SOK01",
             is_sellable=True,
             is_stock_item=False,
-            drink_category=self.cat_soft,
+            category=self.cat_soft,
             tax_group=self.tax_group,
         )
         self.water = Artikl.objects.create(
@@ -1580,7 +1580,7 @@ class PosProductSearchApiTests(TestCase):
             code="VODA01",
             is_sellable=True,
             is_stock_item=True,
-            drink_category=self.cat_soft,
+            category=self.cat_soft,
             tax_group=self.tax_group,
         )
         Artikl.objects.create(
@@ -1588,7 +1588,7 @@ class PosProductSearchApiTests(TestCase):
             code="INT01",
             is_sellable=False,
             is_stock_item=False,
-            drink_category=self.cat_hot,
+            category=self.cat_hot,
             tax_group=self.tax_group,
         )
         SalesPriceItem.objects.create(price_list=self.price_list, artikl=self.espresso, unit_price_gross="2.50", is_active=True)
@@ -1618,10 +1618,10 @@ class PosProductSearchApiTests(TestCase):
         self.assertEqual(data[0]["code"], "SOK01")
         self.assertIn("image_46x75", data[0])
 
-    def test_filters_by_drink_category(self):
+    def test_filters_by_category(self):
         self.client.force_authenticate(user=self.user)
         response = self.client.get(
-            f"/api/pos/products/search/?drink_category_id={self.cat_hot.id}",
+            f"/api/pos/products/search/?category_id={self.cat_hot.id}",
             secure=True,
         )
         self.assertEqual(response.status_code, 200, response.content)
@@ -1631,14 +1631,14 @@ class PosProductSearchApiTests(TestCase):
         self.assertNotIn(self.water.id, returned_ids)
 
     def test_filters_by_parent_category_includes_descendants(self):
-        parent_lvl2 = DrinkCategory.objects.create(name="Zestoka")
-        child_lvl3 = DrinkCategory.objects.create(name="Vodke", parent=parent_lvl2)
+        parent_lvl2 = Category.objects.create(name="Zestoka")
+        child_lvl3 = Category.objects.create(name="Vodke", parent=parent_lvl2)
         nested_artikl = Artikl.objects.create(
             name="Belvedere vodka 0,03l",
             code="BELV03",
             is_sellable=True,
             is_stock_item=False,
-            drink_category=child_lvl3,
+            category=child_lvl3,
             tax_group=self.tax_group,
         )
         SalesPriceItem.objects.create(
@@ -1650,7 +1650,7 @@ class PosProductSearchApiTests(TestCase):
 
         self.client.force_authenticate(user=self.user)
         response = self.client.get(
-            f"/api/pos/products/search/?drink_category_id={parent_lvl2.id}",
+            f"/api/pos/products/search/?category_id={parent_lvl2.id}",
             secure=True,
         )
         self.assertEqual(response.status_code, 200, response.content)
@@ -1740,7 +1740,7 @@ class PosProductSearchApiTests(TestCase):
             code="NOPRICE01",
             is_sellable=True,
             is_stock_item=False,
-            drink_category=self.cat_hot,
+            category=self.cat_hot,
             tax_group=self.tax_group,
         )
         self.client.force_authenticate(user=self.user)
@@ -2078,7 +2078,7 @@ class PosCheckSendToBarApiTests(TestCase):
         self.assertEqual(sent_ids, {self.item_1.id, self.item_2.id})
 
 
-class PosDrinkCategoriesDisplayApiTests(TestCase):
+class PosCategoriesDisplayApiTests(TestCase):
     def setUp(self):
         self.client = APIClient()
         User = get_user_model()
@@ -2098,13 +2098,13 @@ class PosDrinkCategoriesDisplayApiTests(TestCase):
         runtime.active_mode = BarionRuntimeMode.Mode.DAY
         runtime.save()
 
-    def _priced_artikl(self, *, category: DrinkCategory, code: str):
+    def _priced_artikl(self, *, category: Category, code: str):
         artikl = Artikl.objects.create(
             name=f"Artikl {code}",
             code=code,
             is_sellable=True,
             is_stock_item=False,
-            drink_category=category,
+            category=category,
             tax_group=self.tax_group,
         )
         SalesPriceItem.objects.create(
@@ -2116,21 +2116,21 @@ class PosDrinkCategoriesDisplayApiTests(TestCase):
         return artikl
 
     def test_requires_authentication(self):
-        response = self.client.get("/api/pos/drink-categories/display/?root_id=1", secure=True)
+        response = self.client.get("/api/pos/categories/display/?root_id=1", secure=True)
         self.assertEqual(response.status_code, 403)
 
     def test_prefers_deepest_level_with_priced_products(self):
-        root = DrinkCategory.objects.create(name="Alkoholna")
-        lvl2 = DrinkCategory.objects.create(name="Zestoka", parent=root)
-        lvl3_likeri = DrinkCategory.objects.create(name="Likeri", parent=lvl2, sort_order=10)
-        lvl3_rakije = DrinkCategory.objects.create(name="Rakije", parent=lvl2, sort_order=20)
-        DrinkCategory.objects.create(name="Skrivena", parent=lvl2, is_active=False)
+        root = Category.objects.create(name="Alkoholna")
+        lvl2 = Category.objects.create(name="Zestoka", parent=root)
+        lvl3_likeri = Category.objects.create(name="Likeri", parent=lvl2, sort_order=10)
+        lvl3_rakije = Category.objects.create(name="Rakije", parent=lvl2, sort_order=20)
+        Category.objects.create(name="Skrivena", parent=lvl2, is_active=False)
 
         self._priced_artikl(category=lvl3_likeri, code="LIK01")
         self._priced_artikl(category=lvl3_rakije, code="RAK01")
 
         self.client.force_authenticate(user=self.user)
-        response = self.client.get(f"/api/pos/drink-categories/display/?root_id={root.id}", secure=True)
+        response = self.client.get(f"/api/pos/categories/display/?root_id={root.id}", secure=True)
         self.assertEqual(response.status_code, 200, response.content)
         payload = response.json()
         self.assertEqual(payload["display_level"], 3)
@@ -2138,15 +2138,15 @@ class PosDrinkCategoriesDisplayApiTests(TestCase):
         self.assertEqual(names, ["Likeri", "Rakije"])
 
     def test_falls_back_to_level_two_when_no_level_three(self):
-        root = DrinkCategory.objects.create(name="Napitci")
-        lvl2_hot = DrinkCategory.objects.create(name="Topli", parent=root, sort_order=10)
-        lvl2_soft = DrinkCategory.objects.create(name="Sokovi", parent=root, sort_order=20)
+        root = Category.objects.create(name="Napitci")
+        lvl2_hot = Category.objects.create(name="Topli", parent=root, sort_order=10)
+        lvl2_soft = Category.objects.create(name="Sokovi", parent=root, sort_order=20)
 
         self._priced_artikl(category=lvl2_hot, code="TOP01")
         self._priced_artikl(category=lvl2_soft, code="SOK01")
 
         self.client.force_authenticate(user=self.user)
-        response = self.client.get(f"/api/pos/drink-categories/display/?root_id={root.id}", secure=True)
+        response = self.client.get(f"/api/pos/categories/display/?root_id={root.id}", secure=True)
         self.assertEqual(response.status_code, 200, response.content)
         payload = response.json()
         self.assertEqual(payload["display_level"], 2)
@@ -2154,9 +2154,9 @@ class PosDrinkCategoriesDisplayApiTests(TestCase):
         self.assertEqual(names, ["Topli", "Sokovi"])
 
     def test_sorts_display_categories_by_day_popularity_desc(self):
-        root = DrinkCategory.objects.create(name="Napitci")
-        lvl2_hot = DrinkCategory.objects.create(name="Topli", parent=root, sort_order=10)
-        lvl2_soft = DrinkCategory.objects.create(name="Sokovi", parent=root, sort_order=20)
+        root = Category.objects.create(name="Napitci")
+        lvl2_hot = Category.objects.create(name="Topli", parent=root, sort_order=10)
+        lvl2_soft = Category.objects.create(name="Sokovi", parent=root, sort_order=20)
 
         hot_artikl = self._priced_artikl(category=lvl2_hot, code="TOP01")
         soft_artikl = self._priced_artikl(category=lvl2_soft, code="SOK01")
@@ -2165,7 +2165,7 @@ class PosDrinkCategoriesDisplayApiTests(TestCase):
 
         self.client.force_authenticate(user=self.user)
         response = self.client.get(
-            f"/api/pos/drink-categories/display/?root_id={root.id}&mode=day",
+            f"/api/pos/categories/display/?root_id={root.id}&mode=day",
             secure=True,
         )
         self.assertEqual(response.status_code, 200, response.content)
@@ -2176,9 +2176,9 @@ class PosDrinkCategoriesDisplayApiTests(TestCase):
         self.assertEqual(float(rows[0]["popularity_score"]), 200.0)
 
     def test_sorts_display_categories_by_night_popularity_desc_when_backend_mode_is_night(self):
-        root = DrinkCategory.objects.create(name="Napitci")
-        lvl2_hot = DrinkCategory.objects.create(name="Topli", parent=root, sort_order=10)
-        lvl2_soft = DrinkCategory.objects.create(name="Sokovi", parent=root, sort_order=20)
+        root = Category.objects.create(name="Napitci")
+        lvl2_hot = Category.objects.create(name="Topli", parent=root, sort_order=10)
+        lvl2_soft = Category.objects.create(name="Sokovi", parent=root, sort_order=20)
 
         hot_artikl = self._priced_artikl(category=lvl2_hot, code="TOP01")
         soft_artikl = self._priced_artikl(category=lvl2_soft, code="SOK01")
@@ -2198,7 +2198,7 @@ class PosDrinkCategoriesDisplayApiTests(TestCase):
         runtime.active_mode = BarionRuntimeMode.Mode.NIGHT
         runtime.save()
         response = self.client.get(
-            f"/api/pos/drink-categories/display/?root_id={root.id}&mode=day",
+            f"/api/pos/categories/display/?root_id={root.id}&mode=day",
             secure=True,
         )
         self.assertEqual(response.status_code, 200, response.content)
@@ -2207,10 +2207,10 @@ class PosDrinkCategoriesDisplayApiTests(TestCase):
         self.assertEqual(float(rows[0]["popularity_score"]), 300.0)
 
     def test_display_categories_invalid_mode_query_is_ignored(self):
-        root = DrinkCategory.objects.create(name="Napitci")
+        root = Category.objects.create(name="Napitci")
         self.client.force_authenticate(user=self.user)
         response = self.client.get(
-            f"/api/pos/drink-categories/display/?root_id={root.id}&mode=bad",
+            f"/api/pos/categories/display/?root_id={root.id}&mode=bad",
             secure=True,
         )
         self.assertEqual(response.status_code, 200, response.content)

@@ -35,13 +35,13 @@ class Artikl(models.Model):
         related_name="artikli",
         verbose_name="porezna grupa",
     )
-    drink_category = models.ForeignKey(
-        "DrinkCategory",
+    category = models.ForeignKey(
+        "Category",
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name="artikli",
-        verbose_name="Kategorija pića",
+        verbose_name="Kategorija",
     )
     is_sellable = models.BooleanField(default=True, verbose_name="Prodajni artikl")
     is_stock_item = models.BooleanField(default=False, verbose_name="Skladisni artikl")
@@ -158,7 +158,7 @@ class Deposit(models.Model):
         verbose_name_plural = "Povratne naknade"
 
 
-class DrinkCategory(MPTTModel):
+class Category(MPTTModel):
     name = models.CharField(max_length=120)
     parent = TreeForeignKey(
         "self",
@@ -174,8 +174,8 @@ class DrinkCategory(MPTTModel):
         order_insertion_by = ["sort_order", "name"]
 
     class Meta:
-        verbose_name = "Kategorija pića"
-        verbose_name_plural = "Kategorije pića"
+        verbose_name = "Kategorija"
+        verbose_name_plural = "Kategorije"
         ordering = ["tree_id", "lft"]
         constraints = [
             models.UniqueConstraint(
