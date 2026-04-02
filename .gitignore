@@ -65,6 +65,7 @@ cookies.txt
 .env.dev
 dev_dump.dump
 backup/
+backups/
 caddy/certs/
 _archive/
 download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle
