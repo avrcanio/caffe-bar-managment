@@ -48,8 +48,6 @@ from artikli.api import (
     UnitOfMeasureListView,
     ArtiklImage46x75View,
     ArtiklImage125x200View,
-    CategoryListView,
-    CategoryDetailView,
 )
 from sales.api import (
     RepresentationDetailView,
@@ -116,6 +114,7 @@ from barion.api import (
     PosCheckSendToBarView,
     PosChecksView,
     PosCategoriesDisplayView,
+    PosBootstrapView,
     PosProductModifiersView,
     PosProductSearchView,
     PosRuntimeModeView,
@@ -138,8 +137,6 @@ urlpatterns = [
     path('api/artikli/<int:rm_id>/', ArtiklDetailView.as_view(), name='api-artikl-detail'),
     path('api/artikli/<int:rm_id>/image-46x75/', ArtiklImage46x75View.as_view(), name='api-artikl-image-46x75'),
     path('api/artikli/<int:rm_id>/image-125x200/', ArtiklImage125x200View.as_view(), name='api-artikl-image-125x200'),
-    path('api/categories/', CategoryListView.as_view(), name='api-category-list'),
-    path('api/categories/<int:pk>/', CategoryDetailView.as_view(), name='api-category-detail'),
     path('api/representations/', RepresentationListView.as_view(), name='api-representation-list'),
     path('api/representations/<int:pk>/', RepresentationDetailView.as_view(), name='api-representation-detail'),
     path('api/representation-reasons/', RepresentationReasonListView.as_view(), name='api-representation-reason-list'),
@@ -217,6 +214,7 @@ urlpatterns = [
     path("api/pos/check-items/<int:item_id>/gratis/", PosCheckItemGratisView.as_view(), name="api-pos-check-item-gratis"),
     path("api/pos/check-items/<int:item_id>/otpis/", PosCheckItemOtpisView.as_view(), name="api-pos-check-item-otpis"),
     path("api/pos/runtime-mode/", PosRuntimeModeView.as_view(), name="api-pos-runtime-mode"),
+    path("api/pos/bootstrap/", PosBootstrapView.as_view(), name="api-pos-bootstrap"),
     path("api/pos/products/search/", PosProductSearchView.as_view(), name="api-pos-product-search"),
     path("api/pos/products/<int:artikl_id>/modifiers/", PosProductModifiersView.as_view(), name="api-pos-product-modifiers"),
     path("api/pos/products/<int:artikl_id>/bundle-price/", PosProductBundlePriceView.as_view(), name="api-pos-product-bundle-price"),

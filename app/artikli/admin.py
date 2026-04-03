@@ -382,6 +382,20 @@ class CategoryAdmin(DraggableMPTTAdmin):
     list_filter = ("is_active",)
     search_fields = ("name",)
 
+    def get_search_results(self, request, queryset, search_term):
+        queryset, may_have_duplicates = super().get_search_results(request, queryset, search_term)
+        if (
+            request.GET.get("app_label") == "barion"
+            and request.GET.get("model_name") == "barioncategory"
+            and request.GET.get("field_name") == "category"
+        ):
+            from barion.models import BarionCategory
+
+            queryset = queryset.exclude(
+                id__in=BarionCategory.objects.values_list("category_id", flat=True)
+            )
+        return queryset, may_have_duplicates
+
 
 @admin.action(description="Import unit measures from Remaris", permissions=["change"])
 def import_unit_measures_from_remaris(modeladmin, request, queryset):

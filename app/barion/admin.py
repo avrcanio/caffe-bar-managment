@@ -12,6 +12,8 @@ from django.urls import path, reverse
 from django.utils import timezone
 
 from .models import (
+    BarionCategory,
+    BarionCategorySettings,
     BarionRuntimeMode,
     CheckItemModifierSelection,
     Check,
@@ -31,6 +33,48 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@admin.register(BarionCategory)
+class BarionCategoryAdmin(admin.ModelAdmin):
+    list_display = ("category", "sort_order", "is_active", "updated_at")
+    list_filter = ("is_active",)
+    search_fields = ("category__name",)
+    autocomplete_fields = ("category",)
+    ordering = ("sort_order", "category__name", "id")
+
+
+@admin.register(BarionCategorySettings)
+class BarionCategorySettingsAdmin(admin.ModelAdmin):
+    list_display = (
+        "day_start",
+        "day_end",
+        "night_start",
+        "night_end",
+        "day_lookback_days",
+        "night_lookback_days",
+        "updated_at",
+    )
+    fields = (
+        "day_start",
+        "day_end",
+        "night_start",
+        "night_end",
+        "day_lookback_days",
+        "night_lookback_days",
+        "updated_at",
+    )
+    readonly_fields = ("updated_at",)
+
+    def has_add_permission(self, request):
+        return not BarionCategorySettings.objects.filter(pk=1).exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def changelist_view(self, request, extra_context=None):
+        BarionCategorySettings.get_solo()
+        return super().changelist_view(request, extra_context=extra_context)
 
 
 @admin.register(Table)

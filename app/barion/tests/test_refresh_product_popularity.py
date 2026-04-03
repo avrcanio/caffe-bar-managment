@@ -2,18 +2,46 @@ from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 from django.core.management import call_command
+from django.db import IntegrityError
 from django.test import TestCase
 from django.utils import timezone
 
-from artikli.models import Artikl
-from barion.models import ProductPopularitySnapshot
+from artikli.models import Artikl, Category
+from barion.models import BarionCategory, BarionCategorySettings, ProductPopularitySnapshot
 from configuration.models import TaxGroup
 from sales.models import SalesInvoice, SalesInvoiceItem
+
+
+class BarionCategoryModelTests(TestCase):
+    def test_settings_singleton_can_be_fetched(self):
+        settings = BarionCategorySettings.get_solo()
+        self.assertEqual(settings.pk, 1)
+        self.assertEqual(str(settings.day_start), "07:00:00")
+        self.assertEqual(str(settings.day_end), "20:00:00")
+        self.assertEqual(str(settings.night_start), "20:00:00")
+        self.assertEqual(str(settings.night_end), "02:00:00")
+
+    def test_barion_category_disallows_duplicate_category(self):
+        category = Category.objects.create(name="Napitci")
+        BarionCategory.objects.create(category=category)
+
+        with self.assertRaises(IntegrityError):
+            BarionCategory.objects.create(category=category)
+
+    def test_settings_allow_cross_midnight_periods(self):
+        settings = BarionCategorySettings.get_solo()
+        settings.day_start = time(7, 0)
+        settings.day_end = time(20, 0)
+        settings.night_start = time(20, 0)
+        settings.night_end = time(2, 0)
+
+        settings.full_clean()
 
 
 class RefreshProductPopularityCommandTests(TestCase):
     def setUp(self):
         self.tax_group = TaxGroup.objects.create(name="PDV 25", code="PDV25", rate="0.2500")
+        self.settings = BarionCategorySettings.get_solo()
         self.artikl_main = Artikl.objects.create(
             name="Test artikal",
             code="TEST-POP-1",
@@ -35,14 +63,6 @@ class RefreshProductPopularityCommandTests(TestCase):
         return timezone.make_aware(naive, timezone.get_current_timezone())
 
     @staticmethod
-    def _week_anchor(target_local_date):
-        # Returns Friday/Saturday/Sunday around target date in local calendar week.
-        friday = target_local_date - timedelta(days=(target_local_date.weekday() - 4) % 7)
-        saturday = friday + timedelta(days=1)
-        sunday = friday + timedelta(days=2)
-        return friday, saturday, sunday
-
-    @staticmethod
     def _create_invoice_item(*, artikl, issued_at, qty, rm_number):
         invoice = SalesInvoice.objects.create(
             rm_number=rm_number,
@@ -57,18 +77,15 @@ class RefreshProductPopularityCommandTests(TestCase):
             amount=Decimal("10.00"),
         )
 
-    def test_refresh_popularity_sets_night_qty_with_weekend_time_boundaries(self):
+    def test_refresh_popularity_splits_day_and_night_by_configured_windows(self):
         today_local = timezone.localdate()
-        friday, saturday, sunday = self._week_anchor(today_local)
-
         rows = [
-            (self._aware(friday, 19, 59), "1.0000"),  # exclude
-            (self._aware(friday, 20, 0), "1.0000"),  # include
-            (self._aware(saturday, 1, 59), "1.0000"),  # include
-            (self._aware(saturday, 2, 0), "1.0000"),  # exclude
-            (self._aware(saturday, 20, 0), "1.0000"),  # include
-            (self._aware(sunday, 1, 59), "1.0000"),  # include
-            (self._aware(sunday, 2, 0), "1.0000"),  # exclude
+            (self._aware(today_local, 6, 59), "1.0000"),
+            (self._aware(today_local, 7, 0), "1.0000"),
+            (self._aware(today_local, 19, 59), "1.0000"),
+            (self._aware(today_local, 20, 0), "1.0000"),
+            (self._aware(today_local + timedelta(days=1), 1, 59), "1.0000"),
+            (self._aware(today_local + timedelta(days=1), 2, 0), "1.0000"),
         ]
         for idx, (issued_at, qty) in enumerate(rows, start=1):
             self._create_invoice_item(
@@ -78,16 +95,15 @@ class RefreshProductPopularityCommandTests(TestCase):
                 rm_number=10_000 + idx,
             )
 
-        call_command("refresh_product_popularity", days=30, night_weeks=8)
+        call_command("refresh_product_popularity")
 
         snapshot = ProductPopularitySnapshot.objects.get(artikl=self.artikl_main)
-        self.assertEqual(snapshot.sold_qty_30d, Decimal("7.0000"))
-        self.assertEqual(snapshot.sold_qty_night_weekend, Decimal("4.0000"))
+        self.assertEqual(snapshot.sold_qty_day, Decimal("2.0000"))
+        self.assertEqual(snapshot.sold_qty_night, Decimal("2.0000"))
 
     def test_refresh_popularity_keeps_night_only_items_in_snapshot(self):
-        base_date = timezone.localdate() - timedelta(days=40)
-        _friday, saturday, _sunday = self._week_anchor(base_date)
-        night_dt = self._aware(saturday, 21, 0)
+        base_date = timezone.localdate() - timedelta(days=5)
+        night_dt = self._aware(base_date, 21, 0)
         self._create_invoice_item(
             artikl=self.artikl_night_only,
             issued_at=night_dt,
@@ -95,8 +111,23 @@ class RefreshProductPopularityCommandTests(TestCase):
             rm_number=20_001,
         )
 
-        call_command("refresh_product_popularity", days=30, night_weeks=8)
+        call_command("refresh_product_popularity")
 
         snapshot = ProductPopularitySnapshot.objects.get(artikl=self.artikl_night_only)
-        self.assertEqual(snapshot.sold_qty_30d, Decimal("0.0000"))
-        self.assertEqual(snapshot.sold_qty_night_weekend, Decimal("2.0000"))
+        self.assertEqual(snapshot.sold_qty_day, Decimal("0.0000"))
+        self.assertEqual(snapshot.sold_qty_night, Decimal("2.0000"))
+
+    def test_refresh_popularity_counts_after_midnight_inside_night_window(self):
+        today_local = timezone.localdate()
+        self._create_invoice_item(
+            artikl=self.artikl_main,
+            issued_at=self._aware(today_local + timedelta(days=1), 1, 30),
+            qty="3.0000",
+            rm_number=30_001,
+        )
+
+        call_command("refresh_product_popularity")
+
+        snapshot = ProductPopularitySnapshot.objects.get(artikl=self.artikl_main)
+        self.assertEqual(snapshot.sold_qty_day, Decimal("0.0000"))
+        self.assertEqual(snapshot.sold_qty_night, Decimal("3.0000"))

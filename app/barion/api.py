@@ -29,6 +29,7 @@ from stock.models import StockMove
 from stock.services import post_stock_out
 
 from .models import (
+    BarionCategory,
     BarionRuntimeMode,
     CheckItemModifierSelection,
     Check,
@@ -280,6 +281,15 @@ class PosCategoryDisplayResponseSerializer(serializers.Serializer):
     root_id = serializers.IntegerField()
     display_level = serializers.IntegerField()
     categories = PosCategoryDisplayItemSerializer(many=True)
+
+
+class PosBootstrapResponseSerializer(serializers.Serializer):
+    active_mode = serializers.ChoiceField(choices=BarionRuntimeMode.Mode.choices)
+    root_id = serializers.IntegerField(allow_null=True)
+    display_level = serializers.IntegerField()
+    categories = PosCategoryDisplayItemSerializer(many=True)
+    selected_category_id = serializers.IntegerField(allow_null=True)
+    products = PosProductSearchItemSerializer(many=True)
 
 
 class ProductModifierOptionSerializer(serializers.Serializer):
@@ -586,6 +596,62 @@ def _resolve_effective_mode(*, requested_mode: str | None) -> tuple[str, BarionR
     runtime_mode = BarionRuntimeMode.get_solo()
     effective_mode = runtime_mode.active_mode or BarionRuntimeMode.Mode.DAY
     return effective_mode, runtime_mode
+
+
+def _category_subtree_q(category: Category, *, prefix: str = "category") -> Q:
+    return Q(
+        **{
+            f"{prefix}__tree_id": category.tree_id,
+            f"{prefix}__lft__gte": category.lft,
+            f"{prefix}__rght__lte": category.rght,
+        }
+    )
+
+
+def _is_category_within_subtree(node: Category, ancestor: Category, *, include_self: bool = True) -> bool:
+    left_ok = node.lft >= ancestor.lft if include_self else node.lft > ancestor.lft
+    right_ok = node.rght <= ancestor.rght if include_self else node.rght < ancestor.rght
+    return node.tree_id == ancestor.tree_id and left_ok and right_ok
+
+
+def _active_barion_category_nodes_for_subtree(root: Category) -> list[Category]:
+    return list(
+        Category.objects.filter(
+            barion_categories__is_active=True,
+            is_active=True,
+            tree_id=root.tree_id,
+            lft__gte=root.lft,
+            rght__lte=root.rght,
+        )
+        .only("id", "name", "parent_id", "tree_id", "lft", "rght", "level")
+        .distinct()
+        .order_by("lft")
+    )
+
+
+def _delegated_barion_descendants(category: Category, *, active_barion_nodes: list[Category]) -> list[Category]:
+    return [
+        node
+        for node in active_barion_nodes
+        if node.id != category.id and _is_category_within_subtree(node, category, include_self=False)
+    ]
+
+
+def _is_in_delegated_subtree(node: Category, delegated_nodes: list[Category]) -> bool:
+    return any(_is_category_within_subtree(node, delegated, include_self=True) for delegated in delegated_nodes)
+
+
+def _resolve_root_category(*, raw_root_id: str | None) -> Category | None:
+    if raw_root_id in (None, ""):
+        return None
+    try:
+        root_id = int(raw_root_id)
+    except (TypeError, ValueError):
+        raise serializers.ValidationError("root_id mora biti broj.")
+    root = Category.objects.filter(id=root_id, is_active=True).first()
+    if not root:
+        return None
+    return root
 
 
 def _active_modifier_assignments_for_artikl(artikl_id: int):
@@ -4370,6 +4436,44 @@ class PosProductSearchView(APIView):
             .filter(Q(category__isnull=True) | Q(category__is_active=True))
         )
 
+    @staticmethod
+    def _apply_category_filter(qs, *, root_category: Category):
+        qs = qs.filter(_category_subtree_q(root_category))
+        delegated_nodes = _delegated_barion_descendants(
+            root_category,
+            active_barion_nodes=_active_barion_category_nodes_for_subtree(root_category),
+        )
+        if delegated_nodes:
+            delegated_q = Q()
+            for delegated in delegated_nodes:
+                delegated_q |= _category_subtree_q(delegated)
+            qs = qs.exclude(delegated_q)
+        return qs
+
+    @staticmethod
+    def _serialize_products(*, request, qs, limit: int):
+        rows = []
+        for artikl in qs[:limit]:
+            image_46x75 = None
+            if artikl.image and artikl.rm_id is not None:
+                path = f"/api/artikli/{artikl.rm_id}/image-46x75/"
+                image_46x75 = request.build_absolute_uri(path)
+            rows.append(
+                {
+                    "id": artikl.id,
+                    "rm_id": artikl.rm_id,
+                    "name": artikl.name,
+                    "code": artikl.code,
+                    "image_46x75": image_46x75,
+                    "category_id": artikl.category_id,
+                    "category_name": artikl.category.name if artikl.category_id else None,
+                    "unit_price": artikl.active_unit_price,
+                    "tax_rate": artikl.tax_group.rate if artikl.tax_group_id else None,
+                    "popularity_score": artikl.popularity_score,
+                }
+            )
+        return rows
+
     @extend_schema(
         description="Search sellable products with active sales price for Barion POS item entry.",
         parameters=[
@@ -4429,11 +4533,16 @@ class PosProductSearchView(APIView):
             root_category = Category.objects.filter(id=category_id, is_active=True).first()
             if not root_category:
                 return Response([])
-            qs = qs.filter(
-                category__tree_id=root_category.tree_id,
-                category__lft__gte=root_category.lft,
-                category__rght__lte=root_category.rght,
+            qs = qs.filter(_category_subtree_q(root_category))
+            delegated_nodes = _delegated_barion_descendants(
+                root_category,
+                active_barion_nodes=_active_barion_category_nodes_for_subtree(root_category),
             )
+            if delegated_nodes:
+                delegated_q = Q()
+                for delegated in delegated_nodes:
+                    delegated_q |= _category_subtree_q(delegated)
+                qs = qs.exclude(delegated_q)
 
         q = (request.query_params.get("q") or "").strip()
         sort_mode = (request.query_params.get("sort") or "popular").strip().lower()
@@ -4448,9 +4557,9 @@ class PosProductSearchView(APIView):
             return Response({"detail": str(exc.detail)}, status=status.HTTP_400_BAD_REQUEST)
 
         popularity_field = (
-            "barion_popularity_snapshot__sold_qty_night_weekend"
+            "barion_popularity_snapshot__sold_qty_night"
             if mode == "night"
-            else "barion_popularity_snapshot__sold_qty_30d"
+            else "barion_popularity_snapshot__sold_qty_day"
         )
 
         qs = qs.annotate(
@@ -4682,7 +4791,7 @@ class PosCategoriesDisplayView(APIView):
         )
 
     @staticmethod
-    def _popularity_by_category_for_subtree(*, root: Category, popularity_field: str) -> dict[int, Decimal]:
+    def _direct_popularity_by_category_for_subtree(*, root: Category, popularity_field: str) -> dict[int, Decimal]:
         now = timezone.now()
         direct_map: dict[int, Decimal] = {}
         priced_rows = (
@@ -4717,10 +4826,151 @@ class PosCategoriesDisplayView(APIView):
             )
         return direct_map
 
+    @staticmethod
+    def _subtree_popularity_map(*, root: Category, direct_popularity: dict[int, Decimal]) -> dict[int, Decimal]:
+        subtree = list(
+            Category.objects.filter(
+                tree_id=root.tree_id,
+                lft__gte=root.lft,
+                rght__lte=root.rght,
+                is_active=True,
+            )
+            .only("id", "parent_id", "lft")
+            .order_by("lft")
+        )
+        children_by_parent: dict[int | None, list[int]] = {}
+        for category in subtree:
+            children_by_parent.setdefault(category.parent_id, []).append(category.id)
+
+        subtree_popularity: dict[int, Decimal] = {}
+        for category in reversed(subtree):
+            total_popularity = direct_popularity.get(category.id, Decimal("0.0000"))
+            for child_id in children_by_parent.get(category.id, []):
+                total_popularity += subtree_popularity.get(child_id, Decimal("0.0000"))
+            subtree_popularity[category.id] = total_popularity.quantize(Decimal("0.0001"))
+        return subtree_popularity
+
+    @classmethod
+    def _build_display_payload(cls, *, root: Category | None, mode: str) -> dict:
+        popularity_field = (
+            "barion_popularity_snapshot__sold_qty_night"
+            if mode == "night"
+            else "barion_popularity_snapshot__sold_qty_day"
+        )
+        base_barion_categories = BarionCategory.objects.select_related("category").filter(
+            is_active=True,
+            category__is_active=True,
+        )
+        if root is not None:
+            base_barion_categories = base_barion_categories.filter(
+                category__tree_id=root.tree_id,
+                category__lft__gte=root.lft,
+                category__rght__lte=root.rght,
+            )
+
+        barion_categories = list(base_barion_categories.order_by("sort_order", "category__name", "id"))
+        active_barion_nodes = [barion_category.category for barion_category in barion_categories]
+        if not active_barion_nodes:
+            return {
+                "root_id": root.id if root else None,
+                "display_level": root.level + 1 if root else 0,
+                "categories": [],
+            }
+
+        tree_ids = sorted({node.tree_id for node in active_barion_nodes})
+        subtree_nodes_qs = Category.objects.filter(
+            tree_id__in=tree_ids,
+            is_active=True,
+        )
+        if root is not None:
+            subtree_nodes_qs = subtree_nodes_qs.filter(
+                lft__gte=root.lft,
+                rght__lte=root.rght,
+            )
+        subtree_nodes = list(
+            subtree_nodes_qs.only("id", "parent_id", "lft", "tree_id", "rght", "level").order_by("tree_id", "lft")
+        )
+
+        now = timezone.now()
+        priced_qs = Artikl.objects.filter(
+            is_sellable=True,
+            category__isnull=False,
+            category__is_active=True,
+            category__tree_id__in=tree_ids,
+            sales_price_items__is_active=True,
+            sales_price_items__price_list__is_active=True,
+            sales_price_items__price_list__valid_from__lte=now,
+        ).filter(
+            Q(sales_price_items__price_list__valid_to__isnull=True)
+            | Q(sales_price_items__price_list__valid_to__gte=now)
+        )
+        if root is not None:
+            priced_qs = priced_qs.filter(
+                category__lft__gte=root.lft,
+                category__rght__lte=root.rght,
+            )
+        priced_category_ids = set(priced_qs.values_list("category_id", flat=True).distinct())
+
+        direct_popularity: dict[int, Decimal] = {}
+        popularity_rows = priced_qs.annotate(
+            popularity_score=Coalesce(
+                F(popularity_field),
+                Value(Decimal("0.0000")),
+                output_field=DecimalField(max_digits=14, decimal_places=4),
+            )
+        ).values_list("category_id", "popularity_score")
+        for category_id, popularity_score in popularity_rows:
+            popularity = Decimal(str(popularity_score or "0.0000")).quantize(Decimal("0.0001"))
+            direct_popularity[category_id] = (
+                direct_popularity.get(category_id, Decimal("0.0000")) + popularity
+            ).quantize(Decimal("0.0001"))
+
+        categories = []
+        for barion_category in barion_categories:
+            category = barion_category.category
+            delegated_nodes = _delegated_barion_descendants(
+                category,
+                active_barion_nodes=active_barion_nodes,
+            )
+            effective_node_ids = [
+                node.id
+                for node in subtree_nodes
+                if _is_category_within_subtree(node, category, include_self=True)
+                and not _is_in_delegated_subtree(node, delegated_nodes)
+            ]
+            if not any(node_id in priced_category_ids for node_id in effective_node_ids):
+                continue
+            popularity_score = sum(
+                (direct_popularity.get(node_id, Decimal("0.0000")) for node_id in effective_node_ids),
+                start=Decimal("0.0000"),
+            ).quantize(Decimal("0.0001"))
+            categories.append(
+                {
+                    "id": category.id,
+                    "name": category.name,
+                    "parent_id": category.parent_id,
+                    "sort_order": barion_category.sort_order,
+                    "popularity_score": popularity_score,
+                }
+            )
+        categories.sort(
+            key=lambda row: (
+                -Decimal(str(row.get("popularity_score") or "0.0000")),
+                int(row.get("sort_order") or 0),
+                str(row.get("name") or ""),
+                int(row.get("id") or 0),
+            )
+        )
+        return {
+            "root_id": root.id if root else None,
+            "display_level": root.level + 1 if root else 0,
+            "categories": categories,
+        }
+
     @extend_schema(
         description=(
             "Returns display categories for POS by root category. "
-            "Selection is active-only and prefers deepest available level with sellable products that have active sales price."
+            "Selection is active-only and limited to categories explicitly enabled in Barion."
         ),
         parameters=[
             OpenApiParameter(
@@ -4755,89 +5005,83 @@ class PosCategoriesDisplayView(APIView):
             mode, _runtime_mode = _resolve_effective_mode(requested_mode=request.query_params.get("mode"))
         except serializers.ValidationError as exc:
             return Response({"detail": str(exc.detail)}, status=status.HTTP_400_BAD_REQUEST)
-        popularity_field = (
-            "barion_popularity_snapshot__sold_qty_night_weekend"
-            if mode == "night"
-            else "barion_popularity_snapshot__sold_qty_30d"
-        )
+        return Response(self._build_display_payload(root=root, mode=mode))
 
-        subtree = list(
-            Category.objects.filter(
-                tree_id=root.tree_id,
-                lft__gte=root.lft,
-                rght__lte=root.rght,
-                is_active=True,
-            )
-            .only("id", "name", "parent_id", "sort_order", "level", "lft")
-            .order_by("lft")
-        )
-        if not subtree:
-            return Response({"root_id": root.id, "display_level": root.level + 1, "categories": []})
 
-        priced_category_ids = self._priced_category_ids_for_subtree(root)
-        direct_popularity = self._popularity_by_category_for_subtree(
-            root=root,
-            popularity_field=popularity_field,
-        )
+class PosBootstrapView(APIView):
+    permission_classes = [IsAuthenticated]
 
-        children_by_parent: dict[int | None, list[int]] = {}
-        for category in subtree:
-            children_by_parent.setdefault(category.parent_id, []).append(category.id)
+    @extend_schema(
+        description=(
+            "Returns initial Barion POS catalog state for client startup, "
+            "including effective runtime mode, visible categories, and optional products for the first category."
+        ),
+        parameters=[
+            OpenApiParameter(
+                name="root_id",
+                type=int,
+                required=False,
+                location=OpenApiParameter.QUERY,
+            ),
+            OpenApiParameter(
+                name="include_products",
+                type=bool,
+                required=False,
+                location=OpenApiParameter.QUERY,
+            ),
+        ],
+        responses={
+            200: PosBootstrapResponseSerializer,
+            400: ErrorSerializer,
+            404: ErrorSerializer,
+        },
+    )
+    def get(self, request):
+        raw_root_id = request.query_params.get("root_id")
+        try:
+            root = _resolve_root_category(raw_root_id=raw_root_id)
+        except serializers.ValidationError as exc:
+            return Response({"detail": str(exc.detail)}, status=status.HTTP_400_BAD_REQUEST)
+        if raw_root_id not in (None, "") and not root:
+            return Response({"detail": "Aktivna root kategorija ne postoji."}, status=status.HTTP_404_NOT_FOUND)
 
-        has_products_in_subtree: dict[int, bool] = {}
-        for category in reversed(subtree):
-            own_products = category.id in priced_category_ids
-            child_products = any(
-                has_products_in_subtree.get(child_id, False)
-                for child_id in children_by_parent.get(category.id, [])
-            )
-            has_products_in_subtree[category.id] = own_products or child_products
-        subtree_popularity: dict[int, Decimal] = {}
-        for category in reversed(subtree):
-            total_popularity = direct_popularity.get(category.id, Decimal("0.0000"))
-            for child_id in children_by_parent.get(category.id, []):
-                total_popularity += subtree_popularity.get(child_id, Decimal("0.0000"))
-            subtree_popularity[category.id] = total_popularity.quantize(Decimal("0.0001"))
+        include_products = str(request.query_params.get("include_products", "")).strip().lower() in {"1", "true", "yes"}
+        try:
+            mode, _runtime_mode = _resolve_effective_mode(requested_mode=request.query_params.get("mode"))
+        except serializers.ValidationError as exc:
+            return Response({"detail": str(exc.detail)}, status=status.HTTP_400_BAD_REQUEST)
 
-        visible_descendant_levels = sorted(
-            {
-                category.level
-                for category in subtree
-                if category.id != root.id and has_products_in_subtree.get(category.id, False)
-            },
-            reverse=True,
-        )
-        if visible_descendant_levels:
-            target_level = visible_descendant_levels[0]
-        elif has_products_in_subtree.get(root.id, False):
-            target_level = root.level
-        else:
-            target_level = root.level
+        display_payload = PosCategoriesDisplayView._build_display_payload(root=root, mode=mode)
+        categories = display_payload["categories"]
+        selected_category_id = categories[0]["id"] if categories else None
+        products = []
 
-        categories = [
-            {
-                "id": category.id,
-                "name": category.name,
-                "parent_id": category.parent_id,
-                "sort_order": category.sort_order,
-                "popularity_score": subtree_popularity.get(category.id, Decimal("0.0000")),
-            }
-            for category in subtree
-            if category.level == target_level and has_products_in_subtree.get(category.id, False)
-        ]
-        categories.sort(
-            key=lambda row: (
-                -Decimal(str(row.get("popularity_score") or "0.0000")),
-                int(row.get("sort_order") or 0),
-                str(row.get("name") or ""),
-                int(row.get("id") or 0),
-            )
-        )
+        if include_products and selected_category_id is not None:
+            selected_category = Category.objects.filter(id=selected_category_id, is_active=True).first()
+            if selected_category:
+                qs = PosProductSearchView._priced_sellable_queryset()
+                qs = PosProductSearchView._apply_category_filter(qs, root_category=selected_category)
+                popularity_field = (
+                    "barion_popularity_snapshot__sold_qty_night"
+                    if mode == "night"
+                    else "barion_popularity_snapshot__sold_qty_day"
+                )
+                qs = qs.annotate(
+                    popularity_score=Coalesce(
+                        F(popularity_field),
+                        Value(Decimal("0.0000")),
+                        output_field=DecimalField(max_digits=14, decimal_places=4),
+                    )
+                ).order_by("-popularity_score", "name", "id")
+                products = PosProductSearchView._serialize_products(request=request, qs=qs, limit=100)
 
         return Response(
             {
-                "root_id": root.id,
-                "display_level": target_level + 1,
+                "active_mode": mode,
+                "root_id": display_payload["root_id"],
+                "display_level": display_payload["display_level"],
                 "categories": categories,
+                "selected_category_id": selected_category_id,
+                "products": products,
             }
         )

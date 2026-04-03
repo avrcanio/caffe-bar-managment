@@ -1,3 +1,4 @@
+from datetime import time
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.conf import settings
@@ -550,22 +551,93 @@ class ProductPopularitySnapshot(models.Model):
         on_delete=models.CASCADE,
         related_name="barion_popularity_snapshot",
     )
-    sold_qty_30d = models.DecimalField(max_digits=14, decimal_places=4, default=Decimal("0.0000"))
-    sold_qty_night_weekend = models.DecimalField(max_digits=14, decimal_places=4, default=Decimal("0.0000"))
-    window_days = models.PositiveIntegerField(default=30)
+    sold_qty_day = models.DecimalField(max_digits=14, decimal_places=4, default=Decimal("0.0000"))
+    sold_qty_night = models.DecimalField(max_digits=14, decimal_places=4, default=Decimal("0.0000"))
+    day_lookback_days = models.PositiveIntegerField(default=30)
+    night_lookback_days = models.PositiveIntegerField(default=30)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = "Product popularity snapshot"
         verbose_name_plural = "Product popularity snapshots"
         indexes = [
-            models.Index(fields=["-sold_qty_30d"], name="idx_barion_pop_qty_desc"),
-            models.Index(fields=["-sold_qty_night_weekend"], name="idx_barion_pop_night_qty_desc"),
+            models.Index(fields=["-sold_qty_day"], name="idx_barion_pop_day_qty_desc"),
+            models.Index(fields=["-sold_qty_night"], name="idx_barion_pop_night_qty_desc"),
             models.Index(fields=["updated_at"], name="idx_barion_pop_updated"),
         ]
 
     def __str__(self) -> str:
-        return f"{self.artikl_id}: {self.sold_qty_30d}"
+        return f"{self.artikl_id}: {self.sold_qty_day}"
+
+
+class BarionCategory(models.Model):
+    category = models.ForeignKey(
+        "artikli.Category",
+        on_delete=models.CASCADE,
+        related_name="barion_categories",
+    )
+    is_active = models.BooleanField(default=True)
+    sort_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Barion category"
+        verbose_name_plural = "Barion categories"
+        ordering = ["sort_order", "category__name", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["category"], name="uniq_barion_category_category"),
+        ]
+
+    def __str__(self) -> str:
+        return f"Barion: {self.category}"
+
+
+class BarionCategorySettings(models.Model):
+    day_start = models.TimeField(default=time(7, 0))
+    day_end = models.TimeField(default=time(20, 0))
+    night_start = models.TimeField(default=time(20, 0))
+    night_end = models.TimeField(default=time(2, 0))
+    day_lookback_days = models.PositiveIntegerField(default=30)
+    night_lookback_days = models.PositiveIntegerField(default=30)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Barion category settings"
+        verbose_name_plural = "Barion category settings"
+
+    def clean(self):
+        if self.day_start == self.day_end:
+            raise ValidationError({"day_end": "Day period ne može imati isti početak i kraj."})
+        if self.night_start == self.night_end:
+            raise ValidationError({"night_end": "Night period ne može imati isti početak i kraj."})
+        if self.day_lookback_days < 1:
+            raise ValidationError({"day_lookback_days": "Day lookback mora biti >= 1."})
+        if self.night_lookback_days < 1:
+            raise ValidationError({"night_lookback_days": "Night lookback mora biti >= 1."})
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    @classmethod
+    def get_solo(cls):
+        instance, _ = cls.objects.get_or_create(
+            pk=1,
+            defaults={
+                "day_start": time(7, 0),
+                "day_end": time(20, 0),
+                "night_start": time(20, 0),
+                "night_end": time(2, 0),
+                "day_lookback_days": 30,
+                "night_lookback_days": 30,
+            },
+        )
+        return instance
+
+    def __str__(self) -> str:
+        return "Barion category settings"
 
 
 class BarionRuntimeMode(models.Model):

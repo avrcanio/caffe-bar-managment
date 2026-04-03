@@ -8,64 +8,13 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from artikli.models import Artikl, Category
+from barion.models import BarionCategory
 from configuration.models import TaxGroup
 from sales.models import SalesInvoice, SalesInvoiceItem
 
 
-class CategoryApiTests(TestCase):
-    def setUp(self):
-        self.client = APIClient()
-        User = get_user_model()
-        self.user = User.objects.create_user(
-            username="drink-cat-user",
-            email="drink-cat@example.com",
-            password="pass1234",
-            is_staff=False,
-        )
-        self.staff = User.objects.create_user(
-            username="drink-cat-staff",
-            email="drink-cat-staff@example.com",
-            password="pass1234",
-            is_staff=True,
-        )
-        self.active = Category.objects.create(name="Aktivna", is_active=True)
-        self.inactive = Category.objects.create(name="Neaktivna", is_active=False)
-        self.child = Category.objects.create(name="Podkategorija", parent=self.active, is_active=True)
 
-    def test_default_list_returns_only_active(self):
-        self.client.force_authenticate(user=self.user)
-        response = self.client.get("/api/categories/", secure=True)
-        self.assertEqual(response.status_code, 200, response.content)
-        ids = {row["id"] for row in response.json()}
-        self.assertIn(self.active.id, ids)
-        self.assertNotIn(self.inactive.id, ids)
-
-    def test_non_staff_cannot_include_inactive(self):
-        self.client.force_authenticate(user=self.user)
-        response = self.client.get("/api/categories/?include_inactive=1", secure=True)
-        self.assertEqual(response.status_code, 403, response.content)
-
-    def test_staff_can_include_inactive(self):
-        self.client.force_authenticate(user=self.staff)
-        response = self.client.get("/api/categories/?include_inactive=1", secure=True)
-        self.assertEqual(response.status_code, 200, response.content)
-        ids = {row["id"] for row in response.json()}
-        self.assertIn(self.active.id, ids)
-        self.assertIn(self.inactive.id, ids)
-
-    def test_can_filter_by_level(self):
-        self.client.force_authenticate(user=self.user)
-        response = self.client.get("/api/categories/?level=0", secure=True)
-        self.assertEqual(response.status_code, 200, response.content)
-        ids = {row["id"] for row in response.json()}
-        self.assertIn(self.active.id, ids)
-        self.assertNotIn(self.child.id, ids)
-
-    def test_invalid_level_returns_400(self):
-        self.client.force_authenticate(user=self.user)
-        response = self.client.get("/api/categories/?level=abc", secure=True)
-        self.assertEqual(response.status_code, 400, response.content)
-
+class CategoryAdminTests(TestCase):
     def test_admin_changelist_uses_category_model_name(self):
         self.assertEqual(reverse("admin:artikli_category_changelist"), "/admin/artikli/category/")
 
@@ -167,6 +116,53 @@ class ArtiklAdminCategoryFilterTests(TestCase):
             secure=True,
         )
         self.assertEqual(response.status_code, 200, response.content)
+
+
+class CategoryAdminAutocompleteTests(TestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.admin = User.objects.create_superuser(
+            username="artikli-autocomplete-admin",
+            email="artikli-autocomplete-admin@example.com",
+            password="pass1234",
+        )
+        self.client = Client(HTTP_HOST="mozart.sibenik1983.hr")
+        self.client.force_login(self.admin)
+        self.used_category = Category.objects.create(name="Whiskey")
+        self.free_category = Category.objects.create(name="Vodka")
+        BarionCategory.objects.create(category=self.used_category, sort_order=1)
+
+    def test_barion_category_autocomplete_hides_already_selected_categories(self):
+        response = self.client.get(
+            reverse("admin:autocomplete"),
+            {
+                "app_label": "barion",
+                "model_name": "barioncategory",
+                "field_name": "category",
+                "term": "",
+            },
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        names = {row["text"] for row in response.json()["results"]}
+        self.assertNotIn(self.used_category.name, names)
+        self.assertIn(self.free_category.name, names)
+
+    def test_non_barion_category_autocomplete_keeps_all_categories_visible(self):
+        response = self.client.get(
+            reverse("admin:autocomplete"),
+            {
+                "app_label": "artikli",
+                "model_name": "artikl",
+                "field_name": "category",
+                "term": "",
+            },
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        names = {row["text"] for row in response.json()["results"]}
+        self.assertIn(self.used_category.name, names)
+        self.assertIn(self.free_category.name, names)
 
 
 class CategorySortOrderBySalesCommandTests(TestCase):
