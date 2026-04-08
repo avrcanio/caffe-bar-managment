@@ -4,8 +4,9 @@ from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -13,7 +14,10 @@ from rest_framework.test import APIClient
 from artikli.models import Artikl, Category, Normativ, NormativItem
 from barion.models import (
     BarionCategory,
+    BarionCatalogState,
+    BarionCatalogSyncEvent,
     BarionRuntimeMode,
+    BarionProductSyncState,
     Check,
     CheckItem,
     CheckItemModifierSelection,
@@ -1618,6 +1622,10 @@ class PosProductSearchApiTests(TestCase):
         self.assertEqual(data[0]["id"], self.cola.id)
         self.assertEqual(data[0]["code"], "SOK01")
         self.assertIn("image_46x75", data[0])
+        self.assertIn("thumbnail_url", data[0])
+        self.assertIn("image_url", data[0])
+        self.assertEqual(data[0]["image_version"], 1)
+        self.assertEqual(data[0]["modifier_version"], 1)
 
     def test_filters_by_category(self):
         self.client.force_authenticate(user=self.user)
@@ -1922,9 +1930,30 @@ class PosProductSearchApiTests(TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         payload = response.json()
         self.assertEqual(payload["artikl_id"], self.espresso.id)
+        self.assertGreaterEqual(payload["modifier_version"], 2)
         self.assertEqual(len(payload["modifier_groups"]), 1)
         self.assertEqual(payload["modifier_groups"][0]["name"], "Coffee edits")
         self.assertEqual(payload["modifier_groups"][0]["options"][0]["id"], option.id)
+
+    def test_product_modifiers_endpoint_returns_incremented_modifier_version(self):
+        self.client.force_authenticate(user=self.user)
+        group = ItemModifierGroup.objects.create(
+            name="Modifier version group",
+            code="modifier-version-group",
+            selection_mode=ItemModifierGroup.SelectionMode.MULTIPLE,
+            min_select=0,
+            max_select=2,
+        )
+        ItemModifierGroupAssignment.objects.create(
+            artikl=self.espresso,
+            group=group,
+            is_active=True,
+        )
+
+        response = self.client.get(f"/api/pos/products/{self.espresso.id}/modifiers/", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertGreaterEqual(payload["modifier_version"], 2)
 
 
 class PosRuntimeModeApiTests(TestCase):
@@ -2488,6 +2517,7 @@ class PosBootstrapApiTests(TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         payload = response.json()
         self.assertEqual(payload["active_mode"], "day")
+        self.assertGreaterEqual(payload["catalog_version"], 1)
         self.assertEqual(payload["root_id"], root.id)
         self.assertEqual([row["id"] for row in payload["categories"]], [soft.id, hot.id])
         self.assertEqual(payload["selected_category_id"], soft.id)
@@ -2528,6 +2558,10 @@ class PosBootstrapApiTests(TestCase):
         self.assertEqual(payload["selected_category_id"], hot.id)
         self.assertEqual(len(payload["products"]), 1)
         self.assertEqual(payload["products"][0]["id"], hot_artikl.id)
+        self.assertIn("thumbnail_url", payload["products"][0])
+        self.assertIn("image_url", payload["products"][0])
+        self.assertEqual(payload["products"][0]["image_version"], 1)
+        self.assertEqual(payload["products"][0]["modifier_version"], 1)
 
     def test_overlap_rule_is_applied_to_bootstrap_products(self):
         root = Category.objects.create(name="Napitci")
@@ -2559,6 +2593,290 @@ class PosBootstrapApiTests(TestCase):
         self.assertEqual(payload["categories"], [])
         self.assertIsNone(payload["selected_category_id"])
         self.assertEqual(payload["products"], [])
+
+    def test_bootstrap_returns_incremented_image_version_for_image_change(self):
+        root = Category.objects.create(name="Napitci")
+        hot = Category.objects.create(name="Topli", parent=root, sort_order=10)
+        artikl = self._priced_artikl(category=hot, code="TOPIMG")
+        self._barion_category(hot, sort_order=10)
+
+        artikl.rm_id = 777
+        artikl.image = SimpleUploadedFile("first.jpg", b"filecontent1", content_type="image/jpeg")
+        artikl.save()
+        artikl.image = SimpleUploadedFile("second.jpg", b"filecontent2", content_type="image/jpeg")
+        artikl.save()
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/pos/bootstrap/?root_id={root.id}&include_products=1", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        product = response.json()["products"][0]
+        self.assertEqual(product["id"], artikl.id)
+        self.assertEqual(product["image_version"], 3)
+        self.assertIsNotNone(product["thumbnail_url"])
+        self.assertIsNotNone(product["image_url"])
+
+
+class PosCatalogChangesApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="barion-catalog-user",
+            email="barion-catalog@example.com",
+            password="pass1234",
+        )
+        self.tax_group = TaxGroup.objects.create(name="PDV 25", code="PDV25", rate="0.2500")
+        self.price_list = SalesPriceList.objects.create(
+            name="Catalog cjenik",
+            is_active=True,
+            is_default=True,
+            valid_from=timezone.now(),
+        )
+        self.root = Category.objects.create(name="Napitci")
+        self.category = Category.objects.create(name="Topli", parent=self.root, sort_order=10)
+        self.barion_category = BarionCategory.objects.create(category=self.category, sort_order=10, is_active=True)
+        self.layout = Layout.objects.create(name="Main", is_active=True)
+        self.zone = Zone.objects.create(layout=self.layout, name="Main zone", order=1)
+        self.table = Table.objects.create(label="A1", capacity=4, shape=Table.Shape.SQUARE, is_vip=False)
+        self.layout_table = LayoutTable.objects.create(layout=self.layout, table=self.table, zone=self.zone)
+        self.artikl = Artikl.objects.create(
+            name="Espresso",
+            code="ESP001",
+            is_sellable=True,
+            is_stock_item=False,
+            category=self.category,
+            tax_group=self.tax_group,
+        )
+        SalesPriceItem.objects.create(
+            price_list=self.price_list,
+            artikl=self.artikl,
+            unit_price_gross="2.50",
+            is_active=True,
+        )
+        runtime = BarionRuntimeMode.get_solo()
+        runtime.active_mode = BarionRuntimeMode.Mode.DAY
+        runtime.save()
+
+    def test_requires_authentication(self):
+        response = self.client.get("/api/pos/catalog/changes/", secure=True)
+        self.assertEqual(response.status_code, 403)
+
+    def test_after_version_zero_returns_updated_rows(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/pos/catalog/changes/?afterVersion=0&targetVersion=999999", secure=True)
+        self.assertEqual(response.status_code, 400, response.content)
+
+        current_version = BarionCatalogState.get_solo().catalog_version
+        response = self.client.get("/api/pos/catalog/changes/?afterVersion=0", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload["requiresFullSync"], False)
+        self.assertEqual(payload["baseVersion"], 0)
+        self.assertEqual(payload["targetVersion"], current_version)
+        self.assertGreaterEqual(payload["appliedThroughVersion"], 0)
+        self.assertIn(self.layout.id, [row["id"] for row in payload["layouts"]["updated"]])
+        self.assertIn(self.category.id, [row["id"] for row in payload["categories"]["updated"]])
+        self.assertIn(self.artikl.id, [row["id"] for row in payload["products"]["updated"]])
+
+    def test_returns_requires_full_sync_when_after_version_is_stale(self):
+        self.client.force_authenticate(user=self.user)
+        BarionCatalogSyncEvent.objects.filter(version__lte=2).delete()
+        response = self.client.get("/api/pos/catalog/changes/?afterVersion=1", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload["requiresFullSync"], True)
+        self.assertEqual(payload["hasMore"], False)
+
+    def test_returns_requires_full_sync_when_after_version_is_in_future(self):
+        self.client.force_authenticate(user=self.user)
+        current_version = BarionCatalogState.get_solo().catalog_version
+        response = self.client.get(f"/api/pos/catalog/changes/?afterVersion={int(current_version) + 999}", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload["requiresFullSync"], True)
+        self.assertEqual(payload["catalogVersion"], current_version)
+
+    def test_modifier_change_returns_product_with_incremented_modifier_version(self):
+        group = ItemModifierGroup.objects.create(
+            name="Coffee edits catalog",
+            code="coffee-edits-catalog",
+            selection_mode=ItemModifierGroup.SelectionMode.MULTIPLE,
+            min_select=0,
+            max_select=3,
+        )
+        ItemModifierGroupAssignment.objects.create(
+            artikl=self.artikl,
+            group=group,
+            is_active=True,
+        )
+        after_version = BarionCatalogState.get_solo().catalog_version
+        ItemModifierOption.objects.create(group=group, name="Natren", code="natren-catalog", sort_order=10)
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/pos/catalog/changes/?afterVersion={after_version}", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        updated_products = payload["products"]["updated"]
+        self.assertEqual(len(updated_products), 1)
+        self.assertEqual(updated_products[0]["id"], self.artikl.id)
+        self.assertGreaterEqual(updated_products[0]["modifier_version"], 3)
+
+    def test_delete_returns_deleted_product_ids(self):
+        delete_target = Artikl.objects.create(
+            name="Delete me",
+            code="DEL001",
+            is_sellable=True,
+            is_stock_item=False,
+            category=self.category,
+            tax_group=self.tax_group,
+        )
+        SalesPriceItem.objects.create(
+            price_list=self.price_list,
+            artikl=delete_target,
+            unit_price_gross="4.50",
+            is_active=True,
+        )
+        delete_target_id = delete_target.id
+        after_version = BarionCatalogState.get_solo().catalog_version
+        SalesPriceItem.objects.filter(artikl=delete_target).delete()
+        delete_target.delete()
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/pos/catalog/changes/?afterVersion={after_version}", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertIn(delete_target_id, payload["products"]["deleted"])
+
+    def test_pagination_stays_within_fixed_target_version(self):
+        after_version = BarionCatalogState.get_solo().catalog_version
+        for idx in range(3):
+            category = Category.objects.create(name=f"Cat {idx}", parent=self.root, sort_order=20 + idx)
+            BarionCategory.objects.create(category=category, sort_order=20 + idx, is_active=True)
+
+        self.client.force_authenticate(user=self.user)
+        first = self.client.get(f"/api/pos/catalog/changes/?afterVersion={after_version}&limit=1", secure=True)
+        self.assertEqual(first.status_code, 200, first.content)
+        first_payload = first.json()
+        self.assertEqual(first_payload["requiresFullSync"], False)
+        self.assertEqual(first_payload["hasMore"], True)
+
+        second = self.client.get(
+            f"/api/pos/catalog/changes/?afterVersion={first_payload['appliedThroughVersion']}&targetVersion={first_payload['targetVersion']}&limit=1",
+            secure=True,
+        )
+        self.assertEqual(second.status_code, 200, second.content)
+        second_payload = second.json()
+        self.assertEqual(second_payload["targetVersion"], first_payload["targetVersion"])
+        self.assertGreaterEqual(second_payload["appliedThroughVersion"], first_payload["appliedThroughVersion"])
+
+
+class BarionCatalogNotificationTaskTests(TestCase):
+    @override_settings(
+        BARION_FCM_ENABLED=True,
+        BARION_GCLOUD_API_URL="http://gcloud-api:8080",
+        BARION_GCLOUD_CALLER_TOKEN="test-caller-token",
+        BARION_FCM_PROJECT_ALIAS="fcm_barion",
+        BARION_FCM_TOPIC="barion_catalog",
+        BARION_GCLOUD_TIMEOUT=3,
+    )
+    @patch("barion.tasks.requests.post")
+    def test_task_posts_catalog_changed_to_gcloud_topic(self, mock_post):
+        from barion.tasks import send_catalog_changed_notification
+
+        mock_post.return_value.json.return_value = {"success": True, "message_id": "msg-1"}
+        mock_post.return_value.raise_for_status.return_value = None
+
+        result = send_catalog_changed_notification(version=42)
+
+        self.assertEqual(result, True)
+        mock_post.assert_called_once_with(
+            "http://gcloud-api:8080/fcm/send",
+            json={
+                "project_alias": "fcm_barion",
+                "topic": "barion_catalog",
+                "data": {
+                    "type": "catalog_changed",
+                    "catalogVersion": "42",
+                },
+            },
+            headers={
+                "Authorization": "Bearer test-caller-token",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            timeout=3,
+        )
+
+    @override_settings(BARION_FCM_ENABLED=False)
+    @patch("barion.tasks.requests.post")
+    def test_task_is_noop_when_disabled(self, mock_post):
+        from barion.tasks import send_catalog_changed_notification
+
+        result = send_catalog_changed_notification(version=42)
+
+        self.assertEqual(result, False)
+        mock_post.assert_not_called()
+
+    @override_settings(BARION_FCM_ENABLED=True)
+    @patch("barion.tasks.send_catalog_changed_notification.delay")
+    def test_record_catalog_changes_enqueues_notification_after_commit(self, mock_delay):
+        from barion.catalog_sync import CatalogEntityChange, record_catalog_changes
+
+        with self.captureOnCommitCallbacks(execute=True):
+            version = record_catalog_changes(
+                changes=[
+                    CatalogEntityChange(
+                        entity_type=BarionCatalogSyncEvent.EntityType.PRODUCT,
+                        entity_id=123,
+                        operation=BarionCatalogSyncEvent.Operation.UPSERT,
+                    )
+                ]
+            )
+
+        self.assertIsNotNone(version)
+        mock_delay.assert_called_once_with(version=int(version))
+
+    @patch("barion.tasks.send_catalog_changed_notification.delay")
+    def test_runtime_mode_change_bumps_catalog_version_and_enqueues_notification(self, mock_delay):
+        tax_group = TaxGroup.objects.create(name="PDV 25 test", code="PDV25_TEST", rate="0.2500")
+        price_list = SalesPriceList.objects.create(
+            name="Runtime mode catalog price list",
+            is_active=True,
+            is_default=True,
+            valid_from=timezone.now(),
+        )
+        root = Category.objects.create(name="Runtime root")
+        category = Category.objects.create(name="Runtime child", parent=root, sort_order=10)
+        BarionCategory.objects.create(category=category, sort_order=10, is_active=True)
+        artikl = Artikl.objects.create(
+            name="Runtime mode artikl",
+            code="RTMODE001",
+            is_sellable=True,
+            is_stock_item=False,
+            category=category,
+            tax_group=tax_group,
+        )
+        SalesPriceItem.objects.create(
+            price_list=price_list,
+            artikl=artikl,
+            unit_price_gross="3.50",
+            is_active=True,
+        )
+
+        runtime = BarionRuntimeMode.get_solo()
+        runtime.active_mode = BarionRuntimeMode.Mode.DAY
+        runtime.save()
+        starting_version = int(BarionCatalogState.get_solo().catalog_version)
+        mock_delay.reset_mock()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            runtime.active_mode = BarionRuntimeMode.Mode.NIGHT
+            runtime.save()
+
+        ending_version = int(BarionCatalogState.get_solo().catalog_version)
+        self.assertGreater(ending_version, starting_version)
+        mock_delay.assert_called_once_with(version=ending_version)
+
 
 class PosCheckIssueReceiptApiTests(TestCase):
     def setUp(self):

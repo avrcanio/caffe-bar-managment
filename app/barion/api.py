@@ -28,8 +28,10 @@ from sales.models import SalesPriceItem, ShiftCashHandover, ShiftTurnover
 from stock.models import StockMove
 from stock.services import post_stock_out
 
+from .catalog_sync import collect_delta_ids, earliest_catalog_event_version, get_catalog_version, get_product_sync_state
 from .models import (
     BarionCategory,
+    BarionCatalogSyncEvent,
     BarionRuntimeMode,
     CheckItemModifierSelection,
     Check,
@@ -262,6 +264,10 @@ class PosProductSearchItemSerializer(serializers.Serializer):
     name = serializers.CharField()
     code = serializers.CharField(allow_null=True, allow_blank=True)
     image_46x75 = serializers.CharField(allow_null=True)
+    thumbnail_url = serializers.CharField(allow_null=True)
+    image_url = serializers.CharField(allow_null=True)
+    image_version = serializers.IntegerField()
+    modifier_version = serializers.IntegerField()
     category_id = serializers.IntegerField(allow_null=True)
     category_name = serializers.CharField(allow_null=True)
     unit_price = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True)
@@ -284,6 +290,7 @@ class PosCategoryDisplayResponseSerializer(serializers.Serializer):
 
 
 class PosBootstrapResponseSerializer(serializers.Serializer):
+    catalog_version = serializers.IntegerField()
     active_mode = serializers.ChoiceField(choices=BarionRuntimeMode.Mode.choices)
     root_id = serializers.IntegerField(allow_null=True)
     display_level = serializers.IntegerField()
@@ -320,7 +327,25 @@ class ProductModifierGroupSerializer(serializers.Serializer):
 
 class ProductModifiersResponseSerializer(serializers.Serializer):
     artikl_id = serializers.IntegerField()
+    modifier_version = serializers.IntegerField()
     modifier_groups = ProductModifierGroupSerializer(many=True)
+
+
+class CatalogChangesEntitySerializer(serializers.Serializer):
+    updated = serializers.ListField(child=serializers.JSONField())
+    deleted = serializers.ListField(child=serializers.IntegerField())
+
+
+class CatalogChangesResponseSerializer(serializers.Serializer):
+    requiresFullSync = serializers.BooleanField()
+    baseVersion = serializers.IntegerField()
+    appliedThroughVersion = serializers.IntegerField()
+    targetVersion = serializers.IntegerField()
+    catalogVersion = serializers.IntegerField()
+    layouts = CatalogChangesEntitySerializer()
+    categories = CatalogChangesEntitySerializer()
+    products = CatalogChangesEntitySerializer()
+    hasMore = serializers.BooleanField()
 
 
 class ProductBundlePriceRequestSerializer(serializers.Serializer):
@@ -670,6 +695,75 @@ def _active_modifier_assignments_for_artikl(artikl_id: int):
         )
         .order_by("group__sort_order", "group__name", "id")
     )
+
+
+def _absolute_artikl_image_url(*, request, artikl: Artikl, size: str) -> str | None:
+    if not artikl.image or artikl.rm_id is None:
+        return None
+    path = f"/api/artikli/{artikl.rm_id}/{size}/"
+    return request.build_absolute_uri(path)
+
+
+def _product_versions_for_artikl(artikl: Artikl) -> tuple[int, int]:
+    sync_state = get_product_sync_state(artikl_id=artikl.id)
+    if not sync_state:
+        return 1, 1
+    return int(sync_state.image_version), int(sync_state.modifier_version)
+
+
+def _serialize_product_row(*, request, artikl: Artikl) -> dict:
+    image_46x75 = _absolute_artikl_image_url(request=request, artikl=artikl, size="image-46x75")
+    image_url = _absolute_artikl_image_url(request=request, artikl=artikl, size="image-125x200")
+    image_version, modifier_version = _product_versions_for_artikl(artikl)
+    return {
+        "id": artikl.id,
+        "rm_id": artikl.rm_id,
+        "name": artikl.name,
+        "code": artikl.code,
+        "image_46x75": image_46x75,
+        "thumbnail_url": image_46x75,
+        "image_url": image_url,
+        "image_version": image_version,
+        "modifier_version": modifier_version,
+        "category_id": artikl.category_id,
+        "category_name": artikl.category.name if artikl.category_id else None,
+        "unit_price": artikl.active_unit_price,
+        "tax_rate": artikl.tax_group.rate if artikl.tax_group_id else None,
+        "popularity_score": artikl.popularity_score,
+    }
+
+
+def _serialize_layout_snapshot(*, layout: Layout) -> dict:
+    zones = list(layout.zones.order_by("order", "id").values("id", "name", "order"))
+    placements = (
+        LayoutTable.objects.select_related("table")
+        .filter(layout=layout, is_enabled=True)
+        .order_by("z_index", "id")
+    )
+    tables = [
+        {
+            "table_id": placement.table_id,
+            "label": placement.table.label,
+            "shape": placement.table.shape,
+            "capacity": placement.table.capacity,
+            "is_vip": placement.table.is_vip,
+            "x": placement.x,
+            "y": placement.y,
+            "w": placement.w,
+            "h": placement.h,
+            "rotation": placement.rotation,
+            "zone_id": placement.zone_id,
+        }
+        for placement in placements
+    ]
+    return {
+        "id": layout.id,
+        "name": layout.name,
+        "is_active": layout.is_active,
+        "updated_at": layout.updated_at.isoformat(),
+        "zones": zones,
+        "tables": tables,
+    }
 
 
 def _default_modifier_ids_for_artikl(artikl_id: int) -> list[tuple[str, int, int]]:
@@ -4454,24 +4548,7 @@ class PosProductSearchView(APIView):
     def _serialize_products(*, request, qs, limit: int):
         rows = []
         for artikl in qs[:limit]:
-            image_46x75 = None
-            if artikl.image and artikl.rm_id is not None:
-                path = f"/api/artikli/{artikl.rm_id}/image-46x75/"
-                image_46x75 = request.build_absolute_uri(path)
-            rows.append(
-                {
-                    "id": artikl.id,
-                    "rm_id": artikl.rm_id,
-                    "name": artikl.name,
-                    "code": artikl.code,
-                    "image_46x75": image_46x75,
-                    "category_id": artikl.category_id,
-                    "category_name": artikl.category.name if artikl.category_id else None,
-                    "unit_price": artikl.active_unit_price,
-                    "tax_rate": artikl.tax_group.rate if artikl.tax_group_id else None,
-                    "popularity_score": artikl.popularity_score,
-                }
-            )
+            rows.append(_serialize_product_row(request=request, artikl=artikl))
         return rows
 
     @extend_schema(
@@ -4599,27 +4676,7 @@ class PosProductSearchView(APIView):
             else:
                 qs = qs.order_by("-popularity_score", "name", "id")
 
-        rows = []
-        for artikl in qs[:limit]:
-            image_46x75 = None
-            if artikl.image and artikl.rm_id is not None:
-                path = f"/api/artikli/{artikl.rm_id}/image-46x75/"
-                image_46x75 = request.build_absolute_uri(path)
-            rows.append(
-                {
-                    "id": artikl.id,
-                    "rm_id": artikl.rm_id,
-                    "name": artikl.name,
-                    "code": artikl.code,
-                    "image_46x75": image_46x75,
-                    "category_id": artikl.category_id,
-                    "category_name": artikl.category.name if artikl.category_id else None,
-                    "unit_price": artikl.active_unit_price,
-                    "tax_rate": artikl.tax_group.rate if artikl.tax_group_id else None,
-                    "popularity_score": artikl.popularity_score,
-                }
-            )
-        return Response(rows)
+        return Response(self._serialize_products(request=request, qs=qs, limit=limit))
 
 
 class PosProductModifiersView(APIView):
@@ -4709,6 +4766,7 @@ class PosProductModifiersView(APIView):
         return Response(
             {
                 "artikl_id": artikl.id,
+                "modifier_version": _product_versions_for_artikl(artikl)[1],
                 "modifier_groups": modifier_groups,
             }
         )
@@ -5077,11 +5135,168 @@ class PosBootstrapView(APIView):
 
         return Response(
             {
+                "catalog_version": get_catalog_version(),
                 "active_mode": mode,
                 "root_id": display_payload["root_id"],
                 "display_level": display_payload["display_level"],
                 "categories": categories,
                 "selected_category_id": selected_category_id,
                 "products": products,
+            }
+        )
+
+
+class PosCatalogChangesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        description=(
+            "Returns catalog delta changes for layouts, categories, and products within a stable version window."
+        ),
+        parameters=[
+            OpenApiParameter(name="afterVersion", type=int, required=False, location=OpenApiParameter.QUERY),
+            OpenApiParameter(name="limit", type=int, required=False, location=OpenApiParameter.QUERY),
+            OpenApiParameter(name="targetVersion", type=int, required=False, location=OpenApiParameter.QUERY),
+        ],
+        responses={
+            200: CatalogChangesResponseSerializer,
+            400: ErrorSerializer,
+        },
+    )
+    def get(self, request):
+        try:
+            after_version = int(request.query_params.get("afterVersion", "0") or "0")
+        except (TypeError, ValueError):
+            return Response({"detail": "afterVersion mora biti broj."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            limit = int(request.query_params.get("limit", "50") or "50")
+        except (TypeError, ValueError):
+            return Response({"detail": "limit mora biti broj."}, status=status.HTTP_400_BAD_REQUEST)
+        if after_version < 0:
+            return Response({"detail": "afterVersion mora biti >= 0."}, status=status.HTTP_400_BAD_REQUEST)
+        limit = max(1, min(limit, 200))
+
+        current_version = get_catalog_version()
+        raw_target_version = request.query_params.get("targetVersion")
+        try:
+            target_version = int(raw_target_version) if raw_target_version not in (None, "") else current_version
+        except (TypeError, ValueError):
+            return Response({"detail": "targetVersion mora biti broj."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if after_version > current_version and raw_target_version in (None, ""):
+            empty_entities = {"updated": [], "deleted": []}
+            return Response(
+                {
+                    "requiresFullSync": True,
+                    "baseVersion": after_version,
+                    "appliedThroughVersion": after_version,
+                    "targetVersion": current_version,
+                    "catalogVersion": current_version,
+                    "layouts": empty_entities,
+                    "categories": empty_entities,
+                    "products": empty_entities,
+                    "hasMore": False,
+                }
+            )
+
+        if target_version < after_version:
+            return Response({"detail": "targetVersion mora biti >= afterVersion."}, status=status.HTTP_400_BAD_REQUEST)
+        if target_version > current_version:
+            return Response({"detail": "targetVersion ne može biti veći od catalogVersion."}, status=status.HTTP_400_BAD_REQUEST)
+
+        earliest_version = earliest_catalog_event_version()
+        requires_full_sync = False
+        if after_version > current_version:
+            requires_full_sync = True
+        elif earliest_version is not None and after_version != 0 and after_version < earliest_version - 1:
+            requires_full_sync = True
+
+        empty_entities = {"updated": [], "deleted": []}
+        if requires_full_sync:
+            return Response(
+                {
+                    "requiresFullSync": True,
+                    "baseVersion": after_version,
+                    "appliedThroughVersion": after_version,
+                    "targetVersion": current_version,
+                    "catalogVersion": current_version,
+                    "layouts": empty_entities,
+                    "categories": empty_entities,
+                    "products": empty_entities,
+                    "hasMore": False,
+                }
+            )
+
+        page_versions = list(
+            BarionCatalogSyncEvent.objects.filter(version__gt=after_version, version__lte=target_version)
+            .values_list("version", flat=True)
+            .order_by("version")
+            .distinct()[:limit]
+        )
+        applied_through_version = int(page_versions[-1]) if page_versions else after_version
+        delta_ids = collect_delta_ids(after_version=after_version, target_version=applied_through_version)
+        has_more = BarionCatalogSyncEvent.objects.filter(
+            version__gt=applied_through_version,
+            version__lte=target_version,
+        ).exists()
+
+        try:
+            mode, _runtime_mode = _resolve_effective_mode(requested_mode=request.query_params.get("mode"))
+        except serializers.ValidationError as exc:
+            return Response({"detail": str(exc.detail)}, status=status.HTTP_400_BAD_REQUEST)
+
+        layout_ids = sorted(delta_ids.get(BarionCatalogSyncEvent.EntityType.LAYOUT, {}).get("updated", set()))
+        category_ids = sorted(delta_ids.get(BarionCatalogSyncEvent.EntityType.CATEGORY, {}).get("updated", set()))
+        product_ids = sorted(delta_ids.get(BarionCatalogSyncEvent.EntityType.PRODUCT, {}).get("updated", set()))
+
+        layouts_updated = [
+            _serialize_layout_snapshot(layout=layout)
+            for layout in Layout.objects.filter(id__in=layout_ids).order_by("id")
+        ]
+
+        categories_payload = PosCategoriesDisplayView._build_display_payload(root=None, mode=mode)["categories"]
+        categories_updated = [row for row in categories_payload if int(row["id"]) in set(category_ids)]
+
+        products_updated = []
+        if product_ids:
+            popularity_field = (
+                "barion_popularity_snapshot__sold_qty_night"
+                if mode == "night"
+                else "barion_popularity_snapshot__sold_qty_day"
+            )
+            qs = (
+                PosProductSearchView._priced_sellable_queryset()
+                .filter(id__in=product_ids)
+                .annotate(
+                    popularity_score=Coalesce(
+                        F(popularity_field),
+                        Value(Decimal("0.0000")),
+                        output_field=DecimalField(max_digits=14, decimal_places=4),
+                    )
+                )
+                .order_by("id")
+            )
+            products_updated = PosProductSearchView._serialize_products(request=request, qs=qs, limit=len(product_ids))
+
+        return Response(
+            {
+                "requiresFullSync": False,
+                "baseVersion": after_version,
+                "appliedThroughVersion": applied_through_version,
+                "targetVersion": target_version,
+                "catalogVersion": target_version,
+                "layouts": {
+                    "updated": layouts_updated,
+                    "deleted": sorted(delta_ids.get(BarionCatalogSyncEvent.EntityType.LAYOUT, {}).get("deleted", set())),
+                },
+                "categories": {
+                    "updated": categories_updated,
+                    "deleted": sorted(delta_ids.get(BarionCatalogSyncEvent.EntityType.CATEGORY, {}).get("deleted", set())),
+                },
+                "products": {
+                    "updated": products_updated,
+                    "deleted": sorted(delta_ids.get(BarionCatalogSyncEvent.EntityType.PRODUCT, {}).get("deleted", set())),
+                },
+                "hasMore": has_more,
             }
         )

@@ -6,6 +6,7 @@ Ovaj dokument je razvojni blueprint za POS sustav u ovom repozitoriju (Django ba
 
 Android implementacijska mapa (DTO + endpoint contract):
 - `docs/pos/ANDROID_ENDPOINT_MAPPING.md`
+- `docs/pos/BARION_CATALOG_SYNC.md`
 
 Backend je Django (DRF, TokenAuth/SessionAuth, Celery, Postgres). POS domena je primarno u `app/pos/*` i djelomicno u `app/sales/*`.
 

@@ -32,3 +32,8 @@ docker compose exec web python manage.py shell
 - Shared DB prep: `./scripts/migration/ensure_shared_postgis.sh`
 - Stack verification: `./scripts/migration/verify_stack.sh`
 - Runbook: `documents/technical/server-migration.md`
+
+## POS Docs
+
+- Endpoint mapping: `docs/pos/ANDROID_ENDPOINT_MAPPING.md`
+- Catalog sync + FCM contract: `docs/pos/BARION_CATALOG_SYNC.md`
