@@ -1258,6 +1258,7 @@ class SupplierArtiklListView(APIView):
                     "deposit_amount": deposit_amount,
                     "category_id": category.id if category else None,
                     "category_name": category.name if category else None,
+                    "category_sort_order": category.sort_order if category else None,
                     "category_path": category_path,
                     "unit_of_measure": unit_id,
                     "unit_name": unit_name,

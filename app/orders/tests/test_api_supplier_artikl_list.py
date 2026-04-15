@@ -102,6 +102,7 @@ class SupplierArtiklListApiTests(TestCase):
         self.assertEqual(row["deposit_amount"], 0.1)
         self.assertEqual(row["category_id"], self.leaf_category.id)
         self.assertEqual(row["category_name"], "Sokovi")
+        self.assertEqual(row["category_sort_order"], self.leaf_category.sort_order)
         self.assertEqual(row["category_path"], ["Pica", "Bezalkoholna", "Sokovi"])
         self.assertTrue(row["image_50x75"].endswith(f"/api/artikli/{artikl.rm_id}/image-50x75/"))
 
@@ -160,5 +161,6 @@ class SupplierArtiklListApiTests(TestCase):
         self.assertEqual(row["deposit_amount"], 0)
         self.assertIsNone(row["category_id"])
         self.assertIsNone(row["category_name"])
+        self.assertIsNone(row["category_sort_order"])
         self.assertEqual(row["category_path"], [])
         self.assertIsNone(row["image_50x75"])

@@ -270,6 +270,7 @@ class PosProductSearchItemSerializer(serializers.Serializer):
     modifier_version = serializers.IntegerField()
     category_id = serializers.IntegerField(allow_null=True)
     category_name = serializers.CharField(allow_null=True)
+    category_sort_order = serializers.IntegerField(allow_null=True)
     unit_price = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True)
     tax_rate = serializers.DecimalField(max_digits=5, decimal_places=4, allow_null=True)
     popularity_score = serializers.DecimalField(max_digits=14, decimal_places=4, allow_null=True)
@@ -727,6 +728,7 @@ def _serialize_product_row(*, request, artikl: Artikl) -> dict:
         "modifier_version": modifier_version,
         "category_id": artikl.category_id,
         "category_name": artikl.category.name if artikl.category_id else None,
+        "category_sort_order": artikl.category.sort_order if artikl.category_id else None,
         "unit_price": artikl.active_unit_price,
         "tax_rate": artikl.tax_group.rate if artikl.tax_group_id else None,
         "popularity_score": artikl.popularity_score,

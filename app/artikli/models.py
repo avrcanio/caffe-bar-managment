@@ -78,6 +78,24 @@ class Artikl(models.Model):
                     break
         super().save(*args, **kwargs)
 
+    def packaging_path_summary(self) -> str:
+        levels = list(self.packaging_levels.order_by("sort_order"))
+        if not levels:
+            return ""
+        parts = []
+        for idx, level in enumerate(levels):
+            if idx == 0:
+                parts.append(level.level_name)
+                continue
+            ratio = level.contains_previous
+            ratio_display = (
+                str(int(ratio))
+                if ratio is not None and ratio == int(ratio)
+                else f"{ratio:.4f}".rstrip("0").rstrip(".")
+            )
+            parts.append(f"{ratio_display}/{level.level_name}")
+        return " -> ".join(parts)
+
     class Meta:
         verbose_name = "Artikl"
         verbose_name_plural = "Artikli"
@@ -302,5 +320,68 @@ class ArtiklDetail(models.Model):
     class Meta:
         verbose_name = "Detalj artikla"
         verbose_name_plural = "Detalji artikala"
+
+
+class ArtiklPackagingLevel(models.Model):
+    artikl = models.ForeignKey(
+        "Artikl",
+        on_delete=models.CASCADE,
+        related_name="packaging_levels",
+        verbose_name="Artikl",
+    )
+    unit_of_measure = models.ForeignKey(
+        "UnitOfMeasureData",
+        on_delete=models.PROTECT,
+        related_name="artikl_packaging_levels",
+        verbose_name="Jedinica mjere",
+    )
+    contains_previous = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        null=True,
+        blank=True,
+        verbose_name="Sadrži prethodnu razinu",
+        help_text="Za prvu razinu ostavi prazno. Za svaku sljedeću upiši koliko prethodnih jedinica sadrži.",
+    )
+    sort_order = models.PositiveIntegerField(default=0, verbose_name="Redoslijed")
+
+    def clean(self):
+        super().clean()
+        if not self.unit_of_measure_id:
+            raise ValidationError({"unit_of_measure": "Jedinica mjere je obavezna."})
+        if self.sort_order == 0:
+            if self.contains_previous not in (None, ""):
+                raise ValidationError(
+                    {"contains_previous": "Prva razina pakiranja ne treba omjer prema prethodnoj razini."}
+                )
+        elif self.contains_previous is None:
+            raise ValidationError(
+                {"contains_previous": "Svaka razina iznad prve mora imati omjer prema prethodnoj razini."}
+            )
+        elif self.contains_previous <= 0:
+            raise ValidationError(
+                {"contains_previous": "Omjer prema prethodnoj razini mora biti veći od 0."}
+            )
+
+    @property
+    def level_name(self) -> str:
+        unit = getattr(self, "unit_of_measure", None)
+        if unit and unit.name:
+            return unit.name.strip().lower()
+        return ""
+
+    def __str__(self) -> str:
+        return f"{self.artikl} / {self.level_name or self.unit_of_measure_id}"
+
+    class Meta:
+        verbose_name = "Razina originalnog pakiranja"
+        verbose_name_plural = "Razine originalnih pakiranja"
+        ordering = ["sort_order", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["artikl", "sort_order"],
+                name="uniq_artikl_packaging_level_sort_order",
+            )
+        ]
 
 # Create your models here.

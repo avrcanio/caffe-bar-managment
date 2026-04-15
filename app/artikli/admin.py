@@ -13,6 +13,7 @@ from configuration.models import TaxGroup
 from .models import (
     Artikl,
     ArtiklDetail,
+    ArtiklPackagingLevel,
     BaseGroupData,
     Deposit,
     Category,
@@ -35,6 +36,31 @@ class SafeTreeRelatedFieldListFilter(TreeRelatedFieldListFilter):
         except self.other_model.DoesNotExist:
             # Stale admin filter links can reference categories that have since been removed.
             return queryset.none()
+
+
+def _category_sort_step_for_level(level: int) -> int:
+    if level <= 0:
+        return 1000
+    if level == 1:
+        return 100
+    if level == 2:
+        return 10
+    return 1
+
+
+def _next_category_sort_order(*, parent, instance_pk=None) -> int:
+    target_level = (parent.level + 1) if parent else 0
+    step = _category_sort_step_for_level(target_level)
+    siblings = Category.objects.filter(parent=parent)
+    if instance_pk:
+        siblings = siblings.exclude(pk=instance_pk)
+
+    max_existing = siblings.aggregate(max_sort=models.Max("sort_order"))["max_sort"] or 0
+    if parent is None:
+        base = max_existing
+    else:
+        base = max(parent.sort_order, max_existing)
+    return ((base // step) + 1) * step
 
 
 @admin.action(description="Import artikli from Remaris", permissions=["change"])
@@ -187,7 +213,7 @@ class ArtiklAdmin(admin.ModelAdmin):
     search_fields = ("rm_id", "code", "name")
     actions = [import_artikli_from_remaris, import_artikl_details_from_remaris]
     inlines = []
-    readonly_fields = ("image_preview", "normativ_link", "normativ_cost_fifo_readonly")
+    readonly_fields = ("image_preview", "packaging_path_readonly", "normativ_link", "normativ_cost_fifo_readonly")
     list_filter = (("category", SafeTreeRelatedFieldListFilter), "is_sellable", "is_stock_item")
     fields = (
         "rm_id",
@@ -201,6 +227,7 @@ class ArtiklAdmin(admin.ModelAdmin):
         "is_stock_item",
         "image",
         "image_preview",
+        "packaging_path_readonly",
         "normativ_link",
         "normativ_cost_fifo_readonly",
         "note",
@@ -228,6 +255,12 @@ class ArtiklAdmin(admin.ModelAdmin):
         )
 
     normativ_link.short_description = "Normativ"
+
+    @admin.display(description="Put pakiranja")
+    def packaging_path_readonly(self, obj):
+        if not obj or not obj.pk:
+            return "—"
+        return obj.packaging_path_summary() or "—"
 
     def _normativ_cost_fifo_for_warehouse(self, obj, warehouse):
         total = Decimal("0.0000")
@@ -323,6 +356,17 @@ class ArtiklDetailInline(admin.StackedInline):
     readonly_fields = fields
 
 
+class ArtiklPackagingLevelInline(admin.TabularInline):
+    model = ArtiklPackagingLevel
+    extra = 0
+    autocomplete_fields = ("unit_of_measure",)
+    fields = ("sort_order", "unit_of_measure", "contains_previous")
+    ordering = ("sort_order", "id")
+    formfield_overrides = {
+        models.DecimalField: {"localize": True},
+    }
+
+
 @admin.register(ArtiklDetail)
 class ArtiklDetailAdmin(admin.ModelAdmin):
     list_display = ("rm_id", "code", "name", "base_group", "sales_group", "keyboard_group")
@@ -348,7 +392,7 @@ class StockCostSnapshotInline(admin.TabularInline):
     ordering = ("-as_of_date",)
 
 
-ArtiklAdmin.inlines = [ArtiklDetailInline]
+ArtiklAdmin.inlines = [ArtiklDetailInline, ArtiklPackagingLevelInline]
 
 
 class NormativItemInline(admin.TabularInline):
@@ -377,6 +421,30 @@ class DepositAdmin(admin.ModelAdmin):
 
 @admin.register(Category)
 class CategoryAdmin(DraggableMPTTAdmin):
+    class CategoryAdminForm(forms.ModelForm):
+        sort_order = forms.IntegerField(
+            required=False,
+            min_value=0,
+            help_text="Ostavi prazno ili upiši 0 za automatsku numeraciju. Pozitivan broj zadržava ručni redoslijed.",
+            label="sort order",
+        )
+
+        class Meta:
+            model = Category
+            fields = "__all__"
+
+        def clean(self):
+            cleaned_data = super().clean()
+            parent = cleaned_data.get("parent")
+            sort_order = cleaned_data.get("sort_order")
+            if sort_order in (None, 0):
+                cleaned_data["sort_order"] = _next_category_sort_order(
+                    parent=parent,
+                    instance_pk=getattr(self.instance, "pk", None),
+                )
+            return cleaned_data
+
+    form = CategoryAdminForm
     autocomplete_fields = ("parent",)
     list_display = ("tree_actions", "indented_title", "parent", "sort_order", "is_active")
     list_filter = ("is_active",)

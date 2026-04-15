@@ -1626,6 +1626,30 @@ class PosProductSearchApiTests(TestCase):
         self.assertIn("image_url", data[0])
         self.assertEqual(data[0]["image_version"], 1)
         self.assertEqual(data[0]["modifier_version"], 1)
+        self.assertEqual(data[0]["category_sort_order"], self.cat_soft.sort_order)
+
+    def test_product_search_returns_null_category_sort_order_without_category(self):
+        no_category = Artikl.objects.create(
+            name="Bez kategorije",
+            code="NOCAT01",
+            is_sellable=True,
+            is_stock_item=False,
+            tax_group=self.tax_group,
+        )
+        SalesPriceItem.objects.create(
+            price_list=self.price_list,
+            artikl=no_category,
+            unit_price_gross="4.00",
+            is_active=True,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/pos/products/search/?q=NOCAT01", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertGreaterEqual(len(data), 1)
+        self.assertEqual(data[0]["code"], "NOCAT01")
+        self.assertIsNone(data[0]["category_sort_order"])
 
     def test_filters_by_category(self):
         self.client.force_authenticate(user=self.user)

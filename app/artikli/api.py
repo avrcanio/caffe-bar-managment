@@ -13,11 +13,25 @@ from rest_framework.views import APIView
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from PIL import Image, ImageOps
 
-from .models import Artikl, Category
+from .models import Artikl, ArtiklPackagingLevel, Category
 from stock.models import WarehouseStock
 from stock.services import refresh_warehouse_stock_for_product_code
 
 logger = logging.getLogger(__name__)
+
+
+class ArtiklPackagingLevelSerializer(serializers.ModelSerializer):
+    unit_name = serializers.CharField(source="unit_of_measure.name", read_only=True)
+
+    class Meta:
+        model = ArtiklPackagingLevel
+        fields = [
+            "id",
+            "sort_order",
+            "unit_of_measure",
+            "unit_name",
+            "contains_previous",
+        ]
 
 
 class ArtiklSerializer(serializers.ModelSerializer):
@@ -36,6 +50,13 @@ class ArtiklSerializer(serializers.ModelSerializer):
         source="category.name",
         read_only=True,
     )
+    category_sort_order = serializers.IntegerField(
+        source="category.sort_order",
+        read_only=True,
+        allow_null=True,
+    )
+    packaging_path = serializers.SerializerMethodField()
+    packaging_levels = ArtiklPackagingLevelSerializer(many=True, read_only=True)
 
     class Meta:
         model = Artikl
@@ -51,6 +72,9 @@ class ArtiklSerializer(serializers.ModelSerializer):
             "deposit_amount",
             "category_id",
             "category_name",
+            "category_sort_order",
+            "packaging_path",
+            "packaging_levels",
             "is_sellable",
             "is_stock_item",
         ]
@@ -71,6 +95,9 @@ class ArtiklSerializer(serializers.ModelSerializer):
     def get_deposit_amount(self, obj):
         deposit = getattr(obj, "deposit", None)
         return deposit.amount_eur if deposit else 0
+
+    def get_packaging_path(self, obj):
+        return obj.packaging_path_summary()
 
 
 class ArtiklDetailSerializer(serializers.ModelSerializer):
@@ -90,6 +117,13 @@ class ArtiklDetailSerializer(serializers.ModelSerializer):
         source="category.name",
         read_only=True,
     )
+    category_sort_order = serializers.IntegerField(
+        source="category.sort_order",
+        read_only=True,
+        allow_null=True,
+    )
+    packaging_path = serializers.SerializerMethodField()
+    packaging_levels = ArtiklPackagingLevelSerializer(many=True, read_only=True)
 
     class Meta:
         model = Artikl
@@ -106,6 +140,9 @@ class ArtiklDetailSerializer(serializers.ModelSerializer):
             "warehouse_stock",
             "category_id",
             "category_name",
+            "category_sort_order",
+            "packaging_path",
+            "packaging_levels",
             "is_sellable",
             "is_stock_item",
         ]
@@ -126,6 +163,9 @@ class ArtiklDetailSerializer(serializers.ModelSerializer):
     def get_deposit_amount(self, obj):
         deposit = getattr(obj, "deposit", None)
         return deposit.amount_eur if deposit else 0
+
+    def get_packaging_path(self, obj):
+        return obj.packaging_path_summary()
 
     def get_warehouse_stock(self, obj):
         if not obj.code:
@@ -146,7 +186,11 @@ class ArtiklDetailSerializer(serializers.ModelSerializer):
 
 
 class ArtiklListView(generics.ListCreateAPIView):
-    queryset = Artikl.objects.select_related("tax_group", "deposit").order_by("id")
+    queryset = (
+        Artikl.objects.select_related("tax_group", "deposit")
+        .prefetch_related("packaging_levels__unit_of_measure")
+        .order_by("id")
+    )
     serializer_class = ArtiklSerializer
 
     @extend_schema(
@@ -219,7 +263,9 @@ class ArtiklListView(generics.ListCreateAPIView):
 
 
 class ArtiklDetailView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = Artikl.objects.select_related("tax_group", "deposit")
+    queryset = Artikl.objects.select_related("tax_group", "deposit").prefetch_related(
+        "packaging_levels__unit_of_measure"
+    )
     serializer_class = ArtiklDetailSerializer
     lookup_field = "rm_id"
     parser_classes = [MultiPartParser, FormParser, JSONParser]
