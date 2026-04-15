@@ -763,7 +763,6 @@ class PurchaseOrderWarehouseInputCreateView(APIView):
         remaining_map_before = _po_item_remaining_map(po_items, received_by_artikl_before)
 
         lines: list[WarehouseInputItem] = []
-        req_by_id = {int(row["purchase_order_item_id"]): row for row in request_items}
         computed_total_net = Decimal("0.00")
         ordinal = 0
         for req in request_items:
@@ -798,15 +797,9 @@ class PurchaseOrderWarehouseInputCreateView(APIView):
                     },
                     status=400,
                 )
-            if qty > remaining:
-                return Response(
-                    {
-                        "detail": (
-                            f"Kolicina za stavku {po_item.id} ({qty}) prelazi preostalo ({remaining})."
-                        )
-                    },
-                    status=400,
-                )
+            if qty > (po_item.quantity or Decimal("0")):
+                po_item.quantity = qty
+                po_item.save(update_fields=["quantity"])
             ordinal += 1
             line_total = (actual_price * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             tax_rate = (
@@ -892,6 +885,7 @@ class PurchaseOrderWarehouseInputCreateView(APIView):
             detail = "; ".join(exc.messages) if hasattr(exc, "messages") else str(exc)
             return Response({"detail": detail}, status=400)
 
+        po_items = list(order.items.all().order_by("id"))
         received_by_artikl = _po_received_by_artikl(order)
         remaining_map = _po_item_remaining_map(po_items, received_by_artikl)
         if all(v["remaining"] == Decimal("0") for v in remaining_map.values()):
