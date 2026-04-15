@@ -16,6 +16,7 @@ build/
 db.sqlite3
 db.sqlite3-journal
 /media
+/app/media/
 /app/media/racuni/
 /app/media/mail_attachments/
 /static
