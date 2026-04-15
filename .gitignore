@@ -50,6 +50,7 @@ frontend/public/workbox-*.js
 # IDE
 .vscode/
 .idea/
+.codex
 *.swp
 *.swo
 *~
