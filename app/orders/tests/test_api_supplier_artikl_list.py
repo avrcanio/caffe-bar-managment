@@ -7,10 +7,11 @@ from django.test import TestCase
 from PIL import Image
 from rest_framework.test import APIClient
 
-from artikli.models import Artikl, Category, Deposit, UnitOfMeasureData
+from artikli.models import Artikl, ArtiklPackagingLevel, Category, Deposit, UnitOfMeasureData
 from configuration.models import TaxGroup
 from contacts.models import Supplier
 from orders.models import SupplierPriceItem, SupplierPriceList
+from stock.models import WarehouseId, WarehouseStock
 
 
 def _uploaded_test_image(*, size: tuple[int, int] = (600, 900)) -> SimpleUploadedFile:
@@ -104,6 +105,8 @@ class SupplierArtiklListApiTests(TestCase):
         self.assertEqual(row["category_name"], "Sokovi")
         self.assertEqual(row["category_sort_order"], self.leaf_category.sort_order)
         self.assertEqual(row["category_path"], ["Pica", "Bezalkoholna", "Sokovi"])
+        self.assertEqual(row["packaging_path"], "")
+        self.assertEqual(row["packaging_levels"], [])
         self.assertTrue(row["image_50x75"].endswith(f"/api/artikli/{artikl.rm_id}/image-50x75/"))
 
         thumb_response = self.client.get(f"/api/artikli/{artikl.rm_id}/image-50x75/", secure=True)
@@ -163,4 +166,116 @@ class SupplierArtiklListApiTests(TestCase):
         self.assertIsNone(row["category_name"])
         self.assertIsNone(row["category_sort_order"])
         self.assertEqual(row["category_path"], [])
+        self.assertEqual(row["packaging_path"], "")
+        self.assertEqual(row["packaging_levels"], [])
         self.assertIsNone(row["image_50x75"])
+
+    def test_supplier_artikli_includes_packaging_levels_and_stock_breakdown(self):
+        artikl = Artikl.objects.create(
+            rm_id=888,
+            code="ART-888",
+            name="Stella",
+            tax_group=self.tax_group,
+            category=self.leaf_category,
+        )
+        komad = UnitOfMeasureData.objects.create(rm_id=2, name="Komad")
+        gajba = UnitOfMeasureData.objects.create(rm_id=3, name="Gajba")
+        ArtiklPackagingLevel.objects.create(
+            artikl=artikl,
+            sort_order=0,
+            unit_of_measure=komad,
+        )
+        ArtiklPackagingLevel.objects.create(
+            artikl=artikl,
+            sort_order=1,
+            unit_of_measure=gajba,
+            contains_previous="24.0000",
+        )
+        price_list = SupplierPriceList.objects.create(
+            supplier=self.supplier,
+            name="Cjenik",
+            valid_from=date(2026, 4, 1),
+            valid_to=date(2026, 12, 31),
+            is_active=True,
+        )
+        SupplierPriceItem.objects.create(
+            price_list=price_list,
+            artikl=artikl,
+            unit_of_measure=komad,
+            price="3.20",
+        )
+        warehouse = WarehouseId.objects.create(rm_id=9001, name="Šank Gornji")
+        WarehouseStock.objects.create(
+            wh_id=90001,
+            warehouse_id=warehouse,
+            product=artikl,
+            product_name=artikl.name,
+            product_code=artikl.code,
+            unit="Komad",
+            quantity="398.0000",
+            internal_quantity="398.0000",
+            base_group_name="Piće",
+            active=True,
+        )
+
+        response = self.client.get(
+            f"/api/suppliers/{self.supplier.id}/artikli/?ordered_at=2026-04-15T10:00:00Z",
+            secure=True,
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        row = response.json()["results"][0]
+        self.assertEqual(row["packaging_path"], "komad -> 24/gajba")
+        self.assertEqual(
+            row["packaging_levels"],
+            [
+                {
+                    "id": row["packaging_levels"][0]["id"],
+                    "sort_order": 0,
+                    "unit_of_measure": komad.id,
+                    "unit_name": "Komad",
+                    "level_name": "komad",
+                    "is_base": True,
+                    "base_quantity_total": 1,
+                    "contains_previous": None,
+                },
+                {
+                    "id": row["packaging_levels"][1]["id"],
+                    "sort_order": 1,
+                    "unit_of_measure": gajba.id,
+                    "unit_name": "Gajba",
+                    "level_name": "gajba",
+                    "is_base": False,
+                    "base_quantity_total": 24,
+                    "contains_previous": 24.0,
+                },
+            ],
+        )
+        self.assertEqual(
+            row["stocks"],
+            [
+                {
+                    "warehouse_id": 9001,
+                    "warehouse_name": "Šank Gornji",
+                    "quantity": 398.0,
+                    "packaging_breakdown": [
+                        {
+                            "sort_order": 1,
+                            "unit_of_measure": gajba.id,
+                            "unit_name": "Gajba",
+                            "level_name": "gajba",
+                            "base_quantity_total": 24,
+                            "quantity": 16,
+                        },
+                        {
+                            "sort_order": 0,
+                            "unit_of_measure": komad.id,
+                            "unit_name": "Komad",
+                            "level_name": "komad",
+                            "base_quantity_total": 1,
+                            "quantity": 14,
+                        },
+                    ],
+                }
+            ],
+        )

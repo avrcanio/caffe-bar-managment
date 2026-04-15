@@ -1,4 +1,5 @@
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.core.management import call_command
 from django.contrib.auth import get_user_model
@@ -15,6 +16,7 @@ from artikli.models import Artikl, ArtiklPackagingLevel, Category, Deposit, Unit
 from barion.models import BarionCategory
 from configuration.models import TaxGroup
 from sales.models import SalesInvoice, SalesInvoiceItem
+from stock.models import WarehouseId, WarehouseStock
 
 
 
@@ -286,6 +288,69 @@ class ArtiklListFilterApiTests(TestCase):
         self.assertEqual([row["level_name"] for row in body["packaging_levels"]], ["komad", "gajba", "paleta"])
         self.assertEqual([row["is_base"] for row in body["packaging_levels"]], [True, False, False])
         self.assertEqual([row["base_quantity_total"] for row in body["packaging_levels"]], [1, 24, 1440])
+
+    @patch("artikli.api.refresh_warehouse_stock_for_product_code")
+    def test_detail_includes_warehouse_stock_packaging_breakdown(self, mocked_refresh):
+        ArtiklPackagingLevel.objects.create(
+            artikl=self.espresso,
+            sort_order=0,
+            unit_of_measure=self.packaging_uom,
+        )
+        crate_uom = UnitOfMeasureData.objects.create(rm_id=2005, name="Gajba")
+        ArtiklPackagingLevel.objects.create(
+            artikl=self.espresso,
+            sort_order=1,
+            unit_of_measure=crate_uom,
+            contains_previous=Decimal("24.0000"),
+        )
+        warehouse = WarehouseId.objects.create(rm_id=9001, name="Šank Gornji")
+        WarehouseStock.objects.create(
+            wh_id=90001,
+            warehouse_id=warehouse,
+            product=self.espresso,
+            product_name=self.espresso.name,
+            product_code=self.espresso.code,
+            unit="Komad",
+            quantity=Decimal("398.0000"),
+            internal_quantity=Decimal("398.0000"),
+            base_group_name="Piće",
+            active=True,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/artikli/{self.espresso.rm_id}/", secure=True)
+
+        self.assertEqual(response.status_code, 200, response.content)
+        body = response.json()
+        self.assertEqual(
+            body["warehouse_stock"],
+            [
+                {
+                    "warehouse_id": 9001,
+                    "warehouse_name": "Šank Gornji",
+                    "quantity": 398.0,
+                    "packaging_breakdown": [
+                        {
+                            "sort_order": 1,
+                            "unit_of_measure": crate_uom.id,
+                            "unit_name": "Gajba",
+                            "level_name": "gajba",
+                            "base_quantity_total": 24,
+                            "quantity": 16,
+                        },
+                        {
+                            "sort_order": 0,
+                            "unit_of_measure": self.packaging_uom.id,
+                            "unit_name": "Komad",
+                            "level_name": "komad",
+                            "base_quantity_total": 1,
+                            "quantity": 14,
+                        },
+                    ],
+                }
+            ],
+        )
+        mocked_refresh.assert_called_once_with(self.espresso.code)
 
     def test_list_includes_packaging_level_cumulative_totals(self):
         ArtiklPackagingLevel.objects.create(

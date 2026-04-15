@@ -11,7 +11,8 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
-from drf_spectacular.utils import OpenApiParameter, extend_schema
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema, extend_schema_field
 from PIL import Image, ImageOps
 
 from .models import Artikl, ArtiklPackagingLevel, Category
@@ -19,6 +20,65 @@ from stock.models import WarehouseStock
 from stock.services import refresh_warehouse_stock_for_product_code
 
 logger = logging.getLogger(__name__)
+
+
+def _serialize_numeric(value):
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    return value
+
+
+def _build_packaging_level_payloads(artikl):
+    total = Decimal("1")
+    payloads = []
+    for level in artikl.packaging_levels.order_by("sort_order", "id"):
+        if level.sort_order == 0:
+            current_total = Decimal("1")
+        else:
+            current_total = total * Decimal(str(level.contains_previous or 0))
+        payloads.append(
+            {
+                "id": level.id,
+                "sort_order": level.sort_order,
+                "unit_of_measure": level.unit_of_measure_id,
+                "unit_name": level.unit_of_measure.name,
+                "level_name": level.level_name,
+                "is_base": level.sort_order == 0,
+                "base_quantity_total": current_total,
+                "contains_previous": level.contains_previous,
+            }
+        )
+        total = current_total
+    return payloads
+
+
+def _build_packaging_breakdown(artikl, quantity):
+    levels = _build_packaging_level_payloads(artikl)
+    if not levels:
+        return []
+
+    remaining = Decimal(str(quantity or 0))
+    breakdown = []
+    for level in reversed(levels):
+        level_total = Decimal(str(level["base_quantity_total"]))
+        if level["is_base"]:
+            level_quantity = remaining
+        else:
+            level_quantity = remaining // level_total
+            remaining -= level_quantity * level_total
+        breakdown.append(
+            {
+                "sort_order": level["sort_order"],
+                "unit_of_measure": level["unit_of_measure"],
+                "unit_name": level["unit_name"],
+                "level_name": level["level_name"],
+                "base_quantity_total": _serialize_numeric(level["base_quantity_total"]),
+                "quantity": _serialize_numeric(level_quantity),
+            }
+        )
+    return breakdown
 
 
 class ArtiklPackagingLevelSerializer(serializers.ModelSerializer):
@@ -40,23 +100,19 @@ class ArtiklPackagingLevelSerializer(serializers.ModelSerializer):
             "contains_previous",
         ]
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_level_name(self, obj):
         return obj.level_name
 
+    @extend_schema_field(OpenApiTypes.BOOL)
     def get_is_base(self, obj):
         return obj.sort_order == 0
 
+    @extend_schema_field(OpenApiTypes.NUMBER)
     def get_base_quantity_total(self, obj):
-        total = Decimal("1")
-        levels = list(obj.artikl.packaging_levels.order_by("sort_order", "id"))
-        for level in levels:
-            if level.sort_order == 0:
-                current_total = Decimal("1")
-            else:
-                current_total = total * Decimal(str(level.contains_previous or 0))
-            if level.pk == obj.pk:
-                return int(current_total) if current_total == current_total.to_integral_value() else float(current_total)
-            total = current_total
+        for level in _build_packaging_level_payloads(obj.artikl):
+            if level["id"] == obj.id:
+                return _serialize_numeric(level["base_quantity_total"])
         return None
 
 
@@ -122,6 +178,7 @@ class ArtiklSerializer(serializers.ModelSerializer):
         deposit = getattr(obj, "deposit", None)
         return deposit.amount_eur if deposit else 0
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_packaging_path(self, obj):
         return obj.packaging_path_summary()
 
@@ -190,6 +247,7 @@ class ArtiklDetailSerializer(serializers.ModelSerializer):
         deposit = getattr(obj, "deposit", None)
         return deposit.amount_eur if deposit else 0
 
+    @extend_schema_field(OpenApiTypes.STR)
     def get_packaging_path(self, obj):
         return obj.packaging_path_summary()
 
@@ -206,6 +264,7 @@ class ArtiklDetailSerializer(serializers.ModelSerializer):
                 "warehouse_id": row.warehouse_id.rm_id if row.warehouse_id else None,
                 "warehouse_name": row.warehouse_id.name if row.warehouse_id else None,
                 "quantity": row.internal_quantity,
+                "packaging_breakdown": _build_packaging_breakdown(obj, row.internal_quantity),
             }
             for row in rows
         ]

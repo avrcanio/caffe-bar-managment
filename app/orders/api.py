@@ -38,6 +38,65 @@ from stock.models import WarehouseStock, WarehouseId
 from stock.services import get_stock_accounting_config, post_warehouse_input_to_stock
 
 
+def _serialize_packaging_numeric(value):
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    return value
+
+
+def _build_packaging_levels_payload(artikl):
+    total = Decimal("1")
+    payloads = []
+    for level in artikl.packaging_levels.order_by("sort_order", "id"):
+        if level.sort_order == 0:
+            current_total = Decimal("1")
+        else:
+            current_total = total * Decimal(str(level.contains_previous or 0))
+        payloads.append(
+            {
+                "id": level.id,
+                "sort_order": level.sort_order,
+                "unit_of_measure": level.unit_of_measure_id,
+                "unit_name": level.unit_of_measure.name,
+                "level_name": level.level_name,
+                "is_base": level.sort_order == 0,
+                "base_quantity_total": _serialize_packaging_numeric(current_total),
+                "contains_previous": level.contains_previous,
+            }
+        )
+        total = current_total
+    return payloads
+
+
+def _build_packaging_breakdown(artikl, quantity):
+    levels = _build_packaging_levels_payload(artikl)
+    if not levels:
+        return []
+
+    remaining = Decimal(str(quantity or 0))
+    breakdown = []
+    for level in reversed(levels):
+        level_total = Decimal(str(level["base_quantity_total"]))
+        if level["is_base"]:
+            level_quantity = remaining
+        else:
+            level_quantity = remaining // level_total
+            remaining -= level_quantity * level_total
+        breakdown.append(
+            {
+                "sort_order": level["sort_order"],
+                "unit_of_measure": level["unit_of_measure"],
+                "unit_name": level["unit_name"],
+                "level_name": level["level_name"],
+                "base_quantity_total": level["base_quantity_total"],
+                "quantity": _serialize_packaging_numeric(level_quantity),
+            }
+        )
+    return breakdown
+
+
 class PurchaseOrderItemSerializer(serializers.ModelSerializer):
     artikl_name = serializers.CharField(source="artikl.name", read_only=True)
     base_group = serializers.SerializerMethodField()
@@ -1191,6 +1250,7 @@ class SupplierArtiklListView(APIView):
                 "price_list",
                 "artikl__detail__base_group",
             )
+            .prefetch_related("artikl__packaging_levels__unit_of_measure")
             .filter(
                 price_list__supplier_id=supplier_id,
                 price_list__is_active=True,
@@ -1240,6 +1300,7 @@ class SupplierArtiklListView(APIView):
 
         results = []
         category_path_cache = {}
+        packaging_cache = {}
         for item, artikl in artikl_entries:
             detail = getattr(artikl, "detail", None)
             base_group = detail.base_group.name if detail and detail.base_group else None
@@ -1256,6 +1317,14 @@ class SupplierArtiklListView(APIView):
             image_50x75_url = None
             vat_rate = artikl.tax_group.rate if artikl and getattr(artikl, "tax_group", None) else 0
             deposit_amount = artikl.deposit.amount_eur if artikl and getattr(artikl, "deposit", None) else 0
+            packaging_levels = []
+            packaging_path = ""
+            if artikl:
+                packaging_levels = packaging_cache.setdefault(
+                    artikl.id,
+                    _build_packaging_levels_payload(artikl),
+                )
+                packaging_path = artikl.packaging_path_summary()
             if artikl and artikl.image:
                 image_50x75_url = f"/api/artikli/{artikl.rm_id}/image-50x75/"
             if image_url and request is not None:
@@ -1277,10 +1346,22 @@ class SupplierArtiklListView(APIView):
                     "category_name": category.name if category else None,
                     "category_sort_order": category.sort_order if category else None,
                     "category_path": category_path,
+                    "packaging_path": packaging_path,
+                    "packaging_levels": packaging_levels,
                     "unit_of_measure": unit_id,
                     "unit_name": unit_name,
                     "price": item.price,
-                    "stocks": stocks.get(artikl.rm_id, []) if artikl else [],
+                    "stocks": [
+                        {
+                            **stock_row,
+                            "packaging_breakdown": _build_packaging_breakdown(
+                                artikl, stock_row.get("quantity")
+                            ),
+                        }
+                        for stock_row in stocks.get(artikl.rm_id, [])
+                    ]
+                    if artikl
+                    else [],
                 }
             )
 
