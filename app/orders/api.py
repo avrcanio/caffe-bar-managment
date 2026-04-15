@@ -1168,6 +1168,8 @@ class SupplierArtiklListView(APIView):
             SupplierPriceItem.objects.select_related(
                 "artikl",
                 "artikl__category",
+                "artikl__tax_group",
+                "artikl__deposit",
                 "unit_of_measure",
                 "price_list",
                 "artikl__detail__base_group",
@@ -1235,6 +1237,8 @@ class SupplierArtiklListView(APIView):
             unit_name = unit.name if unit else None
             image_url = artikl.image.url if artikl and artikl.image else None
             image_50x75_url = None
+            vat_rate = artikl.tax_group.rate if artikl and getattr(artikl, "tax_group", None) else 0
+            deposit_amount = artikl.deposit.amount_eur if artikl and getattr(artikl, "deposit", None) else 0
             if artikl and artikl.image:
                 image_50x75_url = f"/api/artikli/{artikl.rm_id}/image-50x75/"
             if image_url and request is not None:
@@ -1250,6 +1254,8 @@ class SupplierArtiklListView(APIView):
                     "image": image_url,
                     "image_50x75": image_50x75_url,
                     "base_group": base_group,
+                    "vat_rate": vat_rate,
+                    "deposit_amount": deposit_amount,
                     "category_id": category.id if category else None,
                     "category_name": category.name if category else None,
                     "category_path": category_path,

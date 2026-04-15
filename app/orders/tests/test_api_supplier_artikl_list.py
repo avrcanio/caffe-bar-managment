@@ -7,7 +7,7 @@ from django.test import TestCase
 from PIL import Image
 from rest_framework.test import APIClient
 
-from artikli.models import Artikl, Category, UnitOfMeasureData
+from artikli.models import Artikl, Category, Deposit, UnitOfMeasureData
 from configuration.models import TaxGroup
 from contacts.models import Supplier
 from orders.models import SupplierPriceItem, SupplierPriceList
@@ -49,12 +49,14 @@ class SupplierArtiklListApiTests(TestCase):
         )
 
     def test_supplier_artikli_returns_latest_valid_price_with_category_path_and_image_50x75(self):
+        deposit = Deposit.objects.create(amount_eur="0.10")
         artikl = Artikl.objects.create(
             rm_id=501,
             code="ART-501",
             name="Sok naranca",
             tax_group=self.tax_group,
             category=self.leaf_category,
+            deposit=deposit,
             image=_uploaded_test_image(),
         )
 
@@ -96,6 +98,8 @@ class SupplierArtiklListApiTests(TestCase):
         self.assertEqual(payload["count"], 1)
         row = payload["results"][0]
         self.assertEqual(row["price"], 2.8)
+        self.assertEqual(row["vat_rate"], 0.25)
+        self.assertEqual(row["deposit_amount"], 0.1)
         self.assertEqual(row["category_id"], self.leaf_category.id)
         self.assertEqual(row["category_name"], "Sokovi")
         self.assertEqual(row["category_path"], ["Pica", "Bezalkoholna", "Sokovi"])
@@ -152,6 +156,8 @@ class SupplierArtiklListApiTests(TestCase):
         self.assertEqual(response.status_code, 200, response.json())
         row = response.json()["results"][0]
         self.assertEqual(row["price"], 5.5)
+        self.assertEqual(row["vat_rate"], 0.25)
+        self.assertEqual(row["deposit_amount"], 0)
         self.assertIsNone(row["category_id"])
         self.assertIsNone(row["category_name"])
         self.assertEqual(row["category_path"], [])

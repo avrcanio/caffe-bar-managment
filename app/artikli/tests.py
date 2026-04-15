@@ -7,7 +7,7 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from artikli.models import Artikl, Category
+from artikli.models import Artikl, Category, Deposit
 from barion.models import BarionCategory
 from configuration.models import TaxGroup
 from sales.models import SalesInvoice, SalesInvoiceItem
@@ -32,6 +32,7 @@ class ArtiklListFilterApiTests(TestCase):
         self.cat_hot = Category.objects.create(name="Topli")
         self.cat_soft = Category.objects.create(name="Sokovi")
         self.espresso = Artikl.objects.create(
+            rm_id=1001,
             name="Espresso",
             code="KAVA01",
             is_sellable=True,
@@ -40,6 +41,7 @@ class ArtiklListFilterApiTests(TestCase):
             tax_group=self.tax_group,
         )
         self.water = Artikl.objects.create(
+            rm_id=1002,
             name="Voda",
             code="VODA01",
             is_sellable=True,
@@ -48,6 +50,7 @@ class ArtiklListFilterApiTests(TestCase):
             tax_group=self.tax_group,
         )
         self.internal = Artikl.objects.create(
+            rm_id=1003,
             name="Interni test",
             code="INT01",
             is_sellable=False,

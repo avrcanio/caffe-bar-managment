@@ -24,6 +24,8 @@ class ArtiklSerializer(serializers.ModelSerializer):
     image_46x75 = serializers.SerializerMethodField()
     image_50x75 = serializers.SerializerMethodField()
     image_125x200 = serializers.SerializerMethodField()
+    vat_rate = serializers.SerializerMethodField()
+    deposit_amount = serializers.SerializerMethodField()
     category_id = serializers.PrimaryKeyRelatedField(
         source="category",
         queryset=Category.objects.all(),
@@ -45,6 +47,8 @@ class ArtiklSerializer(serializers.ModelSerializer):
             "image_46x75",
             "image_50x75",
             "image_125x200",
+            "vat_rate",
+            "deposit_amount",
             "category_id",
             "category_name",
             "is_sellable",
@@ -60,12 +64,22 @@ class ArtiklSerializer(serializers.ModelSerializer):
     def get_image_125x200(self, obj):
         return _build_artikl_image_url(self.context.get("request"), obj, "image-125x200")
 
+    def get_vat_rate(self, obj):
+        tax_group = getattr(obj, "tax_group", None)
+        return tax_group.rate if tax_group else 0
+
+    def get_deposit_amount(self, obj):
+        deposit = getattr(obj, "deposit", None)
+        return deposit.amount_eur if deposit else 0
+
 
 class ArtiklDetailSerializer(serializers.ModelSerializer):
     warehouse_stock = serializers.SerializerMethodField()
     image_46x75 = serializers.SerializerMethodField()
     image_50x75 = serializers.SerializerMethodField()
     image_125x200 = serializers.SerializerMethodField()
+    vat_rate = serializers.SerializerMethodField()
+    deposit_amount = serializers.SerializerMethodField()
     category_id = serializers.PrimaryKeyRelatedField(
         source="category",
         queryset=Category.objects.all(),
@@ -87,6 +101,8 @@ class ArtiklDetailSerializer(serializers.ModelSerializer):
             "image_46x75",
             "image_50x75",
             "image_125x200",
+            "vat_rate",
+            "deposit_amount",
             "warehouse_stock",
             "category_id",
             "category_name",
@@ -102,6 +118,14 @@ class ArtiklDetailSerializer(serializers.ModelSerializer):
 
     def get_image_125x200(self, obj):
         return _build_artikl_image_url(self.context.get("request"), obj, "image-125x200")
+
+    def get_vat_rate(self, obj):
+        tax_group = getattr(obj, "tax_group", None)
+        return tax_group.rate if tax_group else 0
+
+    def get_deposit_amount(self, obj):
+        deposit = getattr(obj, "deposit", None)
+        return deposit.amount_eur if deposit else 0
 
     def get_warehouse_stock(self, obj):
         if not obj.code:
@@ -122,7 +146,7 @@ class ArtiklDetailSerializer(serializers.ModelSerializer):
 
 
 class ArtiklListView(generics.ListCreateAPIView):
-    queryset = Artikl.objects.all().order_by("id")
+    queryset = Artikl.objects.select_related("tax_group", "deposit").order_by("id")
     serializer_class = ArtiklSerializer
 
     @extend_schema(
@@ -195,7 +219,7 @@ class ArtiklListView(generics.ListCreateAPIView):
 
 
 class ArtiklDetailView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = Artikl.objects.all()
+    queryset = Artikl.objects.select_related("tax_group", "deposit")
     serializer_class = ArtiklDetailSerializer
     lookup_field = "rm_id"
     parser_classes = [MultiPartParser, FormParser, JSONParser]
