@@ -61,6 +61,18 @@ export default function NewPurchaseOrderPage() {
   const pageEndRef = useRef<HTMLDivElement | null>(null);
   const router = useRouter();
 
+  const getSupplierDefaultPaymentTypeId = (nextSupplierId: string) => {
+    if (!nextSupplierId) {
+      return "";
+    }
+    const supplier = suppliers.find(
+      (entry) => String(entry.id) === String(nextSupplierId)
+    );
+    return supplier?.defaultPaymentTypeId
+      ? String(supplier.defaultPaymentTypeId)
+      : "";
+  };
+
   useEffect(() => {
     const run = async () => {
       try {
@@ -289,7 +301,13 @@ export default function NewPurchaseOrderPage() {
           </label>
           <select
             value={supplierId}
-            onChange={(event) => setSupplierId(event.target.value)}
+            onChange={(event) => {
+              const nextSupplierId = event.target.value;
+              setSupplierId(nextSupplierId);
+              setPaymentTypeId((current) =>
+                current || getSupplierDefaultPaymentTypeId(nextSupplierId)
+              );
+            }}
             className="mt-2 w-full rounded-xl border border-black/20 bg-white px-4 py-3 text-sm"
           >
             <option value="">Odaberi dobavljaca...</option>

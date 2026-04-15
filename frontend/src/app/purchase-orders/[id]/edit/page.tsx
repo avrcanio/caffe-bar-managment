@@ -73,6 +73,18 @@ export default function EditPurchaseOrderPage() {
   const pageEndRef = useRef<HTMLDivElement | null>(null);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
 
+  const getSupplierDefaultPaymentTypeId = (nextSupplierId: string) => {
+    if (!nextSupplierId) {
+      return "";
+    }
+    const supplier = suppliers.find(
+      (entry) => String(entry.id) === String(nextSupplierId)
+    );
+    return supplier?.defaultPaymentTypeId
+      ? String(supplier.defaultPaymentTypeId)
+      : "";
+  };
+
   useEffect(() => {
     const run = async () => {
       try {
@@ -334,7 +346,11 @@ export default function EditPurchaseOrderPage() {
           <select
             value={supplierId}
             onChange={(event) => {
-              setSupplierId(event.target.value);
+              const nextSupplierId = event.target.value;
+              setSupplierId(nextSupplierId);
+              setPaymentTypeId((current) =>
+                current || getSupplierDefaultPaymentTypeId(nextSupplierId)
+              );
               if (initialLoadDone) {
                 setCart([]);
                 setQuantities({});

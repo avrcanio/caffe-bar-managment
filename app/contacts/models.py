@@ -24,6 +24,14 @@ class Supplier(models.Model):
     tax_number = models.CharField(max_length=50, blank=True, default="")
     orders_email = models.EmailField(blank=True, default="")
     show_prices_on_order = models.BooleanField(default=True)
+    default_payment_type = models.ForeignKey(
+        "configuration.PaymentType",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="suppliers",
+        verbose_name="zadani tip placanja",
+    )
     mobile_devices = models.JSONField(blank=True, default=list)
 
     def __str__(self) -> str:

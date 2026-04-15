@@ -2,12 +2,14 @@ export type SupplierDTO = {
   id: number;
   name: string;
   rm_id: number;
+  default_payment_type?: number | null;
 };
 
 export type Supplier = {
   id: number;
   name: string;
   rmId: number;
+  defaultPaymentTypeId: number | null;
 };
 
 export type StockRowDTO = {
@@ -69,6 +71,7 @@ export const mapSuppliers = (items: SupplierDTO[]): Supplier[] =>
     id: supplier.id,
     name: supplier.name,
     rmId: supplier.rm_id,
+    defaultPaymentTypeId: supplier.default_payment_type ?? null,
   }));
 
 export const mapSupplierArtikli = (

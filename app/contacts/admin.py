@@ -141,6 +141,7 @@ class SupplierAdmin(admin.ModelAdmin):
     list_display = (
         "rm_id",
         "name",
+        "default_payment_type",
         "orders_email",
         "show_prices_on_order",
         "town",

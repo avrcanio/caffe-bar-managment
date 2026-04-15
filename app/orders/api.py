@@ -115,6 +115,18 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             "items",
         ]
 
+    def _resolve_default_payment_type(self, validated_data, instance=None):
+        payment_type = validated_data.get("payment_type")
+        if payment_type is not None:
+            return payment_type
+
+        supplier = validated_data.get("supplier")
+        if supplier is None and instance is not None:
+            supplier = instance.supplier
+        if supplier is None:
+            return None
+        return supplier.default_payment_type
+
     @transaction.atomic
     def create(self, validated_data):
         items_data = validated_data.pop("items", [])
@@ -123,6 +135,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             validated_data["created_by"] = request.user
         if not validated_data.get("ordered_at"):
             validated_data["ordered_at"] = timezone.now()
+        validated_data["payment_type"] = self._resolve_default_payment_type(validated_data)
         order = PurchaseOrder.objects.create(**validated_data)
         for item_data in items_data:
             PurchaseOrderItem.objects.create(order=order, **item_data)
@@ -132,6 +145,10 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     @transaction.atomic
     def update(self, instance, validated_data):
         items_data = validated_data.pop("items", None)
+        validated_data["payment_type"] = self._resolve_default_payment_type(
+            validated_data,
+            instance=instance,
+        )
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
