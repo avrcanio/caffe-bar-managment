@@ -1,5 +1,6 @@
 import io
 import logging
+from decimal import Decimal
 
 from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404
@@ -22,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 class ArtiklPackagingLevelSerializer(serializers.ModelSerializer):
     unit_name = serializers.CharField(source="unit_of_measure.name", read_only=True)
+    level_name = serializers.SerializerMethodField()
+    is_base = serializers.SerializerMethodField()
+    base_quantity_total = serializers.SerializerMethodField()
 
     class Meta:
         model = ArtiklPackagingLevel
@@ -30,8 +34,30 @@ class ArtiklPackagingLevelSerializer(serializers.ModelSerializer):
             "sort_order",
             "unit_of_measure",
             "unit_name",
+            "level_name",
+            "is_base",
+            "base_quantity_total",
             "contains_previous",
         ]
+
+    def get_level_name(self, obj):
+        return obj.level_name
+
+    def get_is_base(self, obj):
+        return obj.sort_order == 0
+
+    def get_base_quantity_total(self, obj):
+        total = Decimal("1")
+        levels = list(obj.artikl.packaging_levels.order_by("sort_order", "id"))
+        for level in levels:
+            if level.sort_order == 0:
+                current_total = Decimal("1")
+            else:
+                current_total = total * Decimal(str(level.contains_previous or 0))
+            if level.pk == obj.pk:
+                return int(current_total) if current_total == current_total.to_integral_value() else float(current_total)
+            total = current_total
+        return None
 
 
 class ArtiklSerializer(serializers.ModelSerializer):

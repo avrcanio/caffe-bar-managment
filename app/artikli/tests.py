@@ -243,6 +243,7 @@ class ArtiklListFilterApiTests(TestCase):
         self.assertEqual(row["vat_rate"], 0.25)
         self.assertEqual(row["deposit_amount"], 0.1)
         self.assertEqual(row["category_sort_order"], self.cat_soft.sort_order)
+        self.assertEqual(row["packaging_levels"], [])
 
     def test_detail_includes_vat_rate_and_zero_deposit_when_missing(self):
         self.client.force_authenticate(user=self.user)
@@ -282,6 +283,54 @@ class ArtiklListFilterApiTests(TestCase):
         body = response.json()
         self.assertEqual(body["packaging_path"], "komad -> 24/gajba -> 60/paleta")
         self.assertEqual([row["unit_name"] for row in body["packaging_levels"]], ["Komad", "Gajba", "Paleta"])
+        self.assertEqual([row["level_name"] for row in body["packaging_levels"]], ["komad", "gajba", "paleta"])
+        self.assertEqual([row["is_base"] for row in body["packaging_levels"]], [True, False, False])
+        self.assertEqual([row["base_quantity_total"] for row in body["packaging_levels"]], [1, 24, 1440])
+
+    def test_list_includes_packaging_level_cumulative_totals(self):
+        ArtiklPackagingLevel.objects.create(
+            artikl=self.espresso,
+            sort_order=0,
+            unit_of_measure=self.packaging_uom,
+        )
+        crate_uom = UnitOfMeasureData.objects.create(rm_id=2004, name="Gajba")
+        ArtiklPackagingLevel.objects.create(
+            artikl=self.espresso,
+            sort_order=1,
+            unit_of_measure=crate_uom,
+            contains_previous=Decimal("24.0000"),
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/artikli/?q=espresso", secure=True)
+
+        self.assertEqual(response.status_code, 200, response.content)
+        row = response.json()[0]
+        self.assertEqual(
+            row["packaging_levels"],
+            [
+                {
+                    "id": row["packaging_levels"][0]["id"],
+                    "sort_order": 0,
+                    "unit_of_measure": self.packaging_uom.id,
+                    "unit_name": "Komad",
+                    "level_name": "komad",
+                    "is_base": True,
+                    "base_quantity_total": 1,
+                    "contains_previous": None,
+                },
+                {
+                    "id": row["packaging_levels"][1]["id"],
+                    "sort_order": 1,
+                    "unit_of_measure": crate_uom.id,
+                    "unit_name": "Gajba",
+                    "level_name": "gajba",
+                    "is_base": False,
+                    "base_quantity_total": 24,
+                    "contains_previous": "24.0000",
+                },
+            ],
+        )
 
 
 class ArtiklPackagingLevelModelTests(TestCase):
