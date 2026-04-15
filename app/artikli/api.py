@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 class ArtiklSerializer(serializers.ModelSerializer):
     image_46x75 = serializers.SerializerMethodField()
+    image_50x75 = serializers.SerializerMethodField()
     image_125x200 = serializers.SerializerMethodField()
     category_id = serializers.PrimaryKeyRelatedField(
         source="category",
@@ -42,6 +43,7 @@ class ArtiklSerializer(serializers.ModelSerializer):
             "code",
             "image",
             "image_46x75",
+            "image_50x75",
             "image_125x200",
             "category_id",
             "category_name",
@@ -50,23 +52,19 @@ class ArtiklSerializer(serializers.ModelSerializer):
         ]
 
     def get_image_46x75(self, obj):
-        if not obj.image:
-            return None
-        request = self.context.get("request")
-        url = f"/api/artikli/{obj.rm_id}/image-46x75/"
-        return request.build_absolute_uri(url) if request else url
+        return _build_artikl_image_url(self.context.get("request"), obj, "image-46x75")
+
+    def get_image_50x75(self, obj):
+        return _build_artikl_image_url(self.context.get("request"), obj, "image-50x75")
 
     def get_image_125x200(self, obj):
-        if not obj.image:
-            return None
-        request = self.context.get("request")
-        url = f"/api/artikli/{obj.rm_id}/image-125x200/"
-        return request.build_absolute_uri(url) if request else url
+        return _build_artikl_image_url(self.context.get("request"), obj, "image-125x200")
 
 
 class ArtiklDetailSerializer(serializers.ModelSerializer):
     warehouse_stock = serializers.SerializerMethodField()
     image_46x75 = serializers.SerializerMethodField()
+    image_50x75 = serializers.SerializerMethodField()
     image_125x200 = serializers.SerializerMethodField()
     category_id = serializers.PrimaryKeyRelatedField(
         source="category",
@@ -87,6 +85,7 @@ class ArtiklDetailSerializer(serializers.ModelSerializer):
             "code",
             "image",
             "image_46x75",
+            "image_50x75",
             "image_125x200",
             "warehouse_stock",
             "category_id",
@@ -96,18 +95,13 @@ class ArtiklDetailSerializer(serializers.ModelSerializer):
         ]
 
     def get_image_46x75(self, obj):
-        if not obj.image:
-            return None
-        request = self.context.get("request")
-        url = f"/api/artikli/{obj.rm_id}/image-46x75/"
-        return request.build_absolute_uri(url) if request else url
+        return _build_artikl_image_url(self.context.get("request"), obj, "image-46x75")
+
+    def get_image_50x75(self, obj):
+        return _build_artikl_image_url(self.context.get("request"), obj, "image-50x75")
 
     def get_image_125x200(self, obj):
-        if not obj.image:
-            return None
-        request = self.context.get("request")
-        url = f"/api/artikli/{obj.rm_id}/image-125x200/"
-        return request.build_absolute_uri(url) if request else url
+        return _build_artikl_image_url(self.context.get("request"), obj, "image-125x200")
 
     def get_warehouse_stock(self, obj):
         if not obj.code:
@@ -304,27 +298,51 @@ class CategoryDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = CategorySerializer
 
 
+def _build_artikl_image_url(request, artikl, variant: str):
+    if not artikl.image:
+        return None
+    url = f"/api/artikli/{artikl.rm_id}/{variant}/"
+    return request.build_absolute_uri(url) if request else url
+
+
+def _render_artikl_image(artikl, *, size: tuple[int, int], mode: str):
+    if not artikl.image:
+        raise Http404("Image not found")
+    with artikl.image.open("rb") as image_file:
+        img = Image.open(image_file)
+        img = ImageOps.exif_transpose(img)
+        if mode == "fit":
+            img = ImageOps.fit(img, size, Image.LANCZOS)
+        elif mode == "contain":
+            img = ImageOps.contain(img, size, Image.LANCZOS)
+        else:
+            raise ValueError(f"Unsupported image render mode: {mode}")
+        img_format = (img.format or "PNG").upper()
+        if img_format == "JPG":
+            img_format = "JPEG"
+        if img_format == "JPEG" and img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        buffer = io.BytesIO()
+        img.save(buffer, format=img_format)
+        buffer.seek(0)
+        content_type = Image.MIME.get(img_format, "application/octet-stream")
+        return HttpResponse(buffer.getvalue(), content_type=content_type)
+
+
 class ArtiklImage46x75View(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, rm_id):
         artikl = get_object_or_404(Artikl, rm_id=rm_id)
-        if not artikl.image:
-            raise Http404("Image not found")
-        with artikl.image.open("rb") as image_file:
-            img = Image.open(image_file)
-            img = ImageOps.exif_transpose(img)
-            img = ImageOps.fit(img, (46, 75), Image.LANCZOS)
-            img_format = (img.format or "PNG").upper()
-            if img_format == "JPG":
-                img_format = "JPEG"
-            if img_format == "JPEG" and img.mode in ("RGBA", "P"):
-                img = img.convert("RGB")
-            buffer = io.BytesIO()
-            img.save(buffer, format=img_format)
-            buffer.seek(0)
-            content_type = Image.MIME.get(img_format, "application/octet-stream")
-            return HttpResponse(buffer.getvalue(), content_type=content_type)
+        return _render_artikl_image(artikl, size=(46, 75), mode="fit")
+
+
+class ArtiklImage50x75View(APIView):
+    permission_classes = [AllowAny]
+
+    def get(self, request, rm_id):
+        artikl = get_object_or_404(Artikl, rm_id=rm_id)
+        return _render_artikl_image(artikl, size=(50, 75), mode="contain")
 
 
 class ArtiklImage125x200View(APIView):
@@ -332,19 +350,4 @@ class ArtiklImage125x200View(APIView):
 
     def get(self, request, rm_id):
         artikl = get_object_or_404(Artikl, rm_id=rm_id)
-        if not artikl.image:
-            raise Http404("Image not found")
-        with artikl.image.open("rb") as image_file:
-            img = Image.open(image_file)
-            img = ImageOps.exif_transpose(img)
-            img = ImageOps.fit(img, (125, 200), Image.LANCZOS)
-            img_format = (img.format or "PNG").upper()
-            if img_format == "JPG":
-                img_format = "JPEG"
-            if img_format == "JPEG" and img.mode in ("RGBA", "P"):
-                img = img.convert("RGB")
-            buffer = io.BytesIO()
-            img.save(buffer, format=img_format)
-            buffer.seek(0)
-            content_type = Image.MIME.get(img_format, "application/octet-stream")
-            return HttpResponse(buffer.getvalue(), content_type=content_type)
+        return _render_artikl_image(artikl, size=(125, 200), mode="fit")

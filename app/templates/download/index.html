@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="hr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mozart Downloads</title>
+  <style>
+    :root {
+      --bg: #f2ebe0;
+      --panel: rgba(255, 255, 255, 0.85);
+      --panel-soft: rgba(255, 255, 255, 0.8);
+      --text: #121212;
+      --muted: rgba(18, 18, 18, 0.7);
+      --line: rgba(18, 18, 18, 0.14);
+      --shadow: 0 18px 40px rgba(10, 10, 10, 0.18);
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      font-family: Georgia, "Times New Roman", serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    a {
+      color: inherit;
+    }
+    .page {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 64px 24px;
+    }
+    .stack {
+      display: flex;
+      flex-direction: column;
+      gap: 28px;
+    }
+    .eyebrow {
+      margin: 0 0 12px;
+      font-family: Arial, sans-serif;
+      font-size: 12px;
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      color: rgba(18, 18, 18, 0.6);
+    }
+    h1, h2, h3 {
+      margin: 0;
+      font-weight: 400;
+      line-height: 1.05;
+    }
+    h1 {
+      font-size: clamp(40px, 6vw, 58px);
+    }
+    h2 {
+      font-size: 30px;
+      margin-top: 16px;
+    }
+    h3 {
+      font-size: 30px;
+    }
+    .lead,
+    .card p,
+    .panel p,
+    .faq-answer,
+    .bullet-list li {
+      font-family: Arial, sans-serif;
+      line-height: 1.6;
+      color: var(--muted);
+    }
+    .lead {
+      max-width: 760px;
+      font-size: 16px;
+      margin: 0;
+    }
+    .grid {
+      display: grid;
+      gap: 24px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .card,
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(10px);
+    }
+    .card {
+      padding: 24px;
+    }
+    .panel {
+      padding: 24px;
+      background: var(--panel-soft);
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .step-label,
+    .faq-question,
+    .badge,
+    .note {
+      font-family: Arial, sans-serif;
+      text-transform: uppercase;
+    }
+    .step-label,
+    .faq-question {
+      font-size: 12px;
+      letter-spacing: 0.2em;
+      color: rgba(18, 18, 18, 0.5);
+    }
+    .badge {
+      border: 1px solid rgba(18, 18, 18, 0.18);
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-size: 10px;
+      letter-spacing: 0.3em;
+      color: rgba(18, 18, 18, 0.6);
+      white-space: nowrap;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 18px;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      padding: 0 20px;
+      border-radius: 999px;
+      border: 1px solid rgba(18, 18, 18, 0.18);
+      text-decoration: none;
+      font-family: Arial, sans-serif;
+      font-size: 12px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: rgba(18, 18, 18, 0.82);
+      background: #fff;
+    }
+    .btn.secondary {
+      background: transparent;
+      color: rgba(18, 18, 18, 0.62);
+    }
+    .bullet-list {
+      list-style: none;
+      margin: 18px 0 0;
+      padding: 0;
+    }
+    .bullet-list li {
+      position: relative;
+      padding-left: 16px;
+      margin-top: 8px;
+      font-size: 14px;
+    }
+    .bullet-list li::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 8px;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: rgba(18, 18, 18, 0.5);
+    }
+    .note {
+      margin-top: 18px;
+      border: 1px solid rgba(18, 18, 18, 0.1);
+      border-radius: 18px;
+      background: rgba(18, 18, 18, 0.05);
+      padding: 14px 16px;
+      font-size: 11px;
+      letter-spacing: 0.18em;
+      color: rgba(18, 18, 18, 0.6);
+      line-height: 1.6;
+    }
+    .faq-grid {
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-top: 16px;
+    }
+    .faq-item {
+      border: 1px solid rgba(18, 18, 18, 0.1);
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.7);
+      padding: 16px;
+    }
+    .faq-answer {
+      margin: 10px 0 0;
+      font-size: 14px;
+    }
+    .codebox {
+      margin-top: 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(18, 18, 18, 0.1);
+      background: rgba(18, 18, 18, 0.04);
+      padding: 16px;
+      overflow-x: auto;
+    }
+    pre {
+      margin: 0;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    @media (max-width: 900px) {
+      .grid,
+      .faq-grid {
+        grid-template-columns: 1fr;
+      }
+      .page {
+        padding: 40px 18px;
+      }
+      h2, h3 {
+        font-size: 26px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="stack">
+      <header>
+        <p class="eyebrow">Mozart Downloads</p>
+        <h1>Instalacija Blagajne</h1>
+        <p class="lead">
+          Slijedi korake redom: certifikat, App Installer (ako ga nema), zatim Blagajna,
+          Printer Hub, RunDesk Client i Tailscale.
+        </p>
+      </header>
+
+      <section class="grid">
+        <article class="card">
+          <div class="row">
+            <p class="step-label">Korak 1</p>
+            <span class="badge">Obavezno</span>
+          </div>
+          <h2>Korak 1: Instaliraj certifikat</h2>
+          <p>Preuzmi i instaliraj certifikat da bi Windows vjerovao aplikaciji.</p>
+          <div class="actions">
+            <a class="btn" href="/download/TouchScreenPOS-Company-Signing.cer" download>Preuzmi certifikat</a>
+          </div>
+          <ul class="bullet-list">
+            <li>Dvoklik na preuzeti .cer</li>
+            <li>Install Certificate -&gt; Local Machine ili Current User ako nema admin prava</li>
+            <li>Odaberi "Trusted Root Certification Authorities"</li>
+            <li>Ponovi i instaliraj u "Trusted Publishers"</li>
+          </ul>
+          <p class="note">Napomena: bez ovoga MSIX instalacija nece proci.</p>
+        </article>
+
+        <article class="card">
+          <div class="row">
+            <p class="step-label">Korak 2</p>
+            <span class="badge">Preduvjet</span>
+          </div>
+          <h2>Korak 2: Instaliraj Microsoft App Installer (bez Store-a)</h2>
+          <p>Za Windows 10 bez Microsoft Store-a prvo instaliraj Microsoft App Installer iz .msixbundle paketa.</p>
+          <div class="actions">
+            <a class="btn" href="/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle" download>Preuzmi App Installer (v1.28.190)</a>
+          </div>
+          <ul class="bullet-list">
+            <li>Preuzmi Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle</li>
+            <li>Pokreni paket i potvrdi instalaciju</li>
+            <li>Nakon toga nastavi na Blagajna i Printer Hub .appinstaller linkove</li>
+          </ul>
+          <p class="note">Napomena: ovaj korak treba napraviti samo ako App Installer nije vec instaliran.</p>
+        </article>
+
+        <article class="card">
+          <div class="row">
+            <p class="step-label">Korak 3</p>
+            <span class="badge">Aplikacija</span>
+          </div>
+          <h2>Korak 3: Instaliraj aplikaciju (Blagajna)</h2>
+          <p>Instalacija se pokrece nakon klika na gumb. Trenutni release za Blagajna auto-update je 1.0.6.0.</p>
+          <div class="actions">
+            <a class="btn" href="/download/Blagajna.appinstaller">Instaliraj Blagajna</a>
+            <a class="btn secondary" href="/download/Blagajna_1.0.6.0_x64.msix" download>Preuzmi MSIX 1.0.6.0</a>
+          </div>
+          <ul class="bullet-list">
+            <li>Ako nemas App Installer, preuzmi ga iz Microsoft Store-a ili kroz korak 2</li>
+          </ul>
+        </article>
+
+        <article class="card">
+          <div class="row">
+            <p class="step-label">Korak 4</p>
+            <span class="badge">Printer</span>
+          </div>
+          <h2>Korak 4: Instaliraj Printer Hub</h2>
+          <p>Printer Hub je potreban za lokalni print racuna i komunikaciju s printerom.</p>
+          <div class="actions">
+            <a class="btn" href="/download/MozzartPrintHub.appinstaller">Instaliraj Printer Hub (Auto-update)</a>
+            <a class="btn secondary" href="/download/MozzartPrintHub-1.0.12-x64.msix" download>Preuzmi MSIX 1.0.12.0</a>
+          </div>
+          <ul class="bullet-list">
+            <li>Pokreni MozzartPrintHub.appinstaller</li>
+            <li>Potvrdi otvaranje kroz App Installer</li>
+            <li>App Installer ce automatski pratiti i instalirati nove verzije</li>
+          </ul>
+          <p class="note">Napomena: trenutna verzija je 1.0.12.0 i update ide automatski kroz App Installer.</p>
+        </article>
+
+        <article class="card">
+          <div class="row">
+            <p class="step-label">Korak 5</p>
+            <span class="badge">Podrska</span>
+          </div>
+          <h2>Korak 5: Instaliraj RunDesk Client</h2>
+          <p>RunDesk Client koristi se za udaljenu podrsku i pristup.</p>
+          <div class="actions">
+            <a class="btn" href="/download/RunDesk.Client.appinstaller">Instaliraj RunDesk Client</a>
+            <a class="btn secondary" href="/download/RunDesk.Client_1.4.7.0_x64.msix" download>Preuzmi MSIX 1.4.7.0</a>
+          </div>
+          <ul class="bullet-list">
+            <li>Pokreni RunDesk.Client.appinstaller</li>
+            <li>Potvrdi otvaranje kroz App Installer</li>
+            <li>Ako treba, koristi direktni MSIX link kao fallback</li>
+          </ul>
+          <p class="note">Napomena: preporuceno je pokretanje preko .appinstaller zbog update mehanizma.</p>
+        </article>
+
+        <article class="card">
+          <div class="row">
+            <p class="step-label">Korak 6</p>
+            <span class="badge">Mreza</span>
+          </div>
+          <h2>Korak 6: Instaliraj Tailscale</h2>
+          <p>Preuzmi i instaliraj Tailscale klijent, pa ga spoji na privatni login server.</p>
+          <div class="actions">
+            <a class="btn" href="https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe">Preuzmi Tailscale</a>
+          </div>
+          <ul class="bullet-list">
+            <li>Pokreni tailscale-setup-latest.exe i dovrsi instalaciju</li>
+            <li>Otvori Command Prompt ili shell</li>
+            <li>Pokreni tailscale up naredbu za spajanje na login server</li>
+          </ul>
+          <p class="note">Napomena: nakon instalacije pokreni naredbu iz sekcije ispod.</p>
+        </article>
+      </section>
+
+      <section class="panel">
+        <h3>Mini FAQ</h3>
+        <div class="faq-grid">
+          <div class="faq-item">
+            <p class="faq-question">Sto ako MSIX javlja gresku o certifikatu?</p>
+            <p class="faq-answer">Certifikat nije trustan. Instaliraj ga u Trusted Root i Trusted Publishers.</p>
+          </div>
+          <div class="faq-item">
+            <p class="faq-question">Sto ako nema App Installer?</p>
+            <p class="faq-answer">
+              Preuzmi App Installer iz Microsoft Store:
+              <a href="https://aka.ms/getwinget">https://aka.ms/getwinget</a>
+            </p>
+          </div>
+          <div class="faq-item">
+            <p class="faq-question">Treba li mi Printer Hub?</p>
+            <p class="faq-answer">Da, za lokalni ispis racuna Printer Hub mora biti instaliran i pokrenut.</p>
+          </div>
+          <div class="faq-item">
+            <p class="faq-question">TouchScreenPOS 1.0.6</p>
+            <p class="faq-answer">Za rucni deployment ili lokalnu instalaciju dostupni su i aktualni 1.0.6 release artefakti.</p>
+            <div class="actions">
+              <a class="btn" href="/download/TouchScreenPOS-1.0.6.msi" download>MSI 1.0.6</a>
+              <a class="btn secondary" href="/download/TouchScreenPOS-1.0.6-win-x64.zip" download>ZIP x64 1.0.6</a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3>RunDesk fallback (0x80072F76)</h3>
+        <p>Ako App Installer padne s greskom 0x80072F76, koristi fallback: direktni download MSIX + Add-AppxPackage.</p>
+        <div class="codebox">
+          <pre>$u='https://mozart.sibenik1983.hr/download/RunDesk.Client_1.4.7.0_x64.msix'
+$f="$env:TEMP\\RunDesk.Client_1.4.7.0_x64.msix"
+Invoke-WebRequest $u -OutFile $f -UseBasicParsing
+Add-AppxPackage -Path $f -ForceUpdateFromAnyVersion</pre>
+        </div>
+        <div class="actions">
+          <a class="btn" href="/download/RunDesk.Client.Install-Fallback.ps1" download>Preuzmi RunDesk fallback .ps1</a>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3>Tailscale povezivanje</h3>
+        <p>Nakon instalacije Tailscale-a kopiraj i pokreni ovu naredbu u Command Promptu ili shellu:</p>
+        <div class="codebox">
+          <pre>tailscale up --login-server https://hs-control.qubitsecured.online/</pre>
+        </div>
+        <div class="actions">
+          <a class="btn" href="https://hs-control.qubitsecured.online/registration">Headscale Node Register</a>
+        </div>
+      </section>
+
+      <section class="panel">
+        <p>Instalacija se pokrece nakon klika na gumb. Trenutni release za Blagajna auto-update je 1.0.6.0.</p>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

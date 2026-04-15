@@ -23,6 +23,7 @@ from django.urls import include, path, re_path
 from django.views.static import serve
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 
+from .download_views import DownloadFileView, DownloadIndexView
 from .api_views import CsrfView, LoginView, LogoutView, MeView, UserDetailView, TokenView
 from mailbox_app.api_views import MailboxSyncView
 from mailbox_app.api import MailMessageDetailView, MailMessageListView
@@ -47,7 +48,9 @@ from artikli.api import (
     ArtiklListView,
     UnitOfMeasureListView,
     ArtiklImage46x75View,
+    ArtiklImage50x75View,
     ArtiklImage125x200View,
+    CategoryListView,
 )
 from sales.api import (
     RepresentationDetailView,
@@ -137,11 +140,13 @@ urlpatterns = [
     path('api/artikli/', ArtiklListView.as_view(), name='api-artikl-list'),
     path('api/artikli/<int:rm_id>/', ArtiklDetailView.as_view(), name='api-artikl-detail'),
     path('api/artikli/<int:rm_id>/image-46x75/', ArtiklImage46x75View.as_view(), name='api-artikl-image-46x75'),
+    path('api/artikli/<int:rm_id>/image-50x75/', ArtiklImage50x75View.as_view(), name='api-artikl-image-50x75'),
     path('api/artikli/<int:rm_id>/image-125x200/', ArtiklImage125x200View.as_view(), name='api-artikl-image-125x200'),
     path('api/representations/', RepresentationListView.as_view(), name='api-representation-list'),
     path('api/representations/<int:pk>/', RepresentationDetailView.as_view(), name='api-representation-detail'),
     path('api/representation-reasons/', RepresentationReasonListView.as_view(), name='api-representation-reason-list'),
     path('api/representation-reasons/<int:pk>/', RepresentationReasonDetailView.as_view(), name='api-representation-reason-detail'),
+    path('api/categories/', CategoryListView.as_view(), name='api-category-list'),
     path('api/sales/import-remaris/', RemarisImportView.as_view(), name='api-sales-import-remaris'),
     path('api/units/', UnitOfMeasureListView.as_view(), name='api-unit-list'),
     path('api/inventories/', InventoryListCreateView.as_view(), name='api-inventory-list'),
@@ -236,3 +241,10 @@ if settings.MEDIA_ROOT:
     urlpatterns += [
         re_path(r"^media/(?P<path>.*)$", serve, {"document_root": settings.MEDIA_ROOT}),
     ]
+
+# Serve the download landing page and installer/update artifacts via Django because
+# Traefik routes /download to the web service instead of the frontend service.
+urlpatterns += [
+    path("download/", DownloadIndexView.as_view(), name="download-index"),
+    re_path(r"^download/(?P<path>.*)$", DownloadFileView.as_view(), name="download-file"),
+]

@@ -1173,6 +1173,7 @@ class SupplierArtiklListView(APIView):
         items = (
             SupplierPriceItem.objects.select_related(
                 "artikl",
+                "artikl__category",
                 "unit_of_measure",
                 "price_list",
                 "artikl__detail__base_group",
@@ -1225,20 +1226,27 @@ class SupplierArtiklListView(APIView):
                 )
 
         results = []
+        category_path_cache = {}
         for item, artikl in artikl_entries:
             detail = getattr(artikl, "detail", None)
             base_group = detail.base_group.name if detail and detail.base_group else None
+            category = getattr(artikl, "category", None)
+            if category and category.id not in category_path_cache:
+                category_path_cache[category.id] = list(
+                    category.get_ancestors(include_self=True).values_list("name", flat=True)
+                )
+            category_path = category_path_cache.get(category.id, []) if category else []
             unit = item.unit_of_measure or (detail.unit_of_measure if detail else None)
             unit_id = unit.id if unit else None
             unit_name = unit.name if unit else None
             image_url = artikl.image.url if artikl and artikl.image else None
-            image_46x75_url = None
+            image_50x75_url = None
             if artikl and artikl.image:
-                image_46x75_url = f"/api/artikli/{artikl.rm_id}/image-46x75/"
+                image_50x75_url = f"/api/artikli/{artikl.rm_id}/image-50x75/"
             if image_url and request is not None:
                 image_url = request.build_absolute_uri(image_url)
-            if image_46x75_url and request is not None:
-                image_46x75_url = request.build_absolute_uri(image_46x75_url)
+            if image_50x75_url and request is not None:
+                image_50x75_url = request.build_absolute_uri(image_50x75_url)
             results.append(
                 {
                     "artikl_id": artikl.id if artikl else None,
@@ -1246,8 +1254,11 @@ class SupplierArtiklListView(APIView):
                     "name": artikl.name if artikl else None,
                     "code": artikl.code if artikl else None,
                     "image": image_url,
-                    "image_46x75": image_46x75_url,
+                    "image_50x75": image_50x75_url,
                     "base_group": base_group,
+                    "category_id": category.id if category else None,
+                    "category_name": category.name if category else None,
+                    "category_path": category_path,
                     "unit_of_measure": unit_id,
                     "unit_name": unit_name,
                     "price": item.price,
