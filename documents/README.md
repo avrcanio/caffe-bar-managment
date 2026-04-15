@@ -59,7 +59,28 @@ docker compose exec web python manage.py migrate
 ```
 curl -X GET 'https://mozart.sibenik1983.hr/api/me/' -H 'accept: application/json'
 ```
-5) Frontend:
+5) Categories API:
+```
+curl -sS \
+  -H "Accept: application/json" \
+  -b cookies.txt \
+  https://mozart.sibenik1983.hr/api/categories/
+```
+Primjer odgovora:
+```json
+[
+  {
+    "id": 155,
+    "name": "Cigarete",
+    "parent_id": null,
+    "parent_name": null,
+    "level": 0,
+    "is_active": true,
+    "sort_order": 0
+  }
+]
+```
+6) Frontend:
 - Otvori `https://mozart.sibenik1983.hr/` (frontend)
 
 Napomena: backend je na `/api`, a admin na `/admin`.

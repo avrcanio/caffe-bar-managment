@@ -25,6 +25,7 @@ class RepresentationItemSerializer(serializers.ModelSerializer):
 
 class RepresentationSerializer(serializers.ModelSerializer):
     items = RepresentationItemSerializer(many=True)
+    warehouse_id = serializers.IntegerField(read_only=True)
     reason_id = serializers.PrimaryKeyRelatedField(
         source="reason",
         queryset=RepresentationReason.objects.all(),
@@ -37,6 +38,7 @@ class RepresentationSerializer(serializers.ModelSerializer):
             "id",
             "occurred_at",
             "warehouse",
+            "warehouse_id",
             "user",
             "reason_id",
             "reason_name",
@@ -44,6 +46,12 @@ class RepresentationSerializer(serializers.ModelSerializer):
             "items",
         ]
         read_only_fields = ["occurred_at", "user"]
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict) and "warehouse" not in data and "warehouse_id" in data:
+            data = data.copy()
+            data["warehouse"] = data["warehouse_id"]
+        return super().to_internal_value(data)
 
     def create(self, validated_data):
         items_data = validated_data.pop("items", [])

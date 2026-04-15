@@ -937,9 +937,22 @@ class RepresentationAdmin(admin.ModelAdmin):
     list_display = ("occurred_at", "warehouse", "user", "reason", "total_items", "total_quantity")
     list_filter = ("reason", "warehouse")
     search_fields = ("note", "user__username", "user__first_name", "user__last_name")
-    fields = ("occurred_at", "warehouse", "user", "reason", "note")
-    readonly_fields = ("occurred_at", "user")
     inlines = [RepresentationItemInline]
+
+    def get_fields(self, request, obj=None):
+        if obj is None:
+            return ("warehouse", "reason", "note")
+        return ("occurred_at", "warehouse", "user", "reason", "note")
+
+    def get_readonly_fields(self, request, obj=None):
+        if obj is None:
+            return ()
+        return ("occurred_at", "user")
+
+    def save_model(self, request, obj, form, change):
+        if not obj.user_id:
+            obj.user = request.user
+        super().save_model(request, obj, form, change)
 
     def get_queryset(self, request):
         qs = super().get_queryset(request)

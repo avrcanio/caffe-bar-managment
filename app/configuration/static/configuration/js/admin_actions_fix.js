@@ -66,10 +66,102 @@
     }
   }
 
+  function copyTextToClipboard(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text);
+    }
+
+    return new Promise((resolve, reject) => {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "fixed";
+      textarea.style.top = "-1000px";
+      textarea.style.left = "-1000px";
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+
+      try {
+        const copied = document.execCommand("copy");
+        document.body.removeChild(textarea);
+        if (!copied) {
+          reject(new Error("Copy command failed"));
+          return;
+        }
+        resolve();
+      } catch (error) {
+        document.body.removeChild(textarea);
+        reject(error);
+      }
+    });
+  }
+
+  function setCopyFeedback(feedback, text, isError) {
+    feedback.textContent = text;
+    feedback.style.marginLeft = "8px";
+    feedback.style.fontSize = "12px";
+    feedback.style.color = isError ? "#8a1f11" : "#1f5131";
+
+    if (feedback._hideTimer) {
+      window.clearTimeout(feedback._hideTimer);
+    }
+    feedback._hideTimer = window.setTimeout(() => {
+      feedback.textContent = "";
+    }, 2200);
+  }
+
+  function enhanceInventoryPublicLinkMessages(root) {
+    root.querySelectorAll("[data-copy-public-link]").forEach((trigger) => {
+      if (trigger.dataset.copyBound === "1") return;
+      trigger.dataset.copyBound = "1";
+
+      const url = trigger.dataset.copyPublicLink;
+      if (!url) return;
+
+      if (trigger.classList.contains("inventory-public-link-anchor")) {
+        trigger.style.fontWeight = "600";
+      }
+      if (trigger.classList.contains("inventory-public-link-copy")) {
+        trigger.style.marginLeft = "8px";
+        trigger.style.display = "inline-flex";
+        trigger.style.alignItems = "center";
+        trigger.style.justifyContent = "center";
+        trigger.style.width = "24px";
+        trigger.style.height = "24px";
+        trigger.style.padding = "0";
+        trigger.style.border = "1px solid rgba(31, 81, 49, 0.25)";
+        trigger.style.borderRadius = "6px";
+        trigger.style.background = "#fff";
+        trigger.style.color = "#1f5131";
+        trigger.style.cursor = "pointer";
+        trigger.style.verticalAlign = "middle";
+      }
+
+      const message = trigger.closest("li, div");
+      const feedback = message ? message.querySelector(".inventory-public-link-feedback") : null;
+
+      trigger.addEventListener("click", async (event) => {
+        event.preventDefault();
+        try {
+          await copyTextToClipboard(url);
+          if (feedback) {
+            setCopyFeedback(feedback, "Kopirano u clipboard", false);
+          }
+        } catch (_error) {
+          if (feedback) {
+            setCopyFeedback(feedback, "Kopiranje nije uspjelo", true);
+          }
+        }
+      });
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
     ensureAdminActionHooks();
     bindClearDatetimeButtons(document);
     moveSalesPriceItemEmptyForm(document);
+    enhanceInventoryPublicLinkMessages(document);
   });
   document.addEventListener("click", enableShiftRangeRowClick);
 })();

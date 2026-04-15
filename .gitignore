@@ -71,3 +71,5 @@ _archive/
 app/download/
 download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle
 frontend/public/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle
+frontend/public/download/*
+remaris/primke2025.json

@@ -106,6 +106,14 @@ def _q4(value: Decimal) -> Decimal:
     return value.quantize(FOURPLACES, rounding=ROUND_HALF_UP)
 
 
+def _refresh_internal_stock_rows(*, warehouse_ids: list[int], artikl_ids: list[int]) -> None:
+    wh_ids = sorted({int(wh_id) for wh_id in warehouse_ids if wh_id})
+    art_ids = sorted({int(artikl_id) for artikl_id in artikl_ids if artikl_id})
+    if not wh_ids or not art_ids:
+        return
+    refresh_internal_warehouse_stock(warehouse_ids=wh_ids, artikl_ids=art_ids)
+
+
 @transaction.atomic
 def post_warehouse_input_to_stock(*, warehouse_input: WarehouseInput, warehouse=None) -> StockMove:
     if warehouse_input.stock_move_id:
@@ -172,6 +180,10 @@ def post_warehouse_input_to_stock(*, warehouse_input: WarehouseInput, warehouse=
 
     warehouse_input.stock_move = move
     warehouse_input.save(update_fields=["stock_move"])
+    _refresh_internal_stock_rows(
+        warehouse_ids=[warehouse.rm_id],
+        artikl_ids=[it.artikl.rm_id for it in items if getattr(it, "artikl", None)],
+    )
     return move
 
 
@@ -300,6 +312,10 @@ def post_stock_out(
             posted_by=posted_by,
         )
 
+    _refresh_internal_stock_rows(
+        warehouse_ids=[warehouse.rm_id],
+        artikl_ids=[item.get("artikl").rm_id for item in items if item.get("artikl")],
+    )
     return move
 
 
@@ -393,6 +409,10 @@ def post_stock_out_multi_warehouse(
         move_line.unit_cost = avg_cost
         move_line.save(update_fields=["unit_cost"])
 
+    _refresh_internal_stock_rows(
+        warehouse_ids=[item.get("warehouse").rm_id for item in items if item.get("warehouse")],
+        artikl_ids=[item.get("artikl").rm_id for item in items if item.get("artikl")],
+    )
     return move
 
 
@@ -455,6 +475,10 @@ def post_stock_in(
             qty_remaining=qty,
         )
 
+    _refresh_internal_stock_rows(
+        warehouse_ids=[warehouse.rm_id],
+        artikl_ids=[item.get("artikl").rm_id for item in items if item.get("artikl")],
+    )
     return move
 
 
@@ -549,6 +573,10 @@ def post_stock_transfer(
         out_line.unit_cost = avg_cost
         out_line.save(update_fields=["unit_cost"])
 
+    _refresh_internal_stock_rows(
+        warehouse_ids=[from_warehouse.rm_id, to_warehouse.rm_id],
+        artikl_ids=[item.get("artikl").rm_id for item in items if item.get("artikl")],
+    )
     return move
 
 
@@ -612,6 +640,10 @@ def post_stock_in_from_allocations(
             move_line.unit_cost = _q4(total_cost / total_qty)
             move_line.save(update_fields=["unit_cost"])
 
+    _refresh_internal_stock_rows(
+        warehouse_ids=[warehouse.rm_id],
+        artikl_ids=[line.artikl_id for line in move.lines.all() if line.artikl_id],
+    )
     return reversal
 
 

@@ -101,6 +101,36 @@ class ArtiklListFilterApiTests(TestCase):
         response = self.client.get("/api/artikli/?is_sellable=maybe", secure=True)
         self.assertEqual(response.status_code, 400, response.content)
 
+    def test_list_includes_vat_rate_and_deposit_amount(self):
+        deposit = Deposit.objects.create(amount_eur=Decimal("0.10"))
+        bottled = Artikl.objects.create(
+            rm_id=1004,
+            name="Sok boca",
+            code="SOK01",
+            is_sellable=True,
+            is_stock_item=True,
+            category=self.cat_soft,
+            tax_group=self.tax_group,
+            deposit=deposit,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/artikli/", secure=True)
+
+        self.assertEqual(response.status_code, 200, response.content)
+        row = next(item for item in response.json() if item["rm_id"] == bottled.rm_id)
+        self.assertEqual(row["vat_rate"], 0.25)
+        self.assertEqual(row["deposit_amount"], 0.1)
+
+    def test_detail_includes_vat_rate_and_zero_deposit_when_missing(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/artikli/{self.espresso.rm_id}/", secure=True)
+
+        self.assertEqual(response.status_code, 200, response.content)
+        body = response.json()
+        self.assertEqual(body["vat_rate"], 0.25)
+        self.assertEqual(body["deposit_amount"], 0)
+
 
 class ArtiklAdminCategoryFilterTests(TestCase):
     def setUp(self):
@@ -166,6 +196,31 @@ class CategoryAdminAutocompleteTests(TestCase):
         names = {row["text"] for row in response.json()["results"]}
         self.assertIn(self.used_category.name, names)
         self.assertIn(self.free_category.name, names)
+
+
+class CategoryApiRouteTests(TestCase):
+    def setUp(self):
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="artikli-category-api-user",
+            email="artikli-category-api@example.com",
+            password="pass1234",
+        )
+        self.client = APIClient()
+        self.root = Category.objects.create(name="Cigarete", is_active=True, sort_order=0)
+
+    def test_categories_endpoint_returns_200(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/categories/", secure=True)
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()[0]["name"], self.root.name)
+
+    def test_drink_categories_endpoint_returns_404(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/drink-categories/", secure=True)
+
+        self.assertEqual(response.status_code, 404, response.content)
 
 
 class CategorySortOrderBySalesCommandTests(TestCase):
