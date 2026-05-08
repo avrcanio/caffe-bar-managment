@@ -12,6 +12,8 @@ from django.db.models.expressions import ExpressionWrapper
 from django.http import HttpResponseRedirect
 from django.urls import path, reverse
 from django.utils import timezone
+from django.utils.html import format_html
+from django.utils.safestring import mark_safe
 
 from artikli.remaris_connector import RemarisConnector
 from artikli.models import Artikl
@@ -869,11 +871,68 @@ class StockCostSnapshotAdmin(admin.ModelAdmin):
         return super().response_action(request, queryset)
 
 
+def _inventory_item_should_show_warehouse_stock(item: InventoryItem) -> bool:
+    inv = item.inventory
+    if inv.status != Inventory.Status.OPEN:
+        return True
+    return item.quantity is not None
+
+
+def _format_warehouse_stock_rows(rows: list[WarehouseStock]):
+    if not rows:
+        return "Nema zapisa"
+    lines: list[str] = []
+    for row in rows:
+        wh_name = row.warehouse_id.name if row.warehouse_id else "?"
+        int_q = row.internal_quantity if row.internal_quantity is not None else "—"
+        lines.append(str(format_html("{}: {} / int {}", wh_name, row.quantity, int_q)))
+    return mark_safe("<br>\n".join(lines))
+
+
 class InventoryItemInline(admin.TabularInline):
     model = InventoryItem
     extra = 0
-    fields = ("artikl", "quantity", "unit", "note")
+    fields = ("artikl", "quantity", "unit", "note", "warehouse_stock_summary")
+    readonly_fields = ("warehouse_stock_summary",)
     autocomplete_fields = ("artikl",)
+
+    def get_formset(self, request, obj=None, **kwargs):
+        # Cache on this inline instance (per-request). item.inventory in the
+        # readonly column is a different Inventory instance than obj here, so
+        # attaching only to obj would leave the prefetch invisible.
+        if obj is None:
+            self._warehouse_stock_by_artikl = {}
+            return super().get_formset(request, obj, **kwargs)
+        if obj.pk:
+            artikl_ids = list(
+                InventoryItem.objects.filter(inventory=obj)
+                .exclude(artikl_id__isnull=True)
+                .values_list("artikl_id", flat=True)
+                .distinct()
+            )
+            by_artikl: dict[int | None, list[WarehouseStock]] = {}
+            if artikl_ids:
+                qs = (
+                    WarehouseStock.objects.filter(product_id__in=artikl_ids)
+                    .select_related("warehouse_id")
+                    .order_by("warehouse_id__name", "warehouse_id__rm_id", "id")
+                )
+                for row in qs:
+                    by_artikl.setdefault(row.product_id, []).append(row)
+            self._warehouse_stock_by_artikl = by_artikl
+        else:
+            self._warehouse_stock_by_artikl = {}
+        return super().get_formset(request, obj, **kwargs)
+
+    @admin.display(description="Stanje po skladištima")
+    def warehouse_stock_summary(self, obj: InventoryItem):
+        if not obj or not obj.artikl_id:
+            return "—"
+        if not _inventory_item_should_show_warehouse_stock(obj):
+            return "—"
+        stock_by_artikl = getattr(self, "_warehouse_stock_by_artikl", None) or {}
+        rows = stock_by_artikl.get(obj.artikl_id, [])
+        return format_html("{}", _format_warehouse_stock_rows(rows))
 
 
 @admin.register(Inventory)
