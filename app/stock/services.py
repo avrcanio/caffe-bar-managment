@@ -1,4 +1,5 @@
 import logging
+from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -618,6 +619,76 @@ def post_stock_in_from_allocations(
 
 
 @transaction.atomic
+def reverse_multi_warehouse_out_move(
+    *,
+    move: StockMove,
+    move_date=None,
+    reference: str = "",
+    note: str = "",
+) -> StockMove:
+    """
+    Storno OUT kretanja gdje zaglavlje nema from_warehouse, ali svaka linija ima
+    warehouse (npr. post_stock_out_multi_warehouse / povrat iz primke).
+    """
+    if move.move_type != StockMove.MoveType.OUT:
+        raise ValidationError("Očekuje se OUT kretanje.")
+    allocations = list(
+        StockAllocation.objects.filter(move_line__move=move).select_related(
+            "lot", "move_line__warehouse", "move_line__artikl"
+        )
+    )
+    if not allocations:
+        raise ValidationError("Nema FIFO alokacija za OUT kretanje.")
+
+    move_date = move_date or timezone.now()
+    reversal = StockMove.objects.create(
+        move_type=StockMove.MoveType.IN,
+        date=_as_aware_datetime(move_date),
+        reference=reference or f"Storno izlaza #{move.id}",
+        note=note,
+        to_warehouse=None,
+        purpose="",
+    )
+
+    by_line: dict[int, list[StockAllocation]] = defaultdict(list)
+    for alloc in allocations:
+        by_line[alloc.move_line_id].append(alloc)
+
+    for line in move.lines.select_related("artikl", "warehouse").order_by("id"):
+        if not line.warehouse_id:
+            raise ValidationError(
+                f"Linija #{line.id} izlaza nema skladište; storno više skladišta nije moguć."
+            )
+        line_allocs = by_line.get(line.id, [])
+        if not line_allocs:
+            continue
+        total_qty = sum((a.qty for a in line_allocs), Decimal("0.0000"))
+        move_line = StockMoveLine.objects.create(
+            move=reversal,
+            warehouse=line.warehouse,
+            artikl=line.artikl,
+            quantity=total_qty,
+            unit_cost=None,
+        )
+        total_cost = Decimal("0.0000")
+        for alloc in line_allocs:
+            StockLot.objects.create(
+                warehouse=line.warehouse,
+                artikl=line.artikl,
+                received_at=_as_aware_datetime(move_date),
+                unit_cost=alloc.unit_cost,
+                qty_in=alloc.qty,
+                qty_remaining=alloc.qty,
+            )
+            total_cost += alloc.qty * alloc.unit_cost
+        if total_qty > 0:
+            move_line.unit_cost = _q4(total_cost / total_qty)
+            move_line.save(update_fields=["unit_cost"])
+
+    return reversal
+
+
+@transaction.atomic
 def reverse_stock_move(*, move: StockMove, move_date=None, reference: str = "", note: str = "") -> StockMove:
     if move.reversed_move_id:
         raise ValidationError("Ne mozes stornirati storno kretanje.")
@@ -648,24 +719,25 @@ def reverse_stock_move(*, move: StockMove, move_date=None, reference: str = "", 
             note=note,
         )
     elif move.move_type == StockMove.MoveType.OUT:
-        if not move.from_warehouse:
-            raise ValidationError("OUT kretanje nema from_warehouse.")
-        items = []
-        for line in move.lines.select_related("artikl"):
-            items.append(
-                {
-                    "artikl": line.artikl,
-                    "quantity": line.quantity,
-                }
+        if move.from_warehouse:
+            reversal = post_stock_in_from_allocations(
+                move=move,
+                warehouse=move.from_warehouse,
+                move_date=move_date,
+                reference=reference or f"Storno izlaza #{move.id}",
+                note=note,
             )
-        reversal = post_stock_in_from_allocations(
-            move=move,
-            warehouse=move.from_warehouse,
-            move_date=move_date,
-            reference=reference or f"Storno izlaza #{move.id}",
-            note=note,
-            items=items,
-        )
+        elif move.lines.filter(warehouse_id__isnull=False).exists():
+            reversal = reverse_multi_warehouse_out_move(
+                move=move,
+                move_date=move_date,
+                reference=reference or f"Storno izlaza #{move.id}",
+                note=note,
+            )
+        else:
+            raise ValidationError(
+                "OUT kretanje nema from_warehouse niti skladište na stavkama; storno nije podržan."
+            )
     elif move.move_type == StockMove.MoveType.IN:
         if not move.to_warehouse and not move.from_warehouse:
             warehouse = move.lines.first().warehouse if move.lines.exists() else None
