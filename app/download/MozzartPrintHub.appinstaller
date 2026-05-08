@@ -1,0 +1,18 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<AppInstaller
+  Uri="https://mozart.sibenik1983.hr/download/MozzartPrintHub.appinstaller"
+  Version="1.0.12.0"
+  xmlns="http://schemas.microsoft.com/appx/appinstaller/2018">
+  <MainPackage
+    Name="MozzartPrintHub"
+    Publisher="CN=TouchScreenPOS Company Signing"
+    Version="1.0.12.0"
+    Uri="https://mozart.sibenik1983.hr/download/MozzartPrintHub-1.0.12-x64.msix"
+    ProcessorArchitecture="x64" />
+  <UpdateSettings>
+    <OnLaunch HoursBetweenUpdateChecks="0" ShowPrompt="false" UpdateBlocksActivation="false" />
+    <AutomaticBackgroundTask />
+    <ForceUpdateFromAnyVersion>true</ForceUpdateFromAnyVersion>
+  </UpdateSettings>
+</AppInstaller>
+
