@@ -17,6 +17,8 @@ from orders.models import WarehouseInput
 from stock.models import (
     Inventory,
     InventoryItem,
+    SupplierReturn,
+    SupplierReturnItem,
     StockAllocation,
     StockAccountingConfig,
     StockLot,
@@ -890,6 +892,56 @@ def get_stock_accounting_config() -> StockAccountingConfig:
             "Nedostaje StockAccountingConfig. Postavi inventory_account i cogs_account u adminu."
         )
     return cfg
+
+
+@transaction.atomic
+def post_supplier_return_to_stock(*, supplier_return: SupplierReturn, posted_by=None) -> StockMove:
+    if not supplier_return:
+        raise ValidationError("Povrat je obavezan.")
+
+    supplier_return = SupplierReturn.objects.select_for_update().get(pk=supplier_return.pk)
+
+    if supplier_return.status != SupplierReturn.Status.DRAFT:
+        raise ValidationError("Povrat mora biti u statusu draft.")
+    if supplier_return.stock_move_id:
+        raise ValidationError("Povrat je već proknjižen.")
+    if not supplier_return.warehouse_id:
+        raise ValidationError("Povrat mora imati skladište.")
+
+    items = list(
+        SupplierReturnItem.objects.filter(supplier_return=supplier_return)
+        .select_related("artikl")
+        .all()
+    )
+    if not items:
+        raise ValidationError("Povrat nema stavki.")
+
+    payload = []
+    for it in items:
+        if not it.artikl_id:
+            raise ValidationError("Stavka povrata mora imati artikl.")
+        qty = Decimal(str(it.quantity))
+        if qty <= 0:
+            raise ValidationError("Količina na stavci povrata mora biti > 0.")
+        payload.append({"artikl": it.artikl, "quantity": qty})
+
+    move = post_stock_out(
+        warehouse=supplier_return.warehouse,
+        items=payload,
+        move_date=supplier_return.date,
+        reference=supplier_return.reference or f"Povrat dobavljaču #{supplier_return.id}",
+        note=supplier_return.note or "",
+        purpose=StockMove.Purpose.SUPPLIER_RETURN,
+        auto_cogs=False,
+        posted_by=posted_by,
+    )
+
+    supplier_return.stock_move = move
+    supplier_return.status = SupplierReturn.Status.POSTED
+    supplier_return.posted_at = timezone.now()
+    supplier_return.save(update_fields=["stock_move", "status", "posted_at"])
+
+    return move
 
 
 @transaction.atomic

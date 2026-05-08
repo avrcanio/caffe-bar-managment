@@ -20,6 +20,8 @@ from stock.models import (
     InventoryItem,
     ProductStockDS,
     ReplenishRequestLine,
+    SupplierReturn,
+    SupplierReturnItem,
     StockAllocation,
     StockAccountingConfig,
     StockCostSnapshot,
@@ -33,6 +35,7 @@ from stock.models import (
 )
 from stock.services import (
     clone_inventory_without_counts,
+    post_supplier_return_to_stock,
     post_stock_transfer,
     replenish_to_sale_warehouse,
     refresh_internal_warehouse_stock,
@@ -1436,3 +1439,78 @@ class StockAccountingConfigAdmin(admin.ModelAdmin):
             self.message_user(request, f"Replenish nije uspio: {exc}", level=messages.ERROR)
 
     actions = ["replenish_to_sale"]
+
+
+class SupplierReturnItemInline(admin.TabularInline):
+    model = SupplierReturnItem
+    extra = 0
+    autocomplete_fields = ("artikl", "unit")
+    fields = ("artikl", "quantity", "unit", "note")
+
+    def has_add_permission(self, request, obj=None):
+        if obj and obj.status != SupplierReturn.Status.DRAFT:
+            return False
+        return super().has_add_permission(request, obj=obj)
+
+    def has_delete_permission(self, request, obj=None):
+        if obj and obj.status != SupplierReturn.Status.DRAFT:
+            return False
+        return super().has_delete_permission(request, obj=obj)
+
+
+@admin.register(SupplierReturn)
+class SupplierReturnAdmin(admin.ModelAdmin):
+    list_display = ("id", "supplier", "warehouse", "date", "status", "stock_move")
+    list_filter = ("status", "warehouse", "supplier")
+    search_fields = ("reference", "note", "supplier__name")
+    autocomplete_fields = ("supplier", "warehouse")
+    inlines = [SupplierReturnItemInline]
+    actions = ["post_to_stock"]
+
+    @admin.action(description="Proknjiži povrat u skladište", permissions=["change"])
+    def post_to_stock(self, request, queryset):
+        posted = 0
+        skipped = 0
+        failed = 0
+
+        for sr in queryset.select_related("warehouse", "supplier"):
+            if sr.status != SupplierReturn.Status.DRAFT or sr.stock_move_id:
+                skipped += 1
+                continue
+            try:
+                with transaction.atomic():
+                    post_supplier_return_to_stock(supplier_return=sr, posted_by=request.user)
+                posted += 1
+            except Exception as exc:
+                failed += 1
+                self.message_user(
+                    request,
+                    f"Povrat {sr.id}: greška kod knjiženja ({exc}).",
+                    level=messages.ERROR,
+                )
+
+        if posted:
+            self.message_user(request, f"Proknjiženo: {posted}.", level=messages.SUCCESS)
+        if skipped:
+            self.message_user(request, f"Preskočeno: {skipped}.", level=messages.WARNING)
+        if failed:
+            self.message_user(request, f"Greške: {failed}.", level=messages.ERROR)
+
+    def get_readonly_fields(self, request, obj=None):
+        ro = list(super().get_readonly_fields(request, obj))
+        if obj and obj.status != SupplierReturn.Status.DRAFT:
+            ro += ["supplier", "warehouse", "date", "reference", "note", "status", "stock_move", "created_by", "created_at", "posted_at"]
+        return ro
+
+    def has_delete_permission(self, request, obj=None):
+        if obj and obj.status != SupplierReturn.Status.DRAFT:
+            return False
+        return super().has_delete_permission(request, obj=obj)
+
+    def save_model(self, request, obj, form, change):
+        if not change and not obj.created_by_id and request.user and request.user.is_authenticated:
+            obj.created_by = request.user
+        super().save_model(request, obj, form, change)
+
+
+    # Inlines are locked via inline permissions above.

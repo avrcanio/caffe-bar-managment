@@ -14,8 +14,10 @@ from django.contrib.auth import get_user_model
 
 from artikli.models import Artikl, UnitOfMeasureData
 from artikli.remaris_connector import RemarisConnector
-from stock.models import Inventory, InventoryItem, WarehouseId
+from contacts.models import Supplier
+from stock.models import Inventory, InventoryItem, SupplierReturn, SupplierReturnItem, WarehouseId
 from stock.models import WarehouseStock
+from stock.services import post_supplier_return_to_stock
 
 
 class InventorySerializer(serializers.ModelSerializer):
@@ -52,7 +54,7 @@ class InventorySerializer(serializers.ModelSerializer):
         u = getattr(obj, "counted_by", None)
         if not u:
             return None
-        full = f"{getattr(u,'first_name','') or ''} {getattr(u,'last_name','') or ''}".strip()
+        full = f"{getattr(u, 'first_name', '') or ''} {getattr(u, 'last_name', '') or ''}".strip()
         return full or getattr(u, "username", None)
 
 
@@ -153,6 +155,117 @@ class InventoryItemDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [IsAuthenticated]
 
 
+class SupplierReturnSerializer(serializers.ModelSerializer):
+    supplier = serializers.PrimaryKeyRelatedField(queryset=Supplier.objects.all())
+    supplier_name = serializers.CharField(source="supplier.name", read_only=True)
+    warehouse = serializers.SlugRelatedField(
+        slug_field="rm_id",
+        queryset=WarehouseId.objects.all(),
+    )
+    warehouse_name = serializers.CharField(source="warehouse.name", read_only=True)
+    status = serializers.CharField(read_only=True)
+    stock_move_id = serializers.IntegerField(source="stock_move_id", read_only=True)
+
+    class Meta:
+        model = SupplierReturn
+        fields = [
+            "id",
+            "supplier",
+            "supplier_name",
+            "warehouse",
+            "warehouse_name",
+            "date",
+            "reference",
+            "note",
+            "status",
+            "stock_move_id",
+            "created_at",
+            "posted_at",
+        ]
+
+
+class SupplierReturnItemSerializer(serializers.ModelSerializer):
+    supplier_return = serializers.PrimaryKeyRelatedField(queryset=SupplierReturn.objects.all())
+    artikl = serializers.SlugRelatedField(
+        slug_field="rm_id",
+        queryset=Artikl.objects.all(),
+    )
+    artikl_name = serializers.CharField(source="artikl.name", read_only=True)
+    unit = serializers.SlugRelatedField(
+        slug_field="rm_id",
+        queryset=UnitOfMeasureData.objects.all(),
+        allow_null=True,
+        required=False,
+    )
+    unit_name = serializers.CharField(source="unit.name", read_only=True)
+
+    class Meta:
+        model = SupplierReturnItem
+        fields = [
+            "id",
+            "supplier_return",
+            "artikl",
+            "artikl_name",
+            "quantity",
+            "unit",
+            "unit_name",
+            "note",
+        ]
+
+
+class SupplierReturnListCreateView(generics.ListCreateAPIView):
+    queryset = SupplierReturn.objects.all().order_by("-date", "-id")
+    serializer_class = SupplierReturnSerializer
+    permission_classes = [IsAuthenticated]
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+
+class SupplierReturnDetailView(generics.RetrieveUpdateDestroyAPIView):
+    queryset = SupplierReturn.objects.all()
+    serializer_class = SupplierReturnSerializer
+    permission_classes = [IsAuthenticated]
+
+
+class SupplierReturnItemListCreateView(generics.ListCreateAPIView):
+    queryset = SupplierReturnItem.objects.all().order_by("-id")
+    serializer_class = SupplierReturnItemSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        qs = super().get_queryset().select_related("supplier_return", "artikl", "unit")
+        sr_id = self.request.query_params.get("supplier_return") or self.request.query_params.get("supplier_return_id")
+        if sr_id:
+            try:
+                qs = qs.filter(supplier_return_id=int(sr_id))
+            except Exception:
+                pass
+        return qs
+
+
+class SupplierReturnItemDetailView(generics.RetrieveUpdateDestroyAPIView):
+    queryset = SupplierReturnItem.objects.all()
+    serializer_class = SupplierReturnItemSerializer
+    permission_classes = [IsAuthenticated]
+
+
+class SupplierReturnPostView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk: int):
+        with transaction.atomic():
+            sr = SupplierReturn.objects.select_for_update().filter(pk=pk).first()
+            if not sr:
+                return Response({"detail": "Not found."}, status=404)
+            try:
+                move = post_supplier_return_to_stock(supplier_return=sr, posted_by=request.user)
+            except Exception as exc:
+                return Response({"detail": str(exc)}, status=400)
+
+        return Response({"detail": "OK", "supplier_return_id": sr.id, "stock_move_id": move.id})
+
+
 class PublicInventoryItemSerializer(serializers.ModelSerializer):
     artikl_rm_id = serializers.IntegerField(source="artikl.rm_id", read_only=True)
     artikl_name = serializers.CharField(source="artikl.name", read_only=True)
@@ -212,7 +325,7 @@ class PublicInventorySerializer(serializers.ModelSerializer):
         u = getattr(obj, "counted_by", None)
         if not u:
             return None
-        full = f"{getattr(u,'first_name','') or ''} {getattr(u,'last_name','') or ''}".strip()
+        full = f"{getattr(u, 'first_name', '') or ''} {getattr(u, 'last_name', '') or ''}".strip()
         return full or getattr(u, "username", None)
 
     def get_readonly(self, obj):

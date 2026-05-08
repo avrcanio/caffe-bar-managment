@@ -424,6 +424,7 @@ class StockMove(models.Model):
         CONSUMPTION = "consumption", "Utrošak"
         WASTE = "waste", "Otpis"
         ADJUSTMENT = "adjustment", "Inventurna korekcija"
+        SUPPLIER_RETURN = "supplier_return", "Povrat dobavljaču"
 
     move_type = models.CharField(max_length=20, choices=MoveType.choices)
     date = models.DateTimeField()
@@ -694,3 +695,115 @@ class ReplenishRequestLine(models.Model):
     class Meta:
         verbose_name = "Replenish stavka"
         verbose_name_plural = "Replenish stavke"
+
+
+class SupplierReturn(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        POSTED = "posted", "Posted"
+        CANCELLED = "cancelled", "Cancelled"
+
+    supplier = models.ForeignKey(
+        "contacts.Supplier",
+        on_delete=models.PROTECT,
+        related_name="supplier_returns",
+        verbose_name="Dobavljač",
+    )
+    warehouse = models.ForeignKey(
+        "stock.WarehouseId",
+        to_field="rm_id",
+        on_delete=models.PROTECT,
+        related_name="supplier_returns",
+        verbose_name="Skladište",
+    )
+    date = models.DateTimeField(verbose_name="Datum")
+    reference = models.CharField(max_length=200, blank=True, default="", verbose_name="Referenca")
+    note = models.TextField(blank=True, default="", verbose_name="Napomena")
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.DRAFT,
+        verbose_name="Status",
+    )
+    stock_move = models.OneToOneField(
+        "stock.StockMove",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="supplier_return",
+        verbose_name="Skladišno kretanje",
+    )
+    created_by = models.ForeignKey(
+        "auth.User",
+        null=True,
+        blank=True,
+        editable=False,
+        on_delete=models.SET_NULL,
+        related_name="supplier_returns",
+        verbose_name="Kreirao",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Kreirano")
+    posted_at = models.DateTimeField(null=True, blank=True, verbose_name="Proknjiženo")
+
+    def __str__(self) -> str:
+        sup = self.supplier.name if self.supplier_id else "Dobavljač ?"
+        wh = self.warehouse.name if self.warehouse_id else "Skladište ?"
+        return f"Povrat dobavljaču ({sup}) {wh} @ {self.date:%Y-%m-%d %H:%M}"
+
+    class Meta:
+        verbose_name = "Povrat dobavljaču"
+        verbose_name_plural = "Povrati dobavljaču"
+
+
+class SupplierReturnItem(models.Model):
+    supplier_return = models.ForeignKey(
+        "stock.SupplierReturn",
+        on_delete=models.CASCADE,
+        related_name="items",
+        verbose_name="Povrat",
+    )
+    artikl = models.ForeignKey(
+        "artikli.Artikl",
+        to_field="rm_id",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="supplier_return_items",
+        verbose_name="Artikl",
+    )
+    quantity = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        validators=[MinValueValidator(0)],
+        verbose_name="Količina",
+    )
+    unit = models.ForeignKey(
+        "artikli.UnitOfMeasureData",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="supplier_return_item_units",
+        verbose_name="JM",
+    )
+    note = models.TextField(blank=True, default="", verbose_name="Napomena")
+
+    def __str__(self) -> str:
+        name = self.artikl.name if self.artikl else "Artikl ?"
+        return f"{name} x {self.quantity}"
+
+    def clean(self) -> None:
+        if not self.artikl_id:
+            raise ValidationError({"artikl": "Artikl je obavezan."})
+        if self.quantity is None or self.quantity <= 0:
+            raise ValidationError({"quantity": "Količina mora biti > 0."})
+
+    def save(self, *args, **kwargs):
+        if not self.unit_id and self.artikl_id:
+            detail = getattr(self.artikl, "detail", None)
+            if detail and getattr(detail, "unit_of_measure_id", None):
+                self.unit = detail.unit_of_measure
+        super().save(*args, **kwargs)
+
+    class Meta:
+        verbose_name = "Stavka povrata dobavljaču"
+        verbose_name_plural = "Stavke povrata dobavljaču"
