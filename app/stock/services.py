@@ -13,7 +13,7 @@ from accounting.services import _next_entry_number, get_single_ledger, post_sale
 from accounting.models import JournalEntry, JournalItem
 from configuration.models import DocumentType
 from artikli.remaris_connector import RemarisConnector
-from orders.models import WarehouseInput
+from orders.models import WarehouseInput, WarehouseInputItem
 from stock.models import (
     Inventory,
     InventoryItem,
@@ -1044,16 +1044,16 @@ def clone_inventory_without_counts(
 
     created = 0
     skipped = 0
-    seen_artikl_ids: set[int] = set()
+    seen_artikl_rm_ids: set[int] = set()
 
     for it in source.items.select_related("artikl", "unit").all():
         if not it.artikl_id:
             skipped += 1
             continue
-        if it.artikl_id in seen_artikl_ids:
+        if it.artikl_id in seen_artikl_rm_ids:
             skipped += 1
             continue
-        seen_artikl_ids.add(it.artikl_id)
+        seen_artikl_rm_ids.add(it.artikl_id)
 
         # Use .create() (not bulk_create) so InventoryItem.save() can auto-fill unit if needed.
         InventoryItem.objects.create(
@@ -1066,3 +1066,85 @@ def clone_inventory_without_counts(
         created += 1
 
     return new_inv, created, skipped
+
+
+@transaction.atomic
+def create_inventory_from_warehouse_inputs(
+    *,
+    inputs: list[WarehouseInput],
+    name: str,
+    created_by,
+    date: datetime | None = None,
+    note: str = "",
+) -> tuple[Inventory, int, int]:
+    """
+    Create an Inventory from selected primke (WarehouseInput), copying artikl list
+    (deduped by artikl) and leaving InventoryItem.quantity NULL for counting.
+
+    Returns: (inventory, items_created, items_skipped)
+    """
+    if not inputs:
+        raise ValidationError("Nema odabranih primki.")
+
+    # Ensure all inputs have the same warehouse.
+    warehouse_rm_ids: set[int] = set()
+    for wi in inputs:
+        if not getattr(wi, "warehouse_id", None) or not getattr(wi, "warehouse", None):
+            raise ValidationError(f"Primka {getattr(wi, 'id', '?')} nema skladište.")
+        if wi.warehouse.rm_id is None:
+            raise ValidationError(f"Primka {getattr(wi, 'id', '?')} nema rm_id skladišta.")
+        warehouse_rm_ids.add(int(wi.warehouse.rm_id))
+
+    if len(warehouse_rm_ids) != 1:
+        raise ValidationError("Odabrane primke moraju biti na istom skladištu.")
+
+    # Use the WarehouseId object (FK to_field=rm_id on Inventory).
+    warehouse = inputs[0].warehouse
+
+    inv = Inventory.objects.create(
+        warehouse=warehouse,
+        date=date or timezone.now(),
+        name=(name or "").strip(),
+        note=(note or "").strip(),
+        opens_at=None,
+        closes_at=None,
+        status=Inventory.Status.OPEN,
+        created_by=created_by,
+        counted_by=None,
+    )
+
+    created = 0
+    skipped = 0
+    seen_artikl_rm_ids: set[int] = set()
+
+    # Preload items for all selected inputs.
+    wi_ids = [wi.id for wi in inputs if getattr(wi, "id", None)]
+    item_qs = WarehouseInputItem.objects.filter(warehouse_input_id__in=wi_ids).select_related(
+        "artikl", "unit_of_measure"
+    )
+
+    for it in item_qs:
+        if not getattr(it, "artikl_id", None) or not getattr(it, "artikl", None):
+            skipped += 1
+            continue
+        if getattr(it.artikl, "rm_id", None) is None:
+            raise ValidationError(
+                f"Stavka primke {getattr(it, 'id', '?')} nema artikl.rm_id (ProductId)."
+            )
+        artikl_rm_id = int(it.artikl.rm_id)
+        if artikl_rm_id in seen_artikl_rm_ids:
+            skipped += 1
+            continue
+        seen_artikl_rm_ids.add(artikl_rm_id)
+
+        # Use .create() (not bulk_create) so InventoryItem.save() can auto-fill unit if needed.
+        InventoryItem.objects.create(
+            inventory=inv,
+            artikl_id=artikl_rm_id,
+            unit_id=getattr(it, "unit_of_measure_id", None),
+            quantity=None,
+            note="",
+        )
+        created += 1
+
+    return inv, created, skipped

@@ -28,7 +28,7 @@ from accounting.services import (
 )
 from artikli.remaris_connector import RemarisConnector
 from stock.models import WarehouseId, WarehouseStock, WarehouseTransfer, WarehouseTransferItem
-from stock.services import get_stock_accounting_config
+from stock.services import create_inventory_from_warehouse_inputs, get_stock_accounting_config
 from stock.services import post_stock_out_multi_warehouse, post_warehouse_input_to_stock
 
 from .models import (
@@ -418,6 +418,7 @@ class WarehouseInputAdmin(admin.ModelAdmin):
         "create_supplier_invoice_from_inputs",
         "create_supplier_pricelist_from_input",
         "create_warehouse_transfer_from_inputs",
+        "create_inventory_from_inputs",
     ]
 
     @admin.display(boolean=True, description="proknjizeno", ordering="stock_move")
@@ -729,6 +730,47 @@ class WarehouseInputAdmin(admin.ModelAdmin):
             self.message_user(request, f"Preskočeno: {skipped}", level=messages.WARNING)
         if errors:
             self.message_user(request, f"Greške: {errors}", level=messages.ERROR)
+
+    @admin.action(description="Kreiraj inventuru iz primki", permissions=["change"])
+    def create_inventory_from_inputs(self, request, queryset):
+        inputs = list(
+            queryset.select_related("warehouse").prefetch_related(
+                "items__artikl",
+                "items__unit_of_measure",
+            )
+        )
+        if not inputs:
+            self.message_user(request, "Nema odabranih primki.", level=messages.WARNING)
+            return
+
+        input_ids = [wi.id for wi in inputs if wi.id]
+        note = "Primke: " + ",".join(str(i) for i in input_ids)
+        try:
+            inv, created, skipped = create_inventory_from_warehouse_inputs(
+                inputs=inputs,
+                name="vina škaulj",
+                created_by=request.user,
+                note=note,
+            )
+        except ValidationError as exc:
+            self.message_user(request, f"Ne mogu kreirati inventuru: {exc}", level=messages.ERROR)
+            return
+        except Exception as exc:
+            self.message_user(request, f"Ne mogu kreirati inventuru: {exc}", level=messages.ERROR)
+            return
+
+        url = reverse("admin:stock_inventory_change", args=[inv.id])
+        self.message_user(
+            request,
+            format_html(
+                'Kreirana inventura: <a href="{}" target="_blank">#{}</a> (stavki: {} / preskočeno: {})',
+                url,
+                inv.id,
+                created,
+                skipped,
+            ),
+            level=messages.SUCCESS,
+        )
 
     @admin.action(description="Send to Remaris", permissions=["change"])
     def send_warehouse_input_to_remaris(self, request, queryset):
