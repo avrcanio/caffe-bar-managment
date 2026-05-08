@@ -1,6 +1,55 @@
 # Agent Instructions (mozzart)
 
-These instructions apply when working in this repository (`/srv/mozzart`).
+These instructions apply when working in this repository. On the production host the stack lives under **`/opt/stacks/mozart`** (historical docs may mention `/srv/mozzart`).
+
+## Production deploy: pull, migrations, restart
+
+SSH na server koristi ključ s lokalnog računala; u `~/.ssh/config` tipičan alias je **`dedicated-hel1`** (prilagodi ako koristiš drugi `Host`).
+
+1. **Spoji se i idi u stack**
+
+   ```bash
+   ssh dedicated-hel1
+   cd /opt/stacks/mozart
+   ```
+
+2. **Git — provjeri granu prije pulla**
+
+   Produkcija treba pratiti **`main`** (ili eksplicitno odabranu granu). Ako si na drugoj grani, `git pull` neće donijeti promjene s `main`.
+
+   ```bash
+   git status
+   git branch -vv
+   # ako treba prebacivanje na main:
+   # git fetch origin && git checkout main && git pull origin main
+   git pull
+   ```
+
+   Backend kod je mountan kao **`./app:/app`** u `web` servisu — nakon `git pull` na hostu kontejner vidi nove datoteke bez rebuilda slike (osim ako nisi mijenjao Dockerfile/dependencies).
+
+3. **Migracije (Django)**
+
+   `manage.py` u kontejneru je u **`/app`**. Kontejner se zove **`mozzart`** (Compose servis: `web`).
+
+   ```bash
+   docker exec mozzart python manage.py migrate --noinput
+   ```
+
+4. **Restart servisa**
+
+   Nakon deploya ili promjene koda koji utječe na worker-e:
+
+   ```bash
+   docker restart mozzart mozzart-celery-worker mozzart-celery-beat
+   ```
+
+5. **Sve u jednom (s lokalnog računala)**
+
+   ```bash
+   ssh dedicated-hel1 'cd /opt/stacks/mozart && git pull && docker exec mozzart python manage.py migrate --noinput && docker restart mozzart mozzart-celery-worker mozzart-celery-beat'
+   ```
+
+   Prije toga na serveru potvrdi da si na željenoj grani (`main` ili druga).
 
 ## Operating Principles
 
