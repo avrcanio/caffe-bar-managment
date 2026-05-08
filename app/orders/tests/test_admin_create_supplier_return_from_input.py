@@ -194,3 +194,50 @@ class CreateSupplierReturnFromInputTests(TestCase):
         sr = SupplierReturn.objects.get(source_warehouse_input=self.input)
         self.assertEqual(sr.stock_move_id, return_move.id)
         self.assertEqual(sr.items.count(), 1)
+
+    @patch("orders.admin.post_supplier_return_charge_from_input")
+    @patch("orders.admin.post_stock_out_multi_warehouse")
+    def test_second_run_skips_and_names_supplier_return(self, mock_post_stock_out, mock_fin):
+        return_move = StockMove.objects.create(
+            move_type=StockMove.MoveType.OUT,
+            date=timezone.now(),
+            reference="Povrat test",
+        )
+        StockMoveLine.objects.create(
+            move=return_move,
+            warehouse=self.warehouse,
+            artikl=self.artikl,
+            quantity=Decimal("2.0000"),
+            unit_cost=Decimal("1.0000"),
+        )
+        mock_post_stock_out.return_value = return_move
+
+        request = self._get_request()
+        item_id = self.input.items.first().id
+        payload = {
+            self.input.id: {item_id: Decimal("2.0000")},
+        }
+        wh_payload = {self.input.id: {item_id: {6: Decimal("2.0000")}}}
+
+        self.admin._execute_supplier_return_from_inputs(
+            request=request,
+            inputs=[self.input],
+            line_quantities_by_input_id=payload,
+            warehouse_quantities_by_input_id=wh_payload,
+        )
+        self.assertEqual(mock_post_stock_out.call_count, 1)
+        sr = SupplierReturn.objects.get(source_warehouse_input=self.input)
+
+        self.admin._execute_supplier_return_from_inputs(
+            request=request,
+            inputs=[self.input],
+            line_quantities_by_input_id=payload,
+            warehouse_quantities_by_input_id=wh_payload,
+        )
+        self.assertEqual(mock_post_stock_out.call_count, 1)
+        storage = request._messages
+        texts = [m.message for m in storage]
+        self.assertTrue(
+            any(f"Povrati dobavljaču, zapis #{sr.id}" in t for t in texts),
+            texts,
+        )

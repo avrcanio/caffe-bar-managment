@@ -27,7 +27,13 @@ from accounting.services import (
     post_warehouse_input_to_journal,
 )
 from artikli.remaris_connector import RemarisConnector
-from stock.models import WarehouseId, WarehouseStock, WarehouseTransfer, WarehouseTransferItem
+from stock.models import (
+    SupplierReturn,
+    WarehouseId,
+    WarehouseStock,
+    WarehouseTransfer,
+    WarehouseTransferItem,
+)
 from stock.services import get_stock_accounting_config
 from stock.services import (
     post_stock_out_multi_warehouse,
@@ -532,6 +538,27 @@ class WarehouseInputAdmin(admin.ModelAdmin):
             context,
         )
 
+    @staticmethod
+    def _existing_supplier_return_for_primka(warehouse_input: WarehouseInput):
+        """Posted supplier return row in stock (canonical); excludes cancelled."""
+        sr = (
+            SupplierReturn.objects.filter(source_warehouse_input_id=warehouse_input.pk)
+            .exclude(status=SupplierReturn.Status.CANCELLED)
+            .order_by("-id")
+            .first()
+        )
+        if sr:
+            return sr
+        if warehouse_input.supplier_return_stock_move_id:
+            return (
+                SupplierReturn.objects.filter(
+                    stock_move_id=warehouse_input.supplier_return_stock_move_id
+                )
+                .exclude(status=SupplierReturn.Status.CANCELLED)
+                .first()
+            )
+        return None
+
     def _execute_supplier_return_from_inputs(
         self,
         *,
@@ -546,13 +573,24 @@ class WarehouseInputAdmin(admin.ModelAdmin):
         failed = 0
 
         for warehouse_input in inputs:
-            if warehouse_input.supplier_return_stock_move_id:
+            existing_sr = self._existing_supplier_return_for_primka(warehouse_input)
+            if warehouse_input.supplier_return_stock_move_id or existing_sr:
                 skipped += 1
-                self.message_user(
-                    request,
-                    f"Primka {warehouse_input.id}: povrat je već napravljen.",
-                    level=messages.WARNING,
-                )
+                if existing_sr:
+                    self.message_user(
+                        request,
+                        f"Primka {warehouse_input.id}: povrat je već napravljen "
+                        f"(Stock → Povrati dobavljaču, zapis #{existing_sr.id}).",
+                        level=messages.WARNING,
+                    )
+                else:
+                    self.message_user(
+                        request,
+                        f"Primka {warehouse_input.id}: već je vezano skladišno kretanje povrata "
+                        f"(StockMove #{warehouse_input.supplier_return_stock_move_id}); "
+                        f"provjeri Stock → Povrati dobavljaču ili administratora.",
+                        level=messages.WARNING,
+                    )
                 continue
             if not warehouse_input.stock_move_id:
                 skipped += 1
