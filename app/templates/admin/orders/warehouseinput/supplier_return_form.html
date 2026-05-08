@@ -4,6 +4,11 @@
 {% block content %}
   <div id="content-main">
     <p>Odabrane primke za povrat dobavljaču:</p>
+    <p class="help">
+      Spremanjem se u modulu <strong>Stock → Povrati dobavljaču</strong> kreira <strong>draft</strong> dokument.
+      Skladišno knjiženje i financijsko terećenje (ako postoji proknjiženi ulazni račun) izvršavaju se tamo akcijom
+      <strong>„Proknjiži povrat u skladište”</strong>.
+    </p>
     <ul>
       {% for wi in inputs %}
         <li>

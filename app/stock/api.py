@@ -15,6 +15,7 @@ from django.contrib.auth import get_user_model
 from artikli.models import Artikl, UnitOfMeasureData
 from artikli.remaris_connector import RemarisConnector
 from contacts.models import Supplier
+from orders.models import WarehouseInputItem
 from stock.models import Inventory, InventoryItem, SupplierReturn, SupplierReturnItem, WarehouseId
 from stock.models import WarehouseStock
 from stock.services import post_supplier_return_to_stock
@@ -199,16 +200,35 @@ class SupplierReturnItemSerializer(serializers.ModelSerializer):
     )
     unit_name = serializers.CharField(source="unit.name", read_only=True)
 
+    warehouse = serializers.SlugRelatedField(
+        slug_field="rm_id",
+        queryset=WarehouseId.objects.all(),
+        allow_null=True,
+        required=False,
+    )
+    warehouse_name = serializers.SerializerMethodField()
+
+    def get_warehouse_name(self, obj):
+        return obj.warehouse.name if obj.warehouse_id else None
+    source_input_item = serializers.PrimaryKeyRelatedField(
+        queryset=WarehouseInputItem.objects.all(),
+        allow_null=True,
+        required=False,
+    )
+
     class Meta:
         model = SupplierReturnItem
         fields = [
             "id",
             "supplier_return",
+            "warehouse",
+            "warehouse_name",
             "artikl",
             "artikl_name",
             "quantity",
             "unit",
             "unit_name",
+            "source_input_item",
             "note",
         ]
 

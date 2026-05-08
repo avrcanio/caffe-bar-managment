@@ -30,6 +30,10 @@ class PurchaseOrder(models.Model):
         verbose_name="dobavljač",
     )
     ordered_at = models.DateTimeField(verbose_name="datum narudžbe")
+    updated_at = models.DateTimeField(
+        auto_now=True,
+        verbose_name="zadnja izmjena",
+    )
     status = models.CharField(
         max_length=20,
         choices=STATUS_CHOICES,

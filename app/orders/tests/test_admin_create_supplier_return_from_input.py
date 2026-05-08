@@ -9,16 +9,22 @@ from django.test import RequestFactory, TestCase
 from django.utils import timezone
 
 from accounting.models import Account, JournalEntry, Ledger
+from artikli.models import Artikl
+from configuration.models import DocumentType
 from contacts.models import Supplier
 from orders.admin import WarehouseInputAdmin
 from orders.models import PurchaseOrder, SupplierInvoice, WarehouseInput, WarehouseInputItem
-from stock.models import StockMove, StockMoveLine, SupplierReturn, WarehouseId
-from artikli.models import Artikl
-from configuration.models import DocumentType
+from stock.models import StockMove, SupplierReturn, SupplierReturnItem, WarehouseId
+from stock.services import post_supplier_return_to_stock
 
 
 class CreateSupplierReturnFromInputTests(TestCase):
     def setUp(self):
+        # Stale test DBs can lack artikli columns that select_related pulls on PurchaseOrder.save().
+        self._p_recalc = patch.object(PurchaseOrder, "recalculate_totals", lambda self: None)
+        self._p_recalc.start()
+        self.addCleanup(self._p_recalc.stop)
+
         self.factory = RequestFactory()
         self.site = AdminSite()
         self.admin = WarehouseInputAdmin(WarehouseInput, self.site)
@@ -93,45 +99,60 @@ class CreateSupplierReturnFromInputTests(TestCase):
         self.assertIn("supplier-return", response.url)
         self.assertIn(f"ids={self.input.id}", response.url)
 
-    @patch("orders.admin.post_supplier_return_charge_from_input")
-    @patch("orders.admin.post_stock_out_multi_warehouse")
-    def test_creates_only_stock_return_when_no_posted_invoice(self, mock_post_stock_out, mock_fin):
-        return_move = StockMove.objects.create(
-            move_type=StockMove.MoveType.OUT,
-            date=timezone.now(),
-            reference="Povrat test",
-        )
-        StockMoveLine.objects.create(
-            move=return_move,
-            warehouse=self.warehouse,
-            artikl=self.artikl,
-            quantity=Decimal("2.0000"),
-            unit_cost=Decimal("1.0000"),
-        )
-        mock_post_stock_out.return_value = return_move
-
+    def test_creates_draft_supplier_return_only(self):
         request = self._get_request()
+        item = self.input.items.first()
         self.admin._execute_supplier_return_from_inputs(
             request=request,
             inputs=[self.input],
-            line_quantities_by_input_id={self.input.id: {self.input.items.first().id: Decimal("2.0000")}},
-            warehouse_quantities_by_input_id={self.input.id: {self.input.items.first().id: {6: Decimal("2.0000")}}},
+            line_quantities_by_input_id={self.input.id: {item.id: Decimal("2.0000")}},
+            warehouse_quantities_by_input_id={self.input.id: {item.id: {6: Decimal("2.0000")}}},
         )
 
         self.input.refresh_from_db()
-        self.assertEqual(self.input.supplier_return_stock_move_id, return_move.id)
+        self.assertIsNone(self.input.supplier_return_stock_move_id)
         self.assertIsNone(self.input.supplier_return_journal_entry_id)
-        mock_post_stock_out.assert_called_once()
-        mock_fin.assert_not_called()
 
         sr = SupplierReturn.objects.get(source_warehouse_input=self.input)
-        self.assertEqual(sr.stock_move_id, return_move.id)
-        self.assertEqual(sr.status, SupplierReturn.Status.POSTED)
+        self.assertEqual(sr.status, SupplierReturn.Status.DRAFT)
+        self.assertIsNone(sr.stock_move_id)
         self.assertEqual(sr.items.count(), 1)
+        sri = sr.items.get()
+        self.assertEqual(sri.quantity, Decimal("2.0000"))
+        self.assertEqual(sri.warehouse_id, 6)
+        self.assertEqual(sri.source_input_item_id, item.id)
 
-    @patch("orders.admin.post_supplier_return_charge_from_input")
-    @patch("orders.admin.post_stock_out_multi_warehouse")
-    def test_creates_financial_charge_when_posted_supplier_invoice_exists(self, mock_post_stock_out, mock_fin):
+    def test_second_run_skips_when_draft_exists(self):
+        request = self._get_request()
+        item = self.input.items.first()
+        payload = {
+            self.input.id: {item.id: Decimal("2.0000")},
+        }
+        wh_payload = {self.input.id: {item.id: {6: Decimal("2.0000")}}}
+
+        self.admin._execute_supplier_return_from_inputs(
+            request=request,
+            inputs=[self.input],
+            line_quantities_by_input_id=payload,
+            warehouse_quantities_by_input_id=wh_payload,
+        )
+        sr = SupplierReturn.objects.get(source_warehouse_input=self.input)
+
+        self.admin._execute_supplier_return_from_inputs(
+            request=request,
+            inputs=[self.input],
+            line_quantities_by_input_id=payload,
+            warehouse_quantities_by_input_id=wh_payload,
+        )
+
+        storage = request._messages
+        texts = [m.message for m in storage]
+        self.assertTrue(any(f"Povrata dobavljaču #{sr.id}" in t for t in texts), texts)
+        self.assertEqual(SupplierReturn.objects.filter(source_warehouse_input=self.input).count(), 1)
+
+    @patch("stock.services.post_supplier_return_charge_from_input")
+    @patch("stock.services.post_stock_out_multi_warehouse")
+    def test_post_to_stock_finance_when_posted_invoice(self, mock_multi, mock_charge):
         doc_type = DocumentType.objects.create(
             name="Ulazni racun",
             code="UR",
@@ -161,83 +182,40 @@ class CreateSupplierReturnFromInputTests(TestCase):
             date=timezone.now(),
             reference="Povrat test",
         )
-        StockMoveLine.objects.create(
-            move=return_move,
-            warehouse=self.warehouse,
-            artikl=self.artikl,
-            quantity=Decimal("2.0000"),
-            unit_cost=Decimal("1.0000"),
-        )
         charge_entry = JournalEntry.objects.create(
             ledger=self.ledger,
             number=2,
             date=timezone.localdate(),
             status=JournalEntry.Status.POSTED,
         )
-        mock_post_stock_out.return_value = return_move
-        mock_fin.return_value = charge_entry
+        mock_multi.return_value = return_move
+        mock_charge.return_value = charge_entry
 
-        request = self._get_request()
-        self.admin._execute_supplier_return_from_inputs(
-            request=request,
-            inputs=[self.input],
-            line_quantities_by_input_id={self.input.id: {self.input.items.first().id: Decimal("2.0000")}},
-            warehouse_quantities_by_input_id={self.input.id: {self.input.items.first().id: {6: Decimal("2.0000")}}},
-        )
-
-        self.input.refresh_from_db()
-        self.assertEqual(self.input.supplier_return_stock_move_id, return_move.id)
-        self.assertEqual(self.input.supplier_return_journal_entry_id, charge_entry.id)
-        mock_post_stock_out.assert_called_once()
-        mock_fin.assert_called_once()
-
-        sr = SupplierReturn.objects.get(source_warehouse_input=self.input)
-        self.assertEqual(sr.stock_move_id, return_move.id)
-        self.assertEqual(sr.items.count(), 1)
-
-    @patch("orders.admin.post_supplier_return_charge_from_input")
-    @patch("orders.admin.post_stock_out_multi_warehouse")
-    def test_second_run_skips_and_names_supplier_return(self, mock_post_stock_out, mock_fin):
-        return_move = StockMove.objects.create(
-            move_type=StockMove.MoveType.OUT,
+        item = self.input.items.first()
+        sr = SupplierReturn.objects.create(
+            supplier=self.supplier,
+            warehouse=self.warehouse,
             date=timezone.now(),
-            reference="Povrat test",
+            reference="R",
+            status=SupplierReturn.Status.DRAFT,
+            source_warehouse_input=self.input,
+            created_by=self.user,
         )
-        StockMoveLine.objects.create(
-            move=return_move,
+        SupplierReturnItem.objects.create(
+            supplier_return=sr,
             warehouse=self.warehouse,
             artikl=self.artikl,
             quantity=Decimal("2.0000"),
-            unit_cost=Decimal("1.0000"),
+            source_input_item=item,
         )
-        mock_post_stock_out.return_value = return_move
 
-        request = self._get_request()
-        item_id = self.input.items.first().id
-        payload = {
-            self.input.id: {item_id: Decimal("2.0000")},
-        }
-        wh_payload = {self.input.id: {item_id: {6: Decimal("2.0000")}}}
+        post_supplier_return_to_stock(supplier_return=sr, posted_by=self.user)
 
-        self.admin._execute_supplier_return_from_inputs(
-            request=request,
-            inputs=[self.input],
-            line_quantities_by_input_id=payload,
-            warehouse_quantities_by_input_id=wh_payload,
-        )
-        self.assertEqual(mock_post_stock_out.call_count, 1)
-        sr = SupplierReturn.objects.get(source_warehouse_input=self.input)
-
-        self.admin._execute_supplier_return_from_inputs(
-            request=request,
-            inputs=[self.input],
-            line_quantities_by_input_id=payload,
-            warehouse_quantities_by_input_id=wh_payload,
-        )
-        self.assertEqual(mock_post_stock_out.call_count, 1)
-        storage = request._messages
-        texts = [m.message for m in storage]
-        self.assertTrue(
-            any(f"Povrati dobavljaču, zapis #{sr.id}" in t for t in texts),
-            texts,
-        )
+        mock_multi.assert_called_once()
+        mock_charge.assert_called_once()
+        self.input.refresh_from_db()
+        self.assertEqual(self.input.supplier_return_stock_move_id, return_move.id)
+        self.assertEqual(self.input.supplier_return_journal_entry_id, charge_entry.id)
+        sr.refresh_from_db()
+        self.assertEqual(sr.status, SupplierReturn.Status.POSTED)
+        self.assertEqual(sr.stock_move_id, return_move.id)

@@ -23,23 +23,19 @@ import requests
 from configuration.models import CompanyProfile, OrderEmailTemplate
 from accounting.services import (
     compute_purchase_totals_from_items,
-    post_supplier_return_charge_from_input,
     post_warehouse_input_to_journal,
 )
 from artikli.remaris_connector import RemarisConnector
 from stock.models import (
     SupplierReturn,
+    SupplierReturnItem,
     WarehouseId,
     WarehouseStock,
     WarehouseTransfer,
     WarehouseTransferItem,
 )
 from stock.services import get_stock_accounting_config
-from stock.services import (
-    post_stock_out_multi_warehouse,
-    post_warehouse_input_to_stock,
-    record_supplier_return_for_primka_stock_move,
-)
+from stock.services import post_warehouse_input_to_stock
 
 from .models import (
     PurchaseOrder,
@@ -438,7 +434,10 @@ class WarehouseInputAdmin(admin.ModelAdmin):
     def has_supplier_invoice(self, obj):
         return obj.supplier_invoices.exists()
 
-    @admin.action(description="Kreiraj povrat dobavljacu", permissions=["change"])
+    @admin.action(
+        description="Kreiraj draft povrata dobavljaču (proknjiži u Stock → Povrati dobavljaču)",
+        permissions=["change"],
+    )
     def create_supplier_return_from_inputs(self, request, queryset):
         input_ids = list(queryset.values_list("id", flat=True))
         if not input_ids:
@@ -540,7 +539,7 @@ class WarehouseInputAdmin(admin.ModelAdmin):
 
     @staticmethod
     def _existing_supplier_return_for_primka(warehouse_input: WarehouseInput):
-        """Posted supplier return row in stock (canonical); excludes cancelled."""
+        """SupplierReturn u stocku (draft ili posted); isključeno otkazano."""
         sr = (
             SupplierReturn.objects.filter(source_warehouse_input_id=warehouse_input.pk)
             .exclude(status=SupplierReturn.Status.CANCELLED)
@@ -567,30 +566,34 @@ class WarehouseInputAdmin(admin.ModelAdmin):
         line_quantities_by_input_id,
         warehouse_quantities_by_input_id,
     ):
-        created_stock = 0
-        created_finance = 0
+        created_drafts = 0
         skipped = 0
         failed = 0
 
         for warehouse_input in inputs:
             existing_sr = self._existing_supplier_return_for_primka(warehouse_input)
-            if warehouse_input.supplier_return_stock_move_id or existing_sr:
+            if existing_sr:
                 skipped += 1
-                if existing_sr:
-                    self.message_user(
-                        request,
-                        f"Primka {warehouse_input.id}: povrat je već napravljen "
-                        f"(Stock → Povrati dobavljaču, zapis #{existing_sr.id}).",
-                        level=messages.WARNING,
-                    )
-                else:
-                    self.message_user(
-                        request,
-                        f"Primka {warehouse_input.id}: već je vezano skladišno kretanje povrata "
-                        f"(StockMove #{warehouse_input.supplier_return_stock_move_id}); "
-                        f"provjeri Stock → Povrati dobavljaču ili administratora.",
-                        level=messages.WARNING,
-                    )
+                st = (
+                    "draft (proknjiži u Stock → Povrati dobavljaču)"
+                    if existing_sr.status == SupplierReturn.Status.DRAFT
+                    else "već proknjižen"
+                )
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id}: postoji povrat dobavljaču #{existing_sr.id} ({st}).",
+                    level=messages.WARNING,
+                )
+                continue
+            if warehouse_input.supplier_return_stock_move_id:
+                skipped += 1
+                self.message_user(
+                    request,
+                    f"Primka {warehouse_input.id}: već je vezano skladišno kretanje povrata "
+                    f"(StockMove #{warehouse_input.supplier_return_stock_move_id}) bez zapisa "
+                    f"Povrata dobavljaču — obradi ručno ili kontaktiraj administratora.",
+                    level=messages.WARNING,
+                )
                 continue
             if not warehouse_input.stock_move_id:
                 skipped += 1
@@ -609,7 +612,6 @@ class WarehouseInputAdmin(admin.ModelAdmin):
                 )
                 continue
 
-            input_quantities = line_quantities_by_input_id.get(warehouse_input.id) or {}
             input_wh_quantities = warehouse_quantities_by_input_id.get(warehouse_input.id) or {}
             item_map = {it.id: it for it in warehouse_input.items.all()}
             wh_ids = {
@@ -631,7 +633,12 @@ class WarehouseInputAdmin(admin.ModelAdmin):
                     if not wh_obj:
                         continue
                     items_payload.append(
-                        {"warehouse": wh_obj, "artikl": it.artikl, "quantity": qty}
+                        {
+                            "warehouse": wh_obj,
+                            "artikl": it.artikl,
+                            "quantity": qty,
+                            "source_input_item_id": item_id,
+                        }
                     )
             if not items_payload:
                 skipped += 1
@@ -656,43 +663,31 @@ class WarehouseInputAdmin(admin.ModelAdmin):
 
             try:
                 with transaction.atomic():
-                    move = post_stock_out_multi_warehouse(
-                        items=items_payload,
-                        move_date=timezone.now(),
-                        reference=f"Povrat dobavljaču primka #{warehouse_input.id}",
-                        note=f"Povrat dobavljaču za primku {warehouse_input.id}",
+                    wh_names = sorted({row["warehouse"].name for row in items_payload})
+                    note_extra = ""
+                    if len(wh_names) > 1:
+                        note_extra = f"Više skladišta: {', '.join(wh_names)}."
+                    supplier_return = SupplierReturn.objects.create(
+                        supplier=warehouse_input.supplier,
+                        warehouse=warehouse_input.warehouse,
+                        date=timezone.now(),
+                        reference=f"Povrat iz primke #{warehouse_input.id}",
+                        note=note_extra.strip(),
+                        status=SupplierReturn.Status.DRAFT,
+                        source_warehouse_input=warehouse_input,
+                        created_by=request.user,
                     )
-                    warehouse_input.supplier_return_stock_move = move
-                    created_stock += 1
-
-                    try:
-                        record_supplier_return_for_primka_stock_move(
-                            warehouse_input=warehouse_input,
-                            stock_move=move,
-                            created_by=request.user,
+                    for row in items_payload:
+                        wit = item_map.get(row["source_input_item_id"])
+                        SupplierReturnItem.objects.create(
+                            supplier_return=supplier_return,
+                            warehouse=row["warehouse"],
+                            artikl=row["artikl"],
+                            quantity=row["quantity"],
+                            unit=wit.unit_of_measure if wit else None,
+                            source_input_item_id=row["source_input_item_id"],
                         )
-                    except Exception as exc:
-                        self.message_user(
-                            request,
-                            f"Primka {warehouse_input.id}: skladišni povrat OK, "
-                            f"ali zapis u Povrat dobavljaču nije kreiran ({exc}).",
-                            level=messages.WARNING,
-                        )
-
-                    update_fields = ["supplier_return_stock_move"]
-                    if posted_invoices:
-                        entry = post_supplier_return_charge_from_input(
-                            supplier_invoice=posted_invoices[0],
-                            warehouse_input=warehouse_input,
-                            line_quantities_by_item_id=input_quantities,
-                            description=f"Financijsko terecenje povrata primke #{warehouse_input.id}",
-                            posted_by=request.user,
-                        )
-                        warehouse_input.supplier_return_journal_entry = entry
-                        update_fields.append("supplier_return_journal_entry")
-                        created_finance += 1
-
-                    warehouse_input.save(update_fields=update_fields)
+                    created_drafts += 1
             except Exception as exc:
                 failed += 1
                 self.message_user(
@@ -701,10 +696,11 @@ class WarehouseInputAdmin(admin.ModelAdmin):
                     level=messages.ERROR,
                 )
 
-        if created_stock:
+        if created_drafts:
             self.message_user(
                 request,
-                f"Kreirano povrata: {created_stock}. Financijskih terećenja: {created_finance}.",
+                f"Kreirano povrata dobavljaču (draft): {created_drafts}. "
+                f"Proknjiži u adminu: Stock → Povrati dobavljaču → akcija „Proknjiži povrat u skladište”.",
                 level=messages.SUCCESS,
             )
         if skipped:

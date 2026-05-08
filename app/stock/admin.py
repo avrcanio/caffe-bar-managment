@@ -1503,8 +1503,9 @@ class StockAccountingConfigAdmin(admin.ModelAdmin):
 class SupplierReturnItemInline(admin.TabularInline):
     model = SupplierReturnItem
     extra = 0
-    autocomplete_fields = ("artikl", "unit")
-    fields = ("artikl", "quantity", "unit", "note")
+    autocomplete_fields = ("artikl", "unit", "warehouse")
+    raw_id_fields = ("source_input_item",)
+    fields = ("warehouse", "artikl", "quantity", "unit", "source_input_item", "note")
 
     def has_add_permission(self, request, obj=None):
         if obj and obj.status != SupplierReturn.Status.DRAFT:

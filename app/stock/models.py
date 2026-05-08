@@ -770,6 +770,15 @@ class SupplierReturnItem(models.Model):
         related_name="items",
         verbose_name="Povrat",
     )
+    warehouse = models.ForeignKey(
+        "stock.WarehouseId",
+        to_field="rm_id",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="supplier_return_items",
+        verbose_name="Skladište stavke",
+    )
     artikl = models.ForeignKey(
         "artikli.Artikl",
         to_field="rm_id",
@@ -778,6 +787,14 @@ class SupplierReturnItem(models.Model):
         on_delete=models.SET_NULL,
         related_name="supplier_return_items",
         verbose_name="Artikl",
+    )
+    source_input_item = models.ForeignKey(
+        "orders.WarehouseInputItem",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="supplier_return_items",
+        verbose_name="Stavka primke (izvor)",
     )
     quantity = models.DecimalField(
         max_digits=12,

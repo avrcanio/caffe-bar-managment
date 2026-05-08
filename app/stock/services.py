@@ -10,7 +10,12 @@ from django.db.models import DecimalField, F, Sum
 from django.db.models.expressions import ExpressionWrapper
 
 from artikli.models import Artikl
-from accounting.services import _next_entry_number, get_single_ledger, post_sales_cash
+from accounting.services import (
+    _next_entry_number,
+    get_single_ledger,
+    post_sales_cash,
+    post_supplier_return_charge_from_input,
+)
 from accounting.models import JournalEntry, JournalItem
 from configuration.models import DocumentType
 from artikli.remaris_connector import RemarisConnector
@@ -978,40 +983,77 @@ def post_supplier_return_to_stock(*, supplier_return: SupplierReturn, posted_by=
     if supplier_return.stock_move_id:
         raise ValidationError("Povrat je već proknjižen.")
     if not supplier_return.warehouse_id:
-        raise ValidationError("Povrat mora imati skladište.")
+        raise ValidationError("Povrat mora imati skladište (zaglavlje).")
+
+    wi = supplier_return.source_warehouse_input
+    if wi:
+        posted_invoices = list(
+            wi.supplier_invoices.filter(journal_entry__isnull=False).order_by("id")
+        )
+        if len(posted_invoices) > 1:
+            raise ValidationError(
+                "Primka je vezana na više proknjiženih ulaznih računa; "
+                "financijsko terećenje nije jednoznačno."
+            )
 
     items = list(
         SupplierReturnItem.objects.filter(supplier_return=supplier_return)
-        .select_related("artikl")
+        .select_related("artikl", "warehouse")
         .all()
     )
     if not items:
         raise ValidationError("Povrat nema stavki.")
 
-    payload = []
+    items_payload: list[dict] = []
     for it in items:
         if not it.artikl_id:
             raise ValidationError("Stavka povrata mora imati artikl.")
         qty = Decimal(str(it.quantity))
         if qty <= 0:
             raise ValidationError("Količina na stavci povrata mora biti > 0.")
-        payload.append({"artikl": it.artikl, "quantity": qty})
+        wh = it.warehouse or supplier_return.warehouse
+        if not wh:
+            raise ValidationError("Stavka povrata mora imati skladište ili zaglavlje skladište.")
+        items_payload.append({"warehouse": wh, "artikl": it.artikl, "quantity": qty})
 
-    move = post_stock_out(
-        warehouse=supplier_return.warehouse,
-        items=payload,
+    move = post_stock_out_multi_warehouse(
+        items=items_payload,
         move_date=supplier_return.date,
         reference=supplier_return.reference or f"Povrat dobavljaču #{supplier_return.id}",
         note=supplier_return.note or "",
-        purpose=StockMove.Purpose.SUPPLIER_RETURN,
-        auto_cogs=False,
-        posted_by=posted_by,
     )
+    StockMove.objects.filter(pk=move.pk).update(purpose=StockMove.Purpose.SUPPLIER_RETURN)
 
     supplier_return.stock_move = move
     supplier_return.status = SupplierReturn.Status.POSTED
     supplier_return.posted_at = timezone.now()
     supplier_return.save(update_fields=["stock_move", "status", "posted_at"])
+
+    if wi:
+        wi.supplier_return_stock_move = move
+        update_fields = ["supplier_return_stock_move"]
+        if not wi.supplier_return_journal_entry_id:
+            posted_invoices = list(
+                wi.supplier_invoices.filter(journal_entry__isnull=False).order_by("id")
+            )
+            line_qty: dict[int, Decimal] = {}
+            for sri in SupplierReturnItem.objects.filter(supplier_return=supplier_return).only(
+                "source_input_item_id", "quantity"
+            ):
+                if sri.source_input_item_id:
+                    aid = sri.source_input_item_id
+                    line_qty[aid] = line_qty.get(aid, Decimal("0.0000")) + Decimal(str(sri.quantity))
+            if len(posted_invoices) == 1 and line_qty:
+                entry = post_supplier_return_charge_from_input(
+                    supplier_invoice=posted_invoices[0],
+                    warehouse_input=wi,
+                    line_quantities_by_item_id=line_qty,
+                    description=f"Financijsko terecenje povrata primke #{wi.id}",
+                    posted_by=posted_by,
+                )
+                wi.supplier_return_journal_entry = entry
+                update_fields.append("supplier_return_journal_entry")
+        wi.save(update_fields=update_fields)
 
     return move
 
