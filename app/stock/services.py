@@ -945,6 +945,91 @@ def post_supplier_return_to_stock(*, supplier_return: SupplierReturn, posted_by=
 
 
 @transaction.atomic
+def record_supplier_return_for_primka_stock_move(
+    *,
+    warehouse_input: WarehouseInput,
+    stock_move: StockMove,
+    created_by=None,
+) -> SupplierReturn:
+    """
+    Zapis u SupplierReturn nakon što je povrat iz primke već proknjižen kao StockMove
+    (npr. post_stock_out_multi_warehouse). Ne radi drugi izlaz iz zalihe.
+    """
+    if not warehouse_input or not stock_move:
+        raise ValidationError("Primka i skladišno kretanje su obavezni.")
+    if stock_move.move_type != StockMove.MoveType.OUT:
+        raise ValidationError("Očekuje se OUT kretanje za povrat.")
+
+    existing = SupplierReturn.objects.filter(stock_move=stock_move).first()
+    if existing:
+        return existing
+
+    line_qs = stock_move.lines.filter(artikl_id__isnull=False)
+    if not line_qs.exists():
+        raise ValidationError("Kretanje nema stavaka artikala za zapis povrata dobavljaču.")
+
+    header_wh = warehouse_input.warehouse
+    if not header_wh:
+        first_line = (
+            stock_move.lines.select_related("warehouse")
+            .filter(warehouse_id__isnull=False)
+            .first()
+        )
+        header_wh = first_line.warehouse if first_line else None
+    if not header_wh:
+        raise ValidationError("Nedostaje skladište za zaglavlje povrata (primka nema warehouse).")
+
+    wh_names = list(
+        stock_move.lines.filter(warehouse_id__isnull=False)
+        .values_list("warehouse__name", flat=True)
+        .distinct()
+    )
+    note_extra = ""
+    if len(wh_names) > 1:
+        note_extra = f" Više skladišta: {', '.join(wh_names)}."
+
+    supplier_return = SupplierReturn.objects.create(
+        supplier=warehouse_input.supplier,
+        warehouse=header_wh,
+        date=stock_move.date,
+        reference=f"Povrat iz primke #{warehouse_input.id}",
+        note=(stock_move.note or "").strip() + note_extra,
+        status=SupplierReturn.Status.POSTED,
+        stock_move=stock_move,
+        posted_at=timezone.now(),
+        created_by=created_by,
+        source_warehouse_input=warehouse_input,
+    )
+
+    qty_by_artikl: dict[int, Decimal] = {}
+    artikl_by_id: dict[int, Artikl] = {}
+    for line in stock_move.lines.select_related("artikl").all():
+        if not line.artikl_id:
+            continue
+        q = Decimal(str(line.quantity))
+        if q <= 0:
+            continue
+        aid = line.artikl_id
+        qty_by_artikl[aid] = qty_by_artikl.get(aid, Decimal("0.0000")) + q
+        artikl_by_id[aid] = line.artikl
+
+    for aid, total_qty in qty_by_artikl.items():
+        SupplierReturnItem.objects.create(
+            supplier_return=supplier_return,
+            artikl=artikl_by_id[aid],
+            quantity=total_qty,
+            note="",
+        )
+
+    if stock_move.purpose != StockMove.Purpose.SUPPLIER_RETURN:
+        StockMove.objects.filter(pk=stock_move.pk).update(
+            purpose=StockMove.Purpose.SUPPLIER_RETURN,
+        )
+
+    return supplier_return
+
+
+@transaction.atomic
 def post_sale(
     *,
     warehouse=None,

@@ -12,7 +12,7 @@ from accounting.models import Account, JournalEntry, Ledger
 from contacts.models import Supplier
 from orders.admin import WarehouseInputAdmin
 from orders.models import PurchaseOrder, SupplierInvoice, WarehouseInput, WarehouseInputItem
-from stock.models import StockMove, WarehouseId
+from stock.models import StockMove, StockMoveLine, SupplierReturn, WarehouseId
 from artikli.models import Artikl
 from configuration.models import DocumentType
 
@@ -101,6 +101,13 @@ class CreateSupplierReturnFromInputTests(TestCase):
             date=timezone.now(),
             reference="Povrat test",
         )
+        StockMoveLine.objects.create(
+            move=return_move,
+            warehouse=self.warehouse,
+            artikl=self.artikl,
+            quantity=Decimal("2.0000"),
+            unit_cost=Decimal("1.0000"),
+        )
         mock_post_stock_out.return_value = return_move
 
         request = self._get_request()
@@ -116,6 +123,11 @@ class CreateSupplierReturnFromInputTests(TestCase):
         self.assertIsNone(self.input.supplier_return_journal_entry_id)
         mock_post_stock_out.assert_called_once()
         mock_fin.assert_not_called()
+
+        sr = SupplierReturn.objects.get(source_warehouse_input=self.input)
+        self.assertEqual(sr.stock_move_id, return_move.id)
+        self.assertEqual(sr.status, SupplierReturn.Status.POSTED)
+        self.assertEqual(sr.items.count(), 1)
 
     @patch("orders.admin.post_supplier_return_charge_from_input")
     @patch("orders.admin.post_stock_out_multi_warehouse")
@@ -149,6 +161,13 @@ class CreateSupplierReturnFromInputTests(TestCase):
             date=timezone.now(),
             reference="Povrat test",
         )
+        StockMoveLine.objects.create(
+            move=return_move,
+            warehouse=self.warehouse,
+            artikl=self.artikl,
+            quantity=Decimal("2.0000"),
+            unit_cost=Decimal("1.0000"),
+        )
         charge_entry = JournalEntry.objects.create(
             ledger=self.ledger,
             number=2,
@@ -171,3 +190,7 @@ class CreateSupplierReturnFromInputTests(TestCase):
         self.assertEqual(self.input.supplier_return_journal_entry_id, charge_entry.id)
         mock_post_stock_out.assert_called_once()
         mock_fin.assert_called_once()
+
+        sr = SupplierReturn.objects.get(source_warehouse_input=self.input)
+        self.assertEqual(sr.stock_move_id, return_move.id)
+        self.assertEqual(sr.items.count(), 1)

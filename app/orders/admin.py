@@ -29,7 +29,11 @@ from accounting.services import (
 from artikli.remaris_connector import RemarisConnector
 from stock.models import WarehouseId, WarehouseStock, WarehouseTransfer, WarehouseTransferItem
 from stock.services import get_stock_accounting_config
-from stock.services import post_stock_out_multi_warehouse, post_warehouse_input_to_stock
+from stock.services import (
+    post_stock_out_multi_warehouse,
+    post_warehouse_input_to_stock,
+    record_supplier_return_for_primka_stock_move,
+)
 
 from .models import (
     PurchaseOrder,
@@ -622,6 +626,20 @@ class WarehouseInputAdmin(admin.ModelAdmin):
                     )
                     warehouse_input.supplier_return_stock_move = move
                     created_stock += 1
+
+                    try:
+                        record_supplier_return_for_primka_stock_move(
+                            warehouse_input=warehouse_input,
+                            stock_move=move,
+                            created_by=request.user,
+                        )
+                    except Exception as exc:
+                        self.message_user(
+                            request,
+                            f"Primka {warehouse_input.id}: skladišni povrat OK, "
+                            f"ali zapis u Povrat dobavljaču nije kreiran ({exc}).",
+                            level=messages.WARNING,
+                        )
 
                     update_fields = ["supplier_return_stock_move"]
                     if posted_invoices:

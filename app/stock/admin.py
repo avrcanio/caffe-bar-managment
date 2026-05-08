@@ -1519,10 +1519,19 @@ class SupplierReturnItemInline(admin.TabularInline):
 
 @admin.register(SupplierReturn)
 class SupplierReturnAdmin(admin.ModelAdmin):
-    list_display = ("id", "supplier", "warehouse", "date", "status", "stock_move")
+    list_display = (
+        "id",
+        "supplier",
+        "warehouse",
+        "date",
+        "status",
+        "source_warehouse_input",
+        "stock_move",
+    )
     list_filter = ("status", "warehouse", "supplier")
     search_fields = ("reference", "note", "supplier__name")
     autocomplete_fields = ("supplier", "warehouse")
+    raw_id_fields = ("source_warehouse_input",)
     inlines = [SupplierReturnItemInline]
     actions = ["post_to_stock"]
 
@@ -1558,7 +1567,19 @@ class SupplierReturnAdmin(admin.ModelAdmin):
     def get_readonly_fields(self, request, obj=None):
         ro = list(super().get_readonly_fields(request, obj))
         if obj and obj.status != SupplierReturn.Status.DRAFT:
-            ro += ["supplier", "warehouse", "date", "reference", "note", "status", "stock_move", "created_by", "created_at", "posted_at"]
+            ro += [
+                "supplier",
+                "warehouse",
+                "date",
+                "reference",
+                "note",
+                "status",
+                "stock_move",
+                "source_warehouse_input",
+                "created_by",
+                "created_at",
+                "posted_at",
+            ]
         return ro
 
     def has_delete_permission(self, request, obj=None):

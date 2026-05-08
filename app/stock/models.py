@@ -744,6 +744,14 @@ class SupplierReturn(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Kreirano")
     posted_at = models.DateTimeField(null=True, blank=True, verbose_name="Proknjiženo")
+    source_warehouse_input = models.ForeignKey(
+        "orders.WarehouseInput",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="supplier_returns",
+        verbose_name="Izvor (primka)",
+    )
 
     def __str__(self) -> str:
         sup = self.supplier.name if self.supplier_id else "Dobavljač ?"
