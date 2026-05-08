@@ -16,12 +16,14 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
           command_timeout: 10m
+          script_stop: true
           script: |
             set -e
             cd /opt/stacks/mozart
+            git config --global --add safe.directory /opt/stacks/mozart || true
             git fetch origin
             git checkout dev
             git pull origin dev
-            docker compose --env-file .env up -d --build
-            docker exec mozzart python manage.py migrate --noinput
+            docker compose -f docker-compose.yml --env-file .env up -d --build
+            docker compose -f docker-compose.yml --env-file .env exec -T web python manage.py migrate --noinput
             docker restart mozzart-celery-worker mozzart-celery-beat
