@@ -52,3 +52,6 @@ services:
     depends_on:
       - web
       - frontend
+
+volumes:
+  caddy_data:
