@@ -23,6 +23,7 @@ from django.urls import include, path, re_path
 from django.views.static import serve
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 
+from .download_views import DownloadFileView, DownloadIndexView
 from .api_views import CsrfView, LoginView, LogoutView, MeView, UserDetailView, TokenView
 from mailbox_app.api_views import MailboxSyncView
 from mailbox_app.api import MailMessageDetailView, MailMessageListView
@@ -35,6 +36,7 @@ from orders.api import (
     PurchaseOrderItemPriceUpdateView,
     PurchaseOrderItemListCreateView,
     PurchaseOrderListCreateView,
+    PurchaseOrderStatusTransitionView,
     PurchaseOrderWarehouseInputCreateView,
     PurchaseOrderSendView,
     SupplierInvoicePostView,
@@ -46,9 +48,9 @@ from artikli.api import (
     ArtiklListView,
     UnitOfMeasureListView,
     ArtiklImage46x75View,
+    ArtiklImage50x75View,
     ArtiklImage125x200View,
-    DrinkCategoryListView,
-    DrinkCategoryDetailView,
+    CategoryListView,
 )
 from sales.api import (
     RepresentationDetailView,
@@ -119,7 +121,9 @@ from barion.api import (
     PosCheckItemsView,
     PosCheckSendToBarView,
     PosChecksView,
-    PosDrinkCategoriesDisplayView,
+    PosCategoriesDisplayView,
+    PosCatalogChangesView,
+    PosBootstrapView,
     PosProductModifiersView,
     PosProductSearchView,
     PosRuntimeModeView,
@@ -141,13 +145,13 @@ urlpatterns = [
     path('api/artikli/', ArtiklListView.as_view(), name='api-artikl-list'),
     path('api/artikli/<int:rm_id>/', ArtiklDetailView.as_view(), name='api-artikl-detail'),
     path('api/artikli/<int:rm_id>/image-46x75/', ArtiklImage46x75View.as_view(), name='api-artikl-image-46x75'),
+    path('api/artikli/<int:rm_id>/image-50x75/', ArtiklImage50x75View.as_view(), name='api-artikl-image-50x75'),
     path('api/artikli/<int:rm_id>/image-125x200/', ArtiklImage125x200View.as_view(), name='api-artikl-image-125x200'),
-    path('api/drink-categories/', DrinkCategoryListView.as_view(), name='api-drink-category-list'),
-    path('api/drink-categories/<int:pk>/', DrinkCategoryDetailView.as_view(), name='api-drink-category-detail'),
     path('api/representations/', RepresentationListView.as_view(), name='api-representation-list'),
     path('api/representations/<int:pk>/', RepresentationDetailView.as_view(), name='api-representation-detail'),
     path('api/representation-reasons/', RepresentationReasonListView.as_view(), name='api-representation-reason-list'),
     path('api/representation-reasons/<int:pk>/', RepresentationReasonDetailView.as_view(), name='api-representation-reason-detail'),
+    path('api/categories/', CategoryListView.as_view(), name='api-category-list'),
     path('api/sales/import-remaris/', RemarisImportView.as_view(), name='api-sales-import-remaris'),
     path('api/units/', UnitOfMeasureListView.as_view(), name='api-unit-list'),
     path('api/inventories/', InventoryListCreateView.as_view(), name='api-inventory-list'),
@@ -165,6 +169,7 @@ urlpatterns = [
     path('api/inventory-items/<int:pk>/', InventoryItemDetailView.as_view(), name='api-inventory-item-detail'),
     path('api/purchase-orders/', PurchaseOrderListCreateView.as_view(), name='api-purchase-order-list'),
     path('api/purchase-orders/<int:pk>/', PurchaseOrderDetailView.as_view(), name='api-purchase-order-detail'),
+    path('api/purchase-orders/<int:pk>/status/', PurchaseOrderStatusTransitionView.as_view(), name='api-purchase-order-status-transition'),
     path('api/purchase-orders/<int:pk>/send/', PurchaseOrderSendView.as_view(), name='api-purchase-order-send'),
     path('api/purchase-orders/<int:pk>/warehouse-inputs/', PurchaseOrderWarehouseInputCreateView.as_view(), name='api-purchase-order-warehouse-input-create'),
     path('api/purchase-orders/<int:order_id>/items/', PurchaseOrderItemListCreateView.as_view(), name='api-purchase-order-item-list'),
@@ -225,10 +230,12 @@ urlpatterns = [
     path("api/pos/check-items/<int:item_id>/gratis/", PosCheckItemGratisView.as_view(), name="api-pos-check-item-gratis"),
     path("api/pos/check-items/<int:item_id>/otpis/", PosCheckItemOtpisView.as_view(), name="api-pos-check-item-otpis"),
     path("api/pos/runtime-mode/", PosRuntimeModeView.as_view(), name="api-pos-runtime-mode"),
+    path("api/pos/bootstrap/", PosBootstrapView.as_view(), name="api-pos-bootstrap"),
+    path("api/pos/catalog/changes/", PosCatalogChangesView.as_view(), name="api-pos-catalog-changes"),
     path("api/pos/products/search/", PosProductSearchView.as_view(), name="api-pos-product-search"),
     path("api/pos/products/<int:artikl_id>/modifiers/", PosProductModifiersView.as_view(), name="api-pos-product-modifiers"),
     path("api/pos/products/<int:artikl_id>/bundle-price/", PosProductBundlePriceView.as_view(), name="api-pos-product-bundle-price"),
-    path("api/pos/drink-categories/display/", PosDrinkCategoriesDisplayView.as_view(), name="api-pos-drink-categories-display"),
+    path("api/pos/categories/display/", PosCategoriesDisplayView.as_view(), name="api-pos-categories-display"),
     path("api/ai/query/", AIQueryView.as_view(), name="api-ai-query"),
     path("ai/", AiSearchView.as_view(), name="ai-search"),
     path("api/mailbox/sync/", MailboxSyncView.as_view(), name="api-mailbox-sync"),
@@ -244,3 +251,10 @@ if settings.MEDIA_ROOT:
     urlpatterns += [
         re_path(r"^media/(?P<path>.*)$", serve, {"document_root": settings.MEDIA_ROOT}),
     ]
+
+# Serve the download landing page and installer/update artifacts via Django because
+# Traefik routes /download to the web service instead of the frontend service.
+urlpatterns += [
+    path("download/", DownloadIndexView.as_view(), name="download-index"),
+    re_path(r"^download/(?P<path>.*)$", DownloadFileView.as_view(), name="download-file"),
+]

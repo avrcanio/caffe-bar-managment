@@ -4,15 +4,20 @@ from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from artikli.models import Artikl, DrinkCategory, Normativ, NormativItem
+from artikli.models import Artikl, Category, Normativ, NormativItem
 from barion.models import (
+    BarionCategory,
+    BarionCatalogState,
+    BarionCatalogSyncEvent,
     BarionRuntimeMode,
+    BarionProductSyncState,
     Check,
     CheckItem,
     CheckItemModifierSelection,
@@ -1550,8 +1555,8 @@ class PosProductSearchApiTests(TestCase):
             password="pass1234",
         )
         self.tax_group = TaxGroup.objects.create(name="PDV 25", code="PDV25", rate="0.2500")
-        self.cat_hot = DrinkCategory.objects.create(name="Topli napitci")
-        self.cat_soft = DrinkCategory.objects.create(name="Sokovi")
+        self.cat_hot = Category.objects.create(name="Topli napitci")
+        self.cat_soft = Category.objects.create(name="Sokovi")
         self.price_list = SalesPriceList.objects.create(
             name="POS test cjenik",
             is_active=True,
@@ -1564,7 +1569,7 @@ class PosProductSearchApiTests(TestCase):
             code="KAVA01",
             is_sellable=True,
             is_stock_item=False,
-            drink_category=self.cat_hot,
+            category=self.cat_hot,
             tax_group=self.tax_group,
         )
         self.cola = Artikl.objects.create(
@@ -1572,7 +1577,7 @@ class PosProductSearchApiTests(TestCase):
             code="SOK01",
             is_sellable=True,
             is_stock_item=False,
-            drink_category=self.cat_soft,
+            category=self.cat_soft,
             tax_group=self.tax_group,
         )
         self.water = Artikl.objects.create(
@@ -1580,7 +1585,7 @@ class PosProductSearchApiTests(TestCase):
             code="VODA01",
             is_sellable=True,
             is_stock_item=True,
-            drink_category=self.cat_soft,
+            category=self.cat_soft,
             tax_group=self.tax_group,
         )
         Artikl.objects.create(
@@ -1588,7 +1593,7 @@ class PosProductSearchApiTests(TestCase):
             code="INT01",
             is_sellable=False,
             is_stock_item=False,
-            drink_category=self.cat_hot,
+            category=self.cat_hot,
             tax_group=self.tax_group,
         )
         SalesPriceItem.objects.create(price_list=self.price_list, artikl=self.espresso, unit_price_gross="2.50", is_active=True)
@@ -1617,11 +1622,39 @@ class PosProductSearchApiTests(TestCase):
         self.assertEqual(data[0]["id"], self.cola.id)
         self.assertEqual(data[0]["code"], "SOK01")
         self.assertIn("image_46x75", data[0])
+        self.assertIn("thumbnail_url", data[0])
+        self.assertIn("image_url", data[0])
+        self.assertEqual(data[0]["image_version"], 1)
+        self.assertEqual(data[0]["modifier_version"], 1)
+        self.assertEqual(data[0]["category_sort_order"], self.cat_soft.sort_order)
 
-    def test_filters_by_drink_category(self):
+    def test_product_search_returns_null_category_sort_order_without_category(self):
+        no_category = Artikl.objects.create(
+            name="Bez kategorije",
+            code="NOCAT01",
+            is_sellable=True,
+            is_stock_item=False,
+            tax_group=self.tax_group,
+        )
+        SalesPriceItem.objects.create(
+            price_list=self.price_list,
+            artikl=no_category,
+            unit_price_gross="4.00",
+            is_active=True,
+        )
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/pos/products/search/?q=NOCAT01", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        data = response.json()
+        self.assertGreaterEqual(len(data), 1)
+        self.assertEqual(data[0]["code"], "NOCAT01")
+        self.assertIsNone(data[0]["category_sort_order"])
+
+    def test_filters_by_category(self):
         self.client.force_authenticate(user=self.user)
         response = self.client.get(
-            f"/api/pos/products/search/?drink_category_id={self.cat_hot.id}",
+            f"/api/pos/products/search/?category_id={self.cat_hot.id}",
             secure=True,
         )
         self.assertEqual(response.status_code, 200, response.content)
@@ -1631,14 +1664,14 @@ class PosProductSearchApiTests(TestCase):
         self.assertNotIn(self.water.id, returned_ids)
 
     def test_filters_by_parent_category_includes_descendants(self):
-        parent_lvl2 = DrinkCategory.objects.create(name="Zestoka")
-        child_lvl3 = DrinkCategory.objects.create(name="Vodke", parent=parent_lvl2)
+        parent_lvl2 = Category.objects.create(name="Zestoka")
+        child_lvl3 = Category.objects.create(name="Vodke", parent=parent_lvl2)
         nested_artikl = Artikl.objects.create(
             name="Belvedere vodka 0,03l",
             code="BELV03",
             is_sellable=True,
             is_stock_item=False,
-            drink_category=child_lvl3,
+            category=child_lvl3,
             tax_group=self.tax_group,
         )
         SalesPriceItem.objects.create(
@@ -1650,12 +1683,109 @@ class PosProductSearchApiTests(TestCase):
 
         self.client.force_authenticate(user=self.user)
         response = self.client.get(
-            f"/api/pos/products/search/?drink_category_id={parent_lvl2.id}",
+            f"/api/pos/products/search/?category_id={parent_lvl2.id}",
             secure=True,
         )
         self.assertEqual(response.status_code, 200, response.content)
         returned_ids = {item["id"] for item in response.json()}
         self.assertIn(nested_artikl.id, returned_ids)
+
+    def test_parent_category_excludes_products_from_child_barion_category(self):
+        parent_lvl2 = Category.objects.create(name="Zestoka")
+        child_lvl3 = Category.objects.create(name="Vodke", parent=parent_lvl2)
+        parent_artikl = Artikl.objects.create(
+            name="Generic spirit",
+            code="GEN01",
+            is_sellable=True,
+            is_stock_item=False,
+            category=parent_lvl2,
+            tax_group=self.tax_group,
+        )
+        child_artikl = Artikl.objects.create(
+            name="Belvedere vodka 0,03l",
+            code="BELV03",
+            is_sellable=True,
+            is_stock_item=False,
+            category=child_lvl3,
+            tax_group=self.tax_group,
+        )
+        SalesPriceItem.objects.create(
+            price_list=self.price_list,
+            artikl=parent_artikl,
+            unit_price_gross="8.00",
+            is_active=True,
+        )
+        SalesPriceItem.objects.create(
+            price_list=self.price_list,
+            artikl=child_artikl,
+            unit_price_gross="9.50",
+            is_active=True,
+        )
+        BarionCategory.objects.create(category=parent_lvl2, sort_order=10)
+        BarionCategory.objects.create(category=child_lvl3, sort_order=20)
+
+        self.client.force_authenticate(user=self.user)
+        parent_response = self.client.get(
+            f"/api/pos/products/search/?category_id={parent_lvl2.id}",
+            secure=True,
+        )
+        self.assertEqual(parent_response.status_code, 200, parent_response.content)
+        parent_ids = {item["id"] for item in parent_response.json()}
+        self.assertIn(parent_artikl.id, parent_ids)
+        self.assertNotIn(child_artikl.id, parent_ids)
+
+        child_response = self.client.get(
+            f"/api/pos/products/search/?category_id={child_lvl3.id}",
+            secure=True,
+        )
+        self.assertEqual(child_response.status_code, 200, child_response.content)
+        child_ids = {item["id"] for item in child_response.json()}
+        self.assertIn(child_artikl.id, child_ids)
+
+    def test_parent_category_keeps_products_from_non_delegated_branches(self):
+        parent_lvl2 = Category.objects.create(name="Zestoka")
+        child_lvl3 = Category.objects.create(name="Vodke", parent=parent_lvl2)
+        sibling_lvl3 = Category.objects.create(name="Ginovi", parent=parent_lvl2)
+        child_artikl = Artikl.objects.create(
+            name="Belvedere vodka 0,03l",
+            code="BELV03",
+            is_sellable=True,
+            is_stock_item=False,
+            category=child_lvl3,
+            tax_group=self.tax_group,
+        )
+        sibling_artikl = Artikl.objects.create(
+            name="Hendricks 0,03l",
+            code="HEND03",
+            is_sellable=True,
+            is_stock_item=False,
+            category=sibling_lvl3,
+            tax_group=self.tax_group,
+        )
+        SalesPriceItem.objects.create(
+            price_list=self.price_list,
+            artikl=child_artikl,
+            unit_price_gross="9.50",
+            is_active=True,
+        )
+        SalesPriceItem.objects.create(
+            price_list=self.price_list,
+            artikl=sibling_artikl,
+            unit_price_gross="9.50",
+            is_active=True,
+        )
+        BarionCategory.objects.create(category=parent_lvl2, sort_order=10)
+        BarionCategory.objects.create(category=child_lvl3, sort_order=20)
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(
+            f"/api/pos/products/search/?category_id={parent_lvl2.id}",
+            secure=True,
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        returned_ids = {item["id"] for item in response.json()}
+        self.assertIn(sibling_artikl.id, returned_ids)
+        self.assertNotIn(child_artikl.id, returned_ids)
 
     def test_limit_is_applied(self):
         self.client.force_authenticate(user=self.user)
@@ -1664,9 +1794,9 @@ class PosProductSearchApiTests(TestCase):
         self.assertEqual(len(response.json()), 1)
 
     def test_default_sort_uses_popularity_desc(self):
-        ProductPopularitySnapshot.objects.create(artikl=self.espresso, sold_qty_30d="50.0000")
-        ProductPopularitySnapshot.objects.create(artikl=self.cola, sold_qty_30d="500.0000")
-        ProductPopularitySnapshot.objects.create(artikl=self.water, sold_qty_30d="150.0000")
+        ProductPopularitySnapshot.objects.create(artikl=self.espresso, sold_qty_day="50.0000")
+        ProductPopularitySnapshot.objects.create(artikl=self.cola, sold_qty_day="500.0000")
+        ProductPopularitySnapshot.objects.create(artikl=self.water, sold_qty_day="150.0000")
 
         self.client.force_authenticate(user=self.user)
         response = self.client.get("/api/pos/products/search/", secure=True)
@@ -1688,18 +1818,18 @@ class PosProductSearchApiTests(TestCase):
     def test_night_mode_uses_backend_active_mode(self):
         ProductPopularitySnapshot.objects.create(
             artikl=self.espresso,
-            sold_qty_30d="500.0000",
-            sold_qty_night_weekend="50.0000",
+            sold_qty_day="500.0000",
+            sold_qty_night="50.0000",
         )
         ProductPopularitySnapshot.objects.create(
             artikl=self.cola,
-            sold_qty_30d="10.0000",
-            sold_qty_night_weekend="500.0000",
+            sold_qty_day="10.0000",
+            sold_qty_night="500.0000",
         )
         ProductPopularitySnapshot.objects.create(
             artikl=self.water,
-            sold_qty_30d="1000.0000",
-            sold_qty_night_weekend="5.0000",
+            sold_qty_day="1000.0000",
+            sold_qty_night="5.0000",
         )
 
         self.client.force_authenticate(user=self.user)
@@ -1715,13 +1845,13 @@ class PosProductSearchApiTests(TestCase):
     def test_backend_day_mode_ignores_query_night(self):
         ProductPopularitySnapshot.objects.create(
             artikl=self.espresso,
-            sold_qty_30d="10.0000",
-            sold_qty_night_weekend="500.0000",
+            sold_qty_day="10.0000",
+            sold_qty_night="500.0000",
         )
         ProductPopularitySnapshot.objects.create(
             artikl=self.cola,
-            sold_qty_30d="300.0000",
-            sold_qty_night_weekend="5.0000",
+            sold_qty_day="300.0000",
+            sold_qty_night="5.0000",
         )
         runtime = BarionRuntimeMode.get_solo()
         runtime.active_mode = BarionRuntimeMode.Mode.DAY
@@ -1740,7 +1870,7 @@ class PosProductSearchApiTests(TestCase):
             code="NOPRICE01",
             is_sellable=True,
             is_stock_item=False,
-            drink_category=self.cat_hot,
+            category=self.cat_hot,
             tax_group=self.tax_group,
         )
         self.client.force_authenticate(user=self.user)
@@ -1824,9 +1954,30 @@ class PosProductSearchApiTests(TestCase):
         self.assertEqual(response.status_code, 200, response.content)
         payload = response.json()
         self.assertEqual(payload["artikl_id"], self.espresso.id)
+        self.assertGreaterEqual(payload["modifier_version"], 2)
         self.assertEqual(len(payload["modifier_groups"]), 1)
         self.assertEqual(payload["modifier_groups"][0]["name"], "Coffee edits")
         self.assertEqual(payload["modifier_groups"][0]["options"][0]["id"], option.id)
+
+    def test_product_modifiers_endpoint_returns_incremented_modifier_version(self):
+        self.client.force_authenticate(user=self.user)
+        group = ItemModifierGroup.objects.create(
+            name="Modifier version group",
+            code="modifier-version-group",
+            selection_mode=ItemModifierGroup.SelectionMode.MULTIPLE,
+            min_select=0,
+            max_select=2,
+        )
+        ItemModifierGroupAssignment.objects.create(
+            artikl=self.espresso,
+            group=group,
+            is_active=True,
+        )
+
+        response = self.client.get(f"/api/pos/products/{self.espresso.id}/modifiers/", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertGreaterEqual(payload["modifier_version"], 2)
 
 
 class PosRuntimeModeApiTests(TestCase):
@@ -2078,7 +2229,7 @@ class PosCheckSendToBarApiTests(TestCase):
         self.assertEqual(sent_ids, {self.item_1.id, self.item_2.id})
 
 
-class PosDrinkCategoriesDisplayApiTests(TestCase):
+class PosCategoriesDisplayApiTests(TestCase):
     def setUp(self):
         self.client = APIClient()
         User = get_user_model()
@@ -2098,13 +2249,13 @@ class PosDrinkCategoriesDisplayApiTests(TestCase):
         runtime.active_mode = BarionRuntimeMode.Mode.DAY
         runtime.save()
 
-    def _priced_artikl(self, *, category: DrinkCategory, code: str):
+    def _priced_artikl(self, *, category: Category, code: str):
         artikl = Artikl.objects.create(
             name=f"Artikl {code}",
             code=code,
             is_sellable=True,
             is_stock_item=False,
-            drink_category=category,
+            category=category,
             tax_group=self.tax_group,
         )
         SalesPriceItem.objects.create(
@@ -2115,82 +2266,96 @@ class PosDrinkCategoriesDisplayApiTests(TestCase):
         )
         return artikl
 
+    @staticmethod
+    def _barion_category(category: Category, *, sort_order: int = 0, is_active: bool = True):
+        return BarionCategory.objects.create(
+            category=category,
+            sort_order=sort_order,
+            is_active=is_active,
+        )
+
     def test_requires_authentication(self):
-        response = self.client.get("/api/pos/drink-categories/display/?root_id=1", secure=True)
+        response = self.client.get("/api/pos/categories/display/?root_id=1", secure=True)
         self.assertEqual(response.status_code, 403)
 
-    def test_prefers_deepest_level_with_priced_products(self):
-        root = DrinkCategory.objects.create(name="Alkoholna")
-        lvl2 = DrinkCategory.objects.create(name="Zestoka", parent=root)
-        lvl3_likeri = DrinkCategory.objects.create(name="Likeri", parent=lvl2, sort_order=10)
-        lvl3_rakije = DrinkCategory.objects.create(name="Rakije", parent=lvl2, sort_order=20)
-        DrinkCategory.objects.create(name="Skrivena", parent=lvl2, is_active=False)
+    def test_returns_only_explicit_barion_categories_in_root_subtree(self):
+        root = Category.objects.create(name="Alkoholna")
+        lvl2 = Category.objects.create(name="Zestoka", parent=root)
+        lvl3_likeri = Category.objects.create(name="Likeri", parent=lvl2, sort_order=10)
+        lvl3_rakije = Category.objects.create(name="Rakije", parent=lvl2, sort_order=20)
+        lvl3_hidden = Category.objects.create(name="Skrivena", parent=lvl2, sort_order=30)
 
         self._priced_artikl(category=lvl3_likeri, code="LIK01")
         self._priced_artikl(category=lvl3_rakije, code="RAK01")
+        self._priced_artikl(category=lvl3_hidden, code="SKR01")
+        self._barion_category(lvl3_likeri, sort_order=10)
+        self._barion_category(lvl3_rakije, sort_order=20)
 
         self.client.force_authenticate(user=self.user)
-        response = self.client.get(f"/api/pos/drink-categories/display/?root_id={root.id}", secure=True)
+        response = self.client.get(f"/api/pos/categories/display/?root_id={root.id}", secure=True)
         self.assertEqual(response.status_code, 200, response.content)
         payload = response.json()
-        self.assertEqual(payload["display_level"], 3)
+        self.assertEqual(payload["display_level"], 1)
         names = [row["name"] for row in payload["categories"]]
         self.assertEqual(names, ["Likeri", "Rakije"])
 
-    def test_falls_back_to_level_two_when_no_level_three(self):
-        root = DrinkCategory.objects.create(name="Napitci")
-        lvl2_hot = DrinkCategory.objects.create(name="Topli", parent=root, sort_order=10)
-        lvl2_soft = DrinkCategory.objects.create(name="Sokovi", parent=root, sort_order=20)
+    def test_returns_empty_list_when_no_barion_categories_are_configured(self):
+        root = Category.objects.create(name="Napitci")
+        lvl2_hot = Category.objects.create(name="Topli", parent=root, sort_order=10)
+        lvl2_soft = Category.objects.create(name="Sokovi", parent=root, sort_order=20)
 
         self._priced_artikl(category=lvl2_hot, code="TOP01")
         self._priced_artikl(category=lvl2_soft, code="SOK01")
 
         self.client.force_authenticate(user=self.user)
-        response = self.client.get(f"/api/pos/drink-categories/display/?root_id={root.id}", secure=True)
+        response = self.client.get(f"/api/pos/categories/display/?root_id={root.id}", secure=True)
         self.assertEqual(response.status_code, 200, response.content)
         payload = response.json()
-        self.assertEqual(payload["display_level"], 2)
-        names = [row["name"] for row in payload["categories"]]
-        self.assertEqual(names, ["Topli", "Sokovi"])
+        self.assertEqual(payload["display_level"], 1)
+        self.assertEqual(payload["categories"], [])
 
     def test_sorts_display_categories_by_day_popularity_desc(self):
-        root = DrinkCategory.objects.create(name="Napitci")
-        lvl2_hot = DrinkCategory.objects.create(name="Topli", parent=root, sort_order=10)
-        lvl2_soft = DrinkCategory.objects.create(name="Sokovi", parent=root, sort_order=20)
+        root = Category.objects.create(name="Napitci")
+        lvl2_hot = Category.objects.create(name="Topli", parent=root, sort_order=10)
+        lvl2_soft = Category.objects.create(name="Sokovi", parent=root, sort_order=20)
 
         hot_artikl = self._priced_artikl(category=lvl2_hot, code="TOP01")
         soft_artikl = self._priced_artikl(category=lvl2_soft, code="SOK01")
-        ProductPopularitySnapshot.objects.create(artikl=hot_artikl, sold_qty_30d="10.0000")
-        ProductPopularitySnapshot.objects.create(artikl=soft_artikl, sold_qty_30d="200.0000")
+        self._barion_category(lvl2_hot, sort_order=10)
+        self._barion_category(lvl2_soft, sort_order=20)
+        ProductPopularitySnapshot.objects.create(artikl=hot_artikl, sold_qty_day="10.0000")
+        ProductPopularitySnapshot.objects.create(artikl=soft_artikl, sold_qty_day="200.0000")
 
         self.client.force_authenticate(user=self.user)
         response = self.client.get(
-            f"/api/pos/drink-categories/display/?root_id={root.id}&mode=day",
+            f"/api/pos/categories/display/?root_id={root.id}&mode=day",
             secure=True,
         )
         self.assertEqual(response.status_code, 200, response.content)
         payload = response.json()
-        self.assertEqual(payload["display_level"], 2)
+        self.assertEqual(payload["display_level"], 1)
         rows = payload["categories"]
         self.assertEqual([row["id"] for row in rows], [lvl2_soft.id, lvl2_hot.id])
         self.assertEqual(float(rows[0]["popularity_score"]), 200.0)
 
     def test_sorts_display_categories_by_night_popularity_desc_when_backend_mode_is_night(self):
-        root = DrinkCategory.objects.create(name="Napitci")
-        lvl2_hot = DrinkCategory.objects.create(name="Topli", parent=root, sort_order=10)
-        lvl2_soft = DrinkCategory.objects.create(name="Sokovi", parent=root, sort_order=20)
+        root = Category.objects.create(name="Napitci")
+        lvl2_hot = Category.objects.create(name="Topli", parent=root, sort_order=10)
+        lvl2_soft = Category.objects.create(name="Sokovi", parent=root, sort_order=20)
 
         hot_artikl = self._priced_artikl(category=lvl2_hot, code="TOP01")
         soft_artikl = self._priced_artikl(category=lvl2_soft, code="SOK01")
+        self._barion_category(lvl2_hot, sort_order=10)
+        self._barion_category(lvl2_soft, sort_order=20)
         ProductPopularitySnapshot.objects.create(
             artikl=hot_artikl,
-            sold_qty_30d="500.0000",
-            sold_qty_night_weekend="5.0000",
+            sold_qty_day="500.0000",
+            sold_qty_night="5.0000",
         )
         ProductPopularitySnapshot.objects.create(
             artikl=soft_artikl,
-            sold_qty_30d="10.0000",
-            sold_qty_night_weekend="300.0000",
+            sold_qty_day="10.0000",
+            sold_qty_night="300.0000",
         )
 
         self.client.force_authenticate(user=self.user)
@@ -2198,7 +2363,7 @@ class PosDrinkCategoriesDisplayApiTests(TestCase):
         runtime.active_mode = BarionRuntimeMode.Mode.NIGHT
         runtime.save()
         response = self.client.get(
-            f"/api/pos/drink-categories/display/?root_id={root.id}&mode=day",
+            f"/api/pos/categories/display/?root_id={root.id}&mode=day",
             secure=True,
         )
         self.assertEqual(response.status_code, 200, response.content)
@@ -2206,14 +2371,536 @@ class PosDrinkCategoriesDisplayApiTests(TestCase):
         self.assertEqual([row["id"] for row in rows], [lvl2_soft.id, lvl2_hot.id])
         self.assertEqual(float(rows[0]["popularity_score"]), 300.0)
 
+    def test_aggregates_popularity_from_category_subtree(self):
+        root = Category.objects.create(name="Napitci")
+        coffee = Category.objects.create(name="Kave", parent=root, sort_order=10)
+        espresso = Category.objects.create(name="Espresso", parent=coffee, sort_order=5)
+        latte = Category.objects.create(name="Latte", parent=coffee, sort_order=10)
+        self._barion_category(coffee, sort_order=5)
+
+        espresso_artikl = self._priced_artikl(category=espresso, code="ESP01")
+        latte_artikl = self._priced_artikl(category=latte, code="LAT01")
+        ProductPopularitySnapshot.objects.create(artikl=espresso_artikl, sold_qty_day="40.0000")
+        ProductPopularitySnapshot.objects.create(artikl=latte_artikl, sold_qty_day="60.0000")
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/pos/categories/display/?root_id={root.id}", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        rows = response.json()["categories"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], coffee.id)
+        self.assertEqual(float(rows[0]["popularity_score"]), 100.0)
+
+    def test_parent_category_popularity_excludes_registered_child_branch(self):
+        root = Category.objects.create(name="Napitci")
+        coffee = Category.objects.create(name="Kave", parent=root, sort_order=10)
+        espresso = Category.objects.create(name="Espresso", parent=coffee, sort_order=5)
+        latte = Category.objects.create(name="Latte", parent=coffee, sort_order=10)
+        self._barion_category(coffee, sort_order=5)
+        self._barion_category(espresso, sort_order=10)
+
+        latte_artikl = self._priced_artikl(category=latte, code="LAT01")
+        espresso_artikl = self._priced_artikl(category=espresso, code="ESP01")
+        ProductPopularitySnapshot.objects.create(artikl=latte_artikl, sold_qty_day="60.0000")
+        ProductPopularitySnapshot.objects.create(artikl=espresso_artikl, sold_qty_day="40.0000")
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/pos/categories/display/?root_id={root.id}", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        rows = response.json()["categories"]
+        self.assertEqual([row["id"] for row in rows], [coffee.id, espresso.id])
+        self.assertEqual(float(rows[0]["popularity_score"]), 60.0)
+        self.assertEqual(float(rows[1]["popularity_score"]), 40.0)
+
+    def test_parent_category_is_hidden_when_only_registered_child_has_products(self):
+        root = Category.objects.create(name="Napitci")
+        coffee = Category.objects.create(name="Kave", parent=root, sort_order=10)
+        espresso = Category.objects.create(name="Espresso", parent=coffee, sort_order=5)
+        self._barion_category(coffee, sort_order=5)
+        self._barion_category(espresso, sort_order=10)
+
+        espresso_artikl = self._priced_artikl(category=espresso, code="ESP01")
+        ProductPopularitySnapshot.objects.create(artikl=espresso_artikl, sold_qty_day="40.0000")
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/pos/categories/display/?root_id={root.id}", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        rows = response.json()["categories"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], espresso.id)
+
+    def test_parent_category_excludes_nested_registered_descendant_branches(self):
+        root = Category.objects.create(name="Napitci")
+        parent = Category.objects.create(name="Kave", parent=root, sort_order=10)
+        child = Category.objects.create(name="Espresso", parent=parent, sort_order=5)
+        grandchild = Category.objects.create(name="Single origin", parent=child, sort_order=5)
+        other = Category.objects.create(name="Latte", parent=parent, sort_order=10)
+        self._barion_category(parent, sort_order=5)
+        self._barion_category(child, sort_order=10)
+        self._barion_category(grandchild, sort_order=20)
+
+        grandchild_artikl = self._priced_artikl(category=grandchild, code="SO01")
+        other_artikl = self._priced_artikl(category=other, code="LAT01")
+        ProductPopularitySnapshot.objects.create(artikl=grandchild_artikl, sold_qty_day="90.0000")
+        ProductPopularitySnapshot.objects.create(artikl=other_artikl, sold_qty_day="20.0000")
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/pos/categories/display/?root_id={root.id}", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        rows_by_id = {row["id"]: row for row in response.json()["categories"]}
+        self.assertEqual(float(rows_by_id[parent.id]["popularity_score"]), 20.0)
+        self.assertNotIn(child.id, rows_by_id)
+        self.assertEqual(float(rows_by_id[grandchild.id]["popularity_score"]), 90.0)
+
     def test_display_categories_invalid_mode_query_is_ignored(self):
-        root = DrinkCategory.objects.create(name="Napitci")
+        root = Category.objects.create(name="Napitci")
+        shown = Category.objects.create(name="Sokovi", parent=root)
+        self._priced_artikl(category=shown, code="SOK01")
+        self._barion_category(shown)
         self.client.force_authenticate(user=self.user)
         response = self.client.get(
-            f"/api/pos/drink-categories/display/?root_id={root.id}&mode=bad",
+            f"/api/pos/categories/display/?root_id={root.id}&mode=bad",
             secure=True,
         )
         self.assertEqual(response.status_code, 200, response.content)
+
+
+class PosBootstrapApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="barion-bootstrap-user",
+            email="barion-bootstrap@example.com",
+            password="pass1234",
+        )
+        self.tax_group = TaxGroup.objects.create(name="PDV 25", code="PDV25", rate="0.2500")
+        self.price_list = SalesPriceList.objects.create(
+            name="Bootstrap cjenik",
+            is_active=True,
+            is_default=True,
+            valid_from=timezone.now(),
+        )
+        runtime = BarionRuntimeMode.get_solo()
+        runtime.active_mode = BarionRuntimeMode.Mode.DAY
+        runtime.save()
+
+    def _priced_artikl(self, *, category: Category, code: str):
+        artikl = Artikl.objects.create(
+            name=f"Artikl {code}",
+            code=code,
+            is_sellable=True,
+            is_stock_item=False,
+            category=category,
+            tax_group=self.tax_group,
+        )
+        SalesPriceItem.objects.create(
+            price_list=self.price_list,
+            artikl=artikl,
+            unit_price_gross="4.00",
+            is_active=True,
+        )
+        return artikl
+
+    @staticmethod
+    def _barion_category(category: Category, *, sort_order: int = 0, is_active: bool = True):
+        return BarionCategory.objects.create(
+            category=category,
+            sort_order=sort_order,
+            is_active=is_active,
+        )
+
+    def test_requires_authentication(self):
+        response = self.client.get("/api/pos/bootstrap/?root_id=1", secure=True)
+        self.assertEqual(response.status_code, 403)
+
+    def test_invalid_root_id_returns_400(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/pos/bootstrap/?root_id=abc", secure=True)
+        self.assertEqual(response.status_code, 400, response.content)
+
+    def test_unknown_root_id_returns_404(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/pos/bootstrap/?root_id=999999", secure=True)
+        self.assertEqual(response.status_code, 404, response.content)
+
+    def test_returns_sorted_categories_and_selected_category(self):
+        root = Category.objects.create(name="Napitci")
+        hot = Category.objects.create(name="Topli", parent=root, sort_order=10)
+        soft = Category.objects.create(name="Sokovi", parent=root, sort_order=20)
+
+        hot_artikl = self._priced_artikl(category=hot, code="TOP01")
+        soft_artikl = self._priced_artikl(category=soft, code="SOK01")
+        self._barion_category(hot, sort_order=10)
+        self._barion_category(soft, sort_order=20)
+        ProductPopularitySnapshot.objects.create(artikl=hot_artikl, sold_qty_day="10.0000")
+        ProductPopularitySnapshot.objects.create(artikl=soft_artikl, sold_qty_day="200.0000")
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/pos/bootstrap/?root_id={root.id}", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload["active_mode"], "day")
+        self.assertGreaterEqual(payload["catalog_version"], 1)
+        self.assertEqual(payload["root_id"], root.id)
+        self.assertEqual([row["id"] for row in payload["categories"]], [soft.id, hot.id])
+        self.assertEqual(payload["selected_category_id"], soft.id)
+        self.assertEqual(payload["products"], [])
+
+    def test_bootstrap_without_root_id_returns_global_barion_catalog(self):
+        root_a = Category.objects.create(name="Napitci")
+        root_b = Category.objects.create(name="Alkoholna pića")
+        hot = Category.objects.create(name="Topli", parent=root_a, sort_order=10)
+        beer = Category.objects.create(name="Pivo", parent=root_b, sort_order=20)
+        hot_artikl = self._priced_artikl(category=hot, code="TOP01")
+        beer_artikl = self._priced_artikl(category=beer, code="PIV01")
+        self._barion_category(hot, sort_order=20)
+        self._barion_category(beer, sort_order=10)
+        ProductPopularitySnapshot.objects.create(artikl=hot_artikl, sold_qty_day="10.0000")
+        ProductPopularitySnapshot.objects.create(artikl=beer_artikl, sold_qty_day="100.0000")
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/pos/bootstrap/?include_products=1", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertIsNone(payload["root_id"])
+        self.assertEqual([row["id"] for row in payload["categories"]], [beer.id, hot.id])
+        self.assertEqual(payload["selected_category_id"], beer.id)
+        self.assertEqual([row["id"] for row in payload["products"]], [beer_artikl.id])
+
+    def test_include_products_returns_first_selected_category_products(self):
+        root = Category.objects.create(name="Napitci")
+        hot = Category.objects.create(name="Topli", parent=root, sort_order=10)
+        hot_artikl = self._priced_artikl(category=hot, code="TOP01")
+        self._barion_category(hot, sort_order=10)
+        ProductPopularitySnapshot.objects.create(artikl=hot_artikl, sold_qty_day="50.0000")
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/pos/bootstrap/?root_id={root.id}&include_products=1", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload["selected_category_id"], hot.id)
+        self.assertEqual(len(payload["products"]), 1)
+        self.assertEqual(payload["products"][0]["id"], hot_artikl.id)
+        self.assertIn("thumbnail_url", payload["products"][0])
+        self.assertIn("image_url", payload["products"][0])
+        self.assertEqual(payload["products"][0]["image_version"], 1)
+        self.assertEqual(payload["products"][0]["modifier_version"], 1)
+
+    def test_overlap_rule_is_applied_to_bootstrap_products(self):
+        root = Category.objects.create(name="Napitci")
+        parent = Category.objects.create(name="Pivo", parent=root, sort_order=10)
+        child = Category.objects.create(name="Svijetlo pivo", parent=parent, sort_order=20)
+        parent_artikl = self._priced_artikl(category=parent, code="PIV01")
+        child_artikl = self._priced_artikl(category=child, code="SVP01")
+        self._barion_category(parent, sort_order=10)
+        self._barion_category(child, sort_order=20)
+        ProductPopularitySnapshot.objects.create(artikl=parent_artikl, sold_qty_day="100.0000")
+        ProductPopularitySnapshot.objects.create(artikl=child_artikl, sold_qty_day="10.0000")
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/pos/bootstrap/?root_id={root.id}&include_products=1", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload["selected_category_id"], parent.id)
+        product_ids = {row["id"] for row in payload["products"]}
+        self.assertIn(parent_artikl.id, product_ids)
+        self.assertNotIn(child_artikl.id, product_ids)
+
+    def test_empty_root_returns_empty_payload(self):
+        root = Category.objects.create(name="Napitci")
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/pos/bootstrap/?root_id={root.id}&include_products=1", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload["categories"], [])
+        self.assertIsNone(payload["selected_category_id"])
+        self.assertEqual(payload["products"], [])
+
+    def test_bootstrap_returns_incremented_image_version_for_image_change(self):
+        root = Category.objects.create(name="Napitci")
+        hot = Category.objects.create(name="Topli", parent=root, sort_order=10)
+        artikl = self._priced_artikl(category=hot, code="TOPIMG")
+        self._barion_category(hot, sort_order=10)
+
+        artikl.rm_id = 777
+        artikl.image = SimpleUploadedFile("first.jpg", b"filecontent1", content_type="image/jpeg")
+        artikl.save()
+        artikl.image = SimpleUploadedFile("second.jpg", b"filecontent2", content_type="image/jpeg")
+        artikl.save()
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/pos/bootstrap/?root_id={root.id}&include_products=1", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        product = response.json()["products"][0]
+        self.assertEqual(product["id"], artikl.id)
+        self.assertEqual(product["image_version"], 3)
+        self.assertIsNotNone(product["thumbnail_url"])
+        self.assertIsNotNone(product["image_url"])
+
+
+class PosCatalogChangesApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        User = get_user_model()
+        self.user = User.objects.create_user(
+            username="barion-catalog-user",
+            email="barion-catalog@example.com",
+            password="pass1234",
+        )
+        self.tax_group = TaxGroup.objects.create(name="PDV 25", code="PDV25", rate="0.2500")
+        self.price_list = SalesPriceList.objects.create(
+            name="Catalog cjenik",
+            is_active=True,
+            is_default=True,
+            valid_from=timezone.now(),
+        )
+        self.root = Category.objects.create(name="Napitci")
+        self.category = Category.objects.create(name="Topli", parent=self.root, sort_order=10)
+        self.barion_category = BarionCategory.objects.create(category=self.category, sort_order=10, is_active=True)
+        self.layout = Layout.objects.create(name="Main", is_active=True)
+        self.zone = Zone.objects.create(layout=self.layout, name="Main zone", order=1)
+        self.table = Table.objects.create(label="A1", capacity=4, shape=Table.Shape.SQUARE, is_vip=False)
+        self.layout_table = LayoutTable.objects.create(layout=self.layout, table=self.table, zone=self.zone)
+        self.artikl = Artikl.objects.create(
+            name="Espresso",
+            code="ESP001",
+            is_sellable=True,
+            is_stock_item=False,
+            category=self.category,
+            tax_group=self.tax_group,
+        )
+        SalesPriceItem.objects.create(
+            price_list=self.price_list,
+            artikl=self.artikl,
+            unit_price_gross="2.50",
+            is_active=True,
+        )
+        runtime = BarionRuntimeMode.get_solo()
+        runtime.active_mode = BarionRuntimeMode.Mode.DAY
+        runtime.save()
+
+    def test_requires_authentication(self):
+        response = self.client.get("/api/pos/catalog/changes/", secure=True)
+        self.assertEqual(response.status_code, 403)
+
+    def test_after_version_zero_returns_updated_rows(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/pos/catalog/changes/?afterVersion=0&targetVersion=999999", secure=True)
+        self.assertEqual(response.status_code, 400, response.content)
+
+        current_version = BarionCatalogState.get_solo().catalog_version
+        response = self.client.get("/api/pos/catalog/changes/?afterVersion=0", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload["requiresFullSync"], False)
+        self.assertEqual(payload["baseVersion"], 0)
+        self.assertEqual(payload["targetVersion"], current_version)
+        self.assertGreaterEqual(payload["appliedThroughVersion"], 0)
+        self.assertIn(self.layout.id, [row["id"] for row in payload["layouts"]["updated"]])
+        self.assertIn(self.category.id, [row["id"] for row in payload["categories"]["updated"]])
+        self.assertIn(self.artikl.id, [row["id"] for row in payload["products"]["updated"]])
+
+    def test_returns_requires_full_sync_when_after_version_is_stale(self):
+        self.client.force_authenticate(user=self.user)
+        BarionCatalogSyncEvent.objects.filter(version__lte=2).delete()
+        response = self.client.get("/api/pos/catalog/changes/?afterVersion=1", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload["requiresFullSync"], True)
+        self.assertEqual(payload["hasMore"], False)
+
+    def test_returns_requires_full_sync_when_after_version_is_in_future(self):
+        self.client.force_authenticate(user=self.user)
+        current_version = BarionCatalogState.get_solo().catalog_version
+        response = self.client.get(f"/api/pos/catalog/changes/?afterVersion={int(current_version) + 999}", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertEqual(payload["requiresFullSync"], True)
+        self.assertEqual(payload["catalogVersion"], current_version)
+
+    def test_modifier_change_returns_product_with_incremented_modifier_version(self):
+        group = ItemModifierGroup.objects.create(
+            name="Coffee edits catalog",
+            code="coffee-edits-catalog",
+            selection_mode=ItemModifierGroup.SelectionMode.MULTIPLE,
+            min_select=0,
+            max_select=3,
+        )
+        ItemModifierGroupAssignment.objects.create(
+            artikl=self.artikl,
+            group=group,
+            is_active=True,
+        )
+        after_version = BarionCatalogState.get_solo().catalog_version
+        ItemModifierOption.objects.create(group=group, name="Natren", code="natren-catalog", sort_order=10)
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/pos/catalog/changes/?afterVersion={after_version}", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        updated_products = payload["products"]["updated"]
+        self.assertEqual(len(updated_products), 1)
+        self.assertEqual(updated_products[0]["id"], self.artikl.id)
+        self.assertGreaterEqual(updated_products[0]["modifier_version"], 3)
+
+    def test_delete_returns_deleted_product_ids(self):
+        delete_target = Artikl.objects.create(
+            name="Delete me",
+            code="DEL001",
+            is_sellable=True,
+            is_stock_item=False,
+            category=self.category,
+            tax_group=self.tax_group,
+        )
+        SalesPriceItem.objects.create(
+            price_list=self.price_list,
+            artikl=delete_target,
+            unit_price_gross="4.50",
+            is_active=True,
+        )
+        delete_target_id = delete_target.id
+        after_version = BarionCatalogState.get_solo().catalog_version
+        SalesPriceItem.objects.filter(artikl=delete_target).delete()
+        delete_target.delete()
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/pos/catalog/changes/?afterVersion={after_version}", secure=True)
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertIn(delete_target_id, payload["products"]["deleted"])
+
+    def test_pagination_stays_within_fixed_target_version(self):
+        after_version = BarionCatalogState.get_solo().catalog_version
+        for idx in range(3):
+            category = Category.objects.create(name=f"Cat {idx}", parent=self.root, sort_order=20 + idx)
+            BarionCategory.objects.create(category=category, sort_order=20 + idx, is_active=True)
+
+        self.client.force_authenticate(user=self.user)
+        first = self.client.get(f"/api/pos/catalog/changes/?afterVersion={after_version}&limit=1", secure=True)
+        self.assertEqual(first.status_code, 200, first.content)
+        first_payload = first.json()
+        self.assertEqual(first_payload["requiresFullSync"], False)
+        self.assertEqual(first_payload["hasMore"], True)
+
+        second = self.client.get(
+            f"/api/pos/catalog/changes/?afterVersion={first_payload['appliedThroughVersion']}&targetVersion={first_payload['targetVersion']}&limit=1",
+            secure=True,
+        )
+        self.assertEqual(second.status_code, 200, second.content)
+        second_payload = second.json()
+        self.assertEqual(second_payload["targetVersion"], first_payload["targetVersion"])
+        self.assertGreaterEqual(second_payload["appliedThroughVersion"], first_payload["appliedThroughVersion"])
+
+
+class BarionCatalogNotificationTaskTests(TestCase):
+    @override_settings(
+        BARION_FCM_ENABLED=True,
+        BARION_GCLOUD_API_URL="http://gcloud-api:8080",
+        BARION_GCLOUD_CALLER_TOKEN="test-caller-token",
+        BARION_FCM_PROJECT_ALIAS="fcm_barion",
+        BARION_FCM_TOPIC="barion_catalog",
+        BARION_GCLOUD_TIMEOUT=3,
+    )
+    @patch("barion.tasks.requests.post")
+    def test_task_posts_catalog_changed_to_gcloud_topic(self, mock_post):
+        from barion.tasks import send_catalog_changed_notification
+
+        mock_post.return_value.json.return_value = {"success": True, "message_id": "msg-1"}
+        mock_post.return_value.raise_for_status.return_value = None
+
+        result = send_catalog_changed_notification(version=42)
+
+        self.assertEqual(result, True)
+        mock_post.assert_called_once_with(
+            "http://gcloud-api:8080/fcm/send",
+            json={
+                "project_alias": "fcm_barion",
+                "topic": "barion_catalog",
+                "data": {
+                    "type": "catalog_changed",
+                    "catalogVersion": "42",
+                },
+            },
+            headers={
+                "Authorization": "Bearer test-caller-token",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            timeout=3,
+        )
+
+    @override_settings(BARION_FCM_ENABLED=False)
+    @patch("barion.tasks.requests.post")
+    def test_task_is_noop_when_disabled(self, mock_post):
+        from barion.tasks import send_catalog_changed_notification
+
+        result = send_catalog_changed_notification(version=42)
+
+        self.assertEqual(result, False)
+        mock_post.assert_not_called()
+
+    @override_settings(BARION_FCM_ENABLED=True)
+    @patch("barion.tasks.send_catalog_changed_notification.delay")
+    def test_record_catalog_changes_enqueues_notification_after_commit(self, mock_delay):
+        from barion.catalog_sync import CatalogEntityChange, record_catalog_changes
+
+        with self.captureOnCommitCallbacks(execute=True):
+            version = record_catalog_changes(
+                changes=[
+                    CatalogEntityChange(
+                        entity_type=BarionCatalogSyncEvent.EntityType.PRODUCT,
+                        entity_id=123,
+                        operation=BarionCatalogSyncEvent.Operation.UPSERT,
+                    )
+                ]
+            )
+
+        self.assertIsNotNone(version)
+        mock_delay.assert_called_once_with(version=int(version))
+
+    @patch("barion.tasks.send_catalog_changed_notification.delay")
+    def test_runtime_mode_change_bumps_catalog_version_and_enqueues_notification(self, mock_delay):
+        tax_group = TaxGroup.objects.create(name="PDV 25 test", code="PDV25_TEST", rate="0.2500")
+        price_list = SalesPriceList.objects.create(
+            name="Runtime mode catalog price list",
+            is_active=True,
+            is_default=True,
+            valid_from=timezone.now(),
+        )
+        root = Category.objects.create(name="Runtime root")
+        category = Category.objects.create(name="Runtime child", parent=root, sort_order=10)
+        BarionCategory.objects.create(category=category, sort_order=10, is_active=True)
+        artikl = Artikl.objects.create(
+            name="Runtime mode artikl",
+            code="RTMODE001",
+            is_sellable=True,
+            is_stock_item=False,
+            category=category,
+            tax_group=tax_group,
+        )
+        SalesPriceItem.objects.create(
+            price_list=price_list,
+            artikl=artikl,
+            unit_price_gross="3.50",
+            is_active=True,
+        )
+
+        runtime = BarionRuntimeMode.get_solo()
+        runtime.active_mode = BarionRuntimeMode.Mode.DAY
+        runtime.save()
+        starting_version = int(BarionCatalogState.get_solo().catalog_version)
+        mock_delay.reset_mock()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            runtime.active_mode = BarionRuntimeMode.Mode.NIGHT
+            runtime.save()
+
+        ending_version = int(BarionCatalogState.get_solo().catalog_version)
+        self.assertGreater(ending_version, starting_version)
+        mock_delay.assert_called_once_with(version=ending_version)
+
 
 class PosCheckIssueReceiptApiTests(TestCase):
     def setUp(self):

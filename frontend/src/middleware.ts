@@ -5,6 +5,15 @@ const PUBLIC_PATHS = ["/login", "/inventory"];
 const AUTH_COOKIE_NAME = "sessionid";
 const CSRF_COOKIE_NAME = "csrftoken";
 const DOWNLOAD_PATH = "/download";
+const PUBLIC_STATIC_PATHS = [
+  "/favicon.ico",
+  "/manifest.json",
+  "/apple-touch-icon.png",
+  "/mozart-logo.png",
+  "/sw.js",
+  "/workbox-",
+  "/icons/",
+];
 const PUBLIC_DOWNLOAD_FILE_PATTERNS = [
   /^\/download\/MozzartPrintHub\.appinstaller$/,
   /^\/download\/MozzartPrintHub-\d+\.\d+\.\d+-x64\.msix$/,
@@ -28,7 +37,7 @@ export function middleware(request: NextRequest) {
     pathname.startsWith("/_next") ||
     pathname.startsWith("/api") ||
     pathname.startsWith("/static") ||
-    pathname === "/favicon.ico"
+    PUBLIC_STATIC_PATHS.some((path) => pathname === path || pathname.startsWith(path))
   ) {
     return NextResponse.next();
   }

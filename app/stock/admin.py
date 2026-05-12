@@ -10,6 +10,7 @@ from django.db import transaction
 from django.db.models import DecimalField, F, Sum
 from django.db.models.expressions import ExpressionWrapper
 from django.http import HttpResponseRedirect
+from django.utils.html import format_html
 from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.html import format_html
@@ -1026,6 +1027,24 @@ class InventoryAdmin(admin.ModelAdmin):
             return "Predano (zakljucano)"
         return "Aktivno"
 
+    def _public_link_message(self, prefix, url, suffix):
+        return format_html(
+            '{} <a href="{}" class="inventory-public-link-anchor" data-copy-public-link="{}">{}</a> '
+            '<button type="button" class="inventory-public-link-copy" data-copy-public-link="{}" '
+            'title="Kopiraj link" aria-label="Kopiraj link">'
+            '<svg aria-hidden="true" viewBox="0 0 24 24" width="14" height="14" focusable="false">'
+            '<path fill="currentColor" d="M16 1H4a2 2 0 0 0-2 2v12h2V3h12V1zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z"/>'
+            "</svg>"
+            "</button>"
+            '<span class="inventory-public-link-feedback" aria-live="polite"></span>{}',
+            prefix,
+            url,
+            url,
+            url,
+            url,
+            suffix,
+        )
+
     @admin.action(description="Generiraj public link (/inventory/<token>)", permissions=["change"])
     def generate_public_link(self, request, queryset):
         updated = 0
@@ -1034,7 +1053,11 @@ class InventoryAdmin(admin.ModelAdmin):
             url = f"{request.scheme}://{request.get_host()}/inventory/{token}"
             self.message_user(
                 request,
-                f"Inventura {inv.id}: link = {url} (token se prikazuje samo sada; regeneriraj ako zatreba).",
+                self._public_link_message(
+                    f"Inventura {inv.id}: public link =",
+                    url,
+                    " (token se prikazuje samo sada; regeneriraj ako zatreba).",
+                ),
                 level=messages.SUCCESS,
             )
             updated += 1
@@ -1063,7 +1086,11 @@ class InventoryAdmin(admin.ModelAdmin):
                 url = f"{request.scheme}://{request.get_host()}/inventory/{token}"
                 self.message_user(
                     request,
-                    f"Inventura {inv.id}: otkljucano i generiran novi link = {url}",
+                    self._public_link_message(
+                        f"Inventura {inv.id}: public link =",
+                        url,
+                        " (otkljucano i generiran novi link).",
+                    ),
                     level=messages.SUCCESS,
                 )
                 updated += 1

@@ -34,6 +34,18 @@ type CartItem = {
   quantity: string;
 };
 
+const FALLBACK_CATEGORY_LABEL = "Ostalo";
+
+const getCategoryGroupLabel = (item: SupplierArtikl) =>
+  item.categoryPath.length ? item.categoryPath.join(" / ") : FALLBACK_CATEGORY_LABEL;
+
+const getCategoryMetaLabel = (item: SupplierArtikl) => {
+  if (item.categoryPath.length) {
+    return item.categoryPath.join(" / ");
+  }
+  return item.categoryName || FALLBACK_CATEGORY_LABEL;
+};
+
 export default function EditPurchaseOrderPage() {
   const params = useParams();
   const router = useRouter();
@@ -60,6 +72,18 @@ export default function EditPurchaseOrderPage() {
   const [activeGroupIndex, setActiveGroupIndex] = useState(0);
   const pageEndRef = useRef<HTMLDivElement | null>(null);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
+
+  const getSupplierDefaultPaymentTypeId = (nextSupplierId: string) => {
+    if (!nextSupplierId) {
+      return "";
+    }
+    const supplier = suppliers.find(
+      (entry) => String(entry.id) === String(nextSupplierId)
+    );
+    return supplier?.defaultPaymentTypeId
+      ? String(supplier.defaultPaymentTypeId)
+      : "";
+  };
 
   useEffect(() => {
     const run = async () => {
@@ -203,7 +227,7 @@ export default function EditPurchaseOrderPage() {
   const groupedArtikli = useMemo(() => {
     const groups: Record<string, SupplierArtikl[]> = {};
     for (const item of artikli) {
-      const key = item.baseGroup || "Ostalo";
+      const key = getCategoryGroupLabel(item);
       if (!groups[key]) {
         groups[key] = [];
       }
@@ -250,7 +274,7 @@ export default function EditPurchaseOrderPage() {
   }, [groupedArtikli]);
 
   const activeGroupLabel =
-    (groupedArtikli[activeGroupIndex]?.[0] as string) || "Ostalo";
+    (groupedArtikli[activeGroupIndex]?.[0] as string) || FALLBACK_CATEGORY_LABEL;
 
   const handleSave = async (): Promise<boolean> => {
     if (!supplierId) {
@@ -322,7 +346,11 @@ export default function EditPurchaseOrderPage() {
           <select
             value={supplierId}
             onChange={(event) => {
-              setSupplierId(event.target.value);
+              const nextSupplierId = event.target.value;
+              setSupplierId(nextSupplierId);
+              setPaymentTypeId((current) =>
+                current || getSupplierDefaultPaymentTypeId(nextSupplierId)
+              );
               if (initialLoadDone) {
                 setCart([]);
                 setQuantities({});
@@ -419,13 +447,13 @@ export default function EditPurchaseOrderPage() {
                       >
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                           <div className="flex items-center gap-4">
-                            <div className="h-[77px] w-[48px] overflow-hidden rounded-xl border border-black/10 bg-white">
-                              {item.image46x75 ? (
+                            <div className="flex h-[77px] w-[50px] items-center justify-center overflow-hidden rounded-xl border border-black/10 bg-white">
+                              {item.image50x75 ? (
                                 // eslint-disable-next-line @next/next/no-img-element
                                 <img
-                                  src={item.image46x75}
+                                  src={item.image50x75}
                                   alt={item.name}
-                                  className="h-full w-full object-cover"
+                                  className="max-h-full max-w-full object-contain"
                                 />
                               ) : (
                                 <div className="flex h-full w-full items-center justify-center text-xs text-black/40">
@@ -436,8 +464,7 @@ export default function EditPurchaseOrderPage() {
                             <div>
                               <p className="text-sm font-semibold">{item.name}</p>
                               <p className="text-xs uppercase tracking-[0.2em] text-black/50">
-                                {item.code || "code"} ·{" "}
-                                {item.baseGroup || "base group"}
+                                {item.code || "code"} · {getCategoryMetaLabel(item)}
                               </p>
                               <p className="text-xs text-black/60">
                                 JM: {item.unitName || "?"} · Cijena:{" "}

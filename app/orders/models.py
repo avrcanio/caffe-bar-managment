@@ -57,6 +57,10 @@ class PurchaseOrder(models.Model):
         blank=True,
         verbose_name="vrijeme potvrde",
     )
+    updated_at = models.DateTimeField(
+        auto_now=True,
+        verbose_name="zadnja izmjena",
+    )
     total_net = models.DecimalField(
         max_digits=12,
         decimal_places=2,
@@ -97,6 +101,9 @@ class PurchaseOrder(models.Model):
         return f"PurchaseOrder {self.id}"
 
     def save(self, *args, **kwargs):
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None:
+            kwargs["update_fields"] = set(update_fields) | {"updated_at"}
         super().save(*args, **kwargs)
         self.recalculate_totals()
 
@@ -113,6 +120,7 @@ class PurchaseOrder(models.Model):
         return token
 
     def recalculate_totals(self):
+        now = timezone.now()
         items = self.items.select_related("artikl__tax_group", "artikl__deposit")
         total_net = Decimal("0")
         total_deposit = Decimal("0")
@@ -141,7 +149,12 @@ class PurchaseOrder(models.Model):
             total_net=total_net,
             total_gross=total_gross,
             total_deposit=total_deposit,
+            updated_at=now,
         )
+        self.total_net = total_net
+        self.total_gross = total_gross
+        self.total_deposit = total_deposit
+        self.updated_at = now
 
     def get_tax_group_totals(self):
         totals = {}

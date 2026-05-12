@@ -6,6 +6,18 @@ const nextConfig = {
   async headers() {
     return [
       {
+        source: "/",
+        headers: [
+          { key: "Cache-Control", value: "no-store, no-cache, must-revalidate" },
+        ],
+      },
+      {
+        source: "/login",
+        headers: [
+          { key: "Cache-Control", value: "no-store, no-cache, must-revalidate" },
+        ],
+      },
+      {
         source: "/download/Blagajna.appinstaller",
         headers: [
           { key: "Content-Type", value: "application/appinstaller" },

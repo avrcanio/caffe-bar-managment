@@ -16,6 +16,7 @@ build/
 db.sqlite3
 db.sqlite3-journal
 /media
+/app/media/
 /app/media/racuni/
 /app/media/mail_attachments/
 /static
@@ -51,6 +52,7 @@ frontend/.env.local.migration.template
 # IDE
 .vscode/
 .idea/
+.codex
 *.swp
 *.swo
 *~
@@ -67,7 +69,11 @@ cookies.txt
 .env.dev
 dev_dump.dump
 backup/
+backups/
 caddy/certs/
 _archive/
+app/download/
 download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle
 frontend/public/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle
+frontend/public/download/*
+remaris/primke2025.json

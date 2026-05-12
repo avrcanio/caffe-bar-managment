@@ -14,7 +14,7 @@ class RemarisConnector:
         self.password = password or os.getenv("REMARIS_PASSWORD")
         self.session = session or requests.Session()
         self.cookie_path = Path(
-            os.getenv("REMARIS_COOKIE_PATH", "/srv/mozzart/.remaris_cookies.json")
+            os.getenv("REMARIS_COOKIE_PATH", "/opt/stacks/mozart/.remaris_cookies.json")
         )
         self.cookie_readonly = False
         self.raw_cookie_header = None

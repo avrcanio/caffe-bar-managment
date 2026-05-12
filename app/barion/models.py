@@ -1,3 +1,4 @@
+from datetime import time
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.conf import settings
@@ -550,22 +551,93 @@ class ProductPopularitySnapshot(models.Model):
         on_delete=models.CASCADE,
         related_name="barion_popularity_snapshot",
     )
-    sold_qty_30d = models.DecimalField(max_digits=14, decimal_places=4, default=Decimal("0.0000"))
-    sold_qty_night_weekend = models.DecimalField(max_digits=14, decimal_places=4, default=Decimal("0.0000"))
-    window_days = models.PositiveIntegerField(default=30)
+    sold_qty_day = models.DecimalField(max_digits=14, decimal_places=4, default=Decimal("0.0000"))
+    sold_qty_night = models.DecimalField(max_digits=14, decimal_places=4, default=Decimal("0.0000"))
+    day_lookback_days = models.PositiveIntegerField(default=30)
+    night_lookback_days = models.PositiveIntegerField(default=30)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = "Product popularity snapshot"
         verbose_name_plural = "Product popularity snapshots"
         indexes = [
-            models.Index(fields=["-sold_qty_30d"], name="idx_barion_pop_qty_desc"),
-            models.Index(fields=["-sold_qty_night_weekend"], name="idx_barion_pop_night_qty_desc"),
+            models.Index(fields=["-sold_qty_day"], name="idx_barion_pop_day_qty_desc"),
+            models.Index(fields=["-sold_qty_night"], name="idx_barion_pop_night_qty_desc"),
             models.Index(fields=["updated_at"], name="idx_barion_pop_updated"),
         ]
 
     def __str__(self) -> str:
-        return f"{self.artikl_id}: {self.sold_qty_30d}"
+        return f"{self.artikl_id}: {self.sold_qty_day}"
+
+
+class BarionCategory(models.Model):
+    category = models.ForeignKey(
+        "artikli.Category",
+        on_delete=models.CASCADE,
+        related_name="barion_categories",
+    )
+    is_active = models.BooleanField(default=True)
+    sort_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Barion category"
+        verbose_name_plural = "Barion categories"
+        ordering = ["sort_order", "category__name", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["category"], name="uniq_barion_category_category"),
+        ]
+
+    def __str__(self) -> str:
+        return f"Barion: {self.category}"
+
+
+class BarionCategorySettings(models.Model):
+    day_start = models.TimeField(default=time(7, 0))
+    day_end = models.TimeField(default=time(20, 0))
+    night_start = models.TimeField(default=time(20, 0))
+    night_end = models.TimeField(default=time(2, 0))
+    day_lookback_days = models.PositiveIntegerField(default=30)
+    night_lookback_days = models.PositiveIntegerField(default=30)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Barion category settings"
+        verbose_name_plural = "Barion category settings"
+
+    def clean(self):
+        if self.day_start == self.day_end:
+            raise ValidationError({"day_end": "Day period ne može imati isti početak i kraj."})
+        if self.night_start == self.night_end:
+            raise ValidationError({"night_end": "Night period ne može imati isti početak i kraj."})
+        if self.day_lookback_days < 1:
+            raise ValidationError({"day_lookback_days": "Day lookback mora biti >= 1."})
+        if self.night_lookback_days < 1:
+            raise ValidationError({"night_lookback_days": "Night lookback mora biti >= 1."})
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    @classmethod
+    def get_solo(cls):
+        instance, _ = cls.objects.get_or_create(
+            pk=1,
+            defaults={
+                "day_start": time(7, 0),
+                "day_end": time(20, 0),
+                "night_start": time(20, 0),
+                "night_end": time(2, 0),
+                "day_lookback_days": 30,
+                "night_lookback_days": 30,
+            },
+        )
+        return instance
+
+    def __str__(self) -> str:
+        return "Barion category settings"
 
 
 class BarionRuntimeMode(models.Model):
@@ -907,3 +979,93 @@ class CheckItemModifierSelection(models.Model):
     def clean(self):
         if self.option_id and self.quantity != 1:
             raise ValidationError("Simple modifier selection quantity mora biti 1.")
+        if self.quantity <= 0:
+            raise ValidationError("quantity mora biti >= 1.")
+
+        if self.check_item_id and self.option_id:
+            if self.group_id != self.option.group_id:
+                raise ValidationError("Option ne pripada selection.group.")
+            if self.check_item_id != self.check_item.id:
+                raise ValidationError("Selection nije vezan za očekivani check item.")
+            if self.group.type != ItemModifierGroup.Type.SIMPLE:
+                raise ValidationError("Simple selection zahtijeva group.type=simple.")
+
+        if self.check_item_id and self.bundle_option_id:
+            if self.group_id != self.bundle_option.group_id:
+                raise ValidationError("Bundle option ne pripada selection.group.")
+            if self.group.type != ItemModifierGroup.Type.BUNDLE:
+                raise ValidationError("Bundle selection zahtijeva group.type=bundle.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class BarionCatalogState(models.Model):
+    catalog_version = models.BigIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Barion catalog state"
+        verbose_name_plural = "Barion catalog state"
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        return super().save(*args, **kwargs)
+
+    @classmethod
+    def get_solo(cls):
+        instance, _ = cls.objects.get_or_create(pk=1, defaults={"catalog_version": 0})
+        return instance
+
+    def __str__(self) -> str:
+        return f"Catalog v{self.catalog_version}"
+
+
+class BarionCatalogSyncEvent(models.Model):
+    class EntityType(models.TextChoices):
+        LAYOUT = "layout", "Layout"
+        CATEGORY = "category", "Category"
+        PRODUCT = "product", "Product"
+
+    class Operation(models.TextChoices):
+        UPSERT = "upsert", "Upsert"
+        DELETE = "delete", "Delete"
+
+    version = models.BigIntegerField()
+    entity_type = models.CharField(max_length=20, choices=EntityType.choices)
+    entity_id = models.BigIntegerField()
+    operation = models.CharField(max_length=20, choices=Operation.choices)
+    changed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Barion catalog sync event"
+        verbose_name_plural = "Barion catalog sync events"
+        ordering = ["version", "id"]
+        indexes = [
+            models.Index(fields=["version"], name="idx_barion_cat_evt_ver"),
+            models.Index(fields=["entity_type", "entity_id"], name="idx_barion_cat_evt_ent"),
+            models.Index(fields=["changed_at"], name="idx_barion_cat_evt_chg"),
+        ]
+
+    def __str__(self) -> str:
+        return f"v{self.version} {self.entity_type}:{self.entity_id} {self.operation}"
+
+
+class BarionProductSyncState(models.Model):
+    artikl = models.OneToOneField(
+        "artikli.Artikl",
+        on_delete=models.CASCADE,
+        related_name="barion_sync_state",
+    )
+    image_version = models.BigIntegerField(default=1)
+    modifier_version = models.BigIntegerField(default=1)
+    last_catalog_version = models.BigIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Barion product sync state"
+        verbose_name_plural = "Barion product sync states"
+
+    def __str__(self) -> str:
+        return f"{self.artikl_id} img={self.image_version} mod={self.modifier_version}"

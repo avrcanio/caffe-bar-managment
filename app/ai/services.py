@@ -11,7 +11,7 @@ import requests
 from django.db.models import Count, DecimalField, ExpressionWrapper, F, Q, Sum
 from django.utils import timezone
 
-from artikli.models import Artikl, ArtiklDetail, Normativ, DrinkCategory
+from artikli.models import Artikl, ArtiklDetail, Normativ, Category
 from sales.models import SalesPriceItem
 from orders.models import SupplierPriceItem
 from django.contrib.auth import get_user_model
@@ -173,7 +173,7 @@ def _extract_time_filter_ai(question: str, today: date) -> Optional[Dict[str, An
     }
 
 
-def _drink_category_outflow_response(
+def _category_outflow_response(
     *,
     date_from: date,
     date_to: date,
@@ -184,7 +184,7 @@ def _drink_category_outflow_response(
 ) -> Tuple[str, List[ToolResult]]:
     """
     "Izlaz" = prodaja (SalesInvoice/SalesInvoiceItem) + reprezentacija
-    (Representation/RepresentationItem + RepresentationReason) za zadanu drink kategoriju.
+    (Representation/RepresentationItem + RepresentationReason) za zadanu kategoriju.
     """
     max_detail_rows = int(os.getenv("AI_MAX_DETAIL_ROWS", "500"))
     max_text_rows = int(os.getenv("AI_MAX_TEXT_ROWS", "120"))
@@ -194,7 +194,7 @@ def _drink_category_outflow_response(
     sales_qs = SalesInvoiceItem.objects.select_related("invoice", "artikl").filter(
         invoice__issued_on__gte=date_from,
         invoice__issued_on__lte=date_to,
-        artikl__drink_category_id__in=category_ids,
+        artikl__category_id__in=category_ids,
     )
     if warehouse_rm_id is not None:
         sales_qs = sales_qs.filter(invoice__warehouse_id=warehouse_rm_id)
@@ -234,7 +234,7 @@ def _drink_category_outflow_response(
         "artikl",
     ).filter(
         representation__in=reps_qs,
-        artikl__drink_category_id__in=category_ids,
+        artikl__category_id__in=category_ids,
     )
     rep_amount_expr = ExpressionWrapper(
         F("quantity") * F("price"),
@@ -480,7 +480,7 @@ def _drink_category_outflow_response(
             arguments={
                 "date_from": date_from.isoformat(),
                 "date_to": date_to.isoformat(),
-                "query": f"{category_label} (drink_category)",
+                "query": f"{category_label} (category)",
                 "warehouse_rm_id": warehouse_rm_id,
             },
             result={"summary": _normalize(sales_agg), "items": sales_items},
@@ -490,7 +490,7 @@ def _drink_category_outflow_response(
             arguments={
                 "date_from": date_from.isoformat(),
                 "date_to": date_to.isoformat(),
-                "query": f"{category_label} (drink_category)",
+                "query": f"{category_label} (category)",
                 "warehouse_rm_id": warehouse_rm_id,
             },
             result=rep_tool_payload,
@@ -596,7 +596,7 @@ def _extract_time_filter(normalized_question: str, today: date):
     return None
 
 
-def _match_drink_category(normalized_question: str) -> Optional[Dict[str, Any]]:
+def _match_category(normalized_question: str) -> Optional[Dict[str, Any]]:
     q = (normalized_question or "").lower()
     q_ascii = (
         q.replace("č", "c")
@@ -605,7 +605,7 @@ def _match_drink_category(normalized_question: str) -> Optional[Dict[str, Any]]:
         .replace("š", "s")
         .replace("đ", "dj")
     )
-    categories = list(DrinkCategory.objects.filter(is_active=True).values_list("id", "name"))
+    categories = list(Category.objects.filter(is_active=True).values_list("id", "name"))
     for category_id, name in categories:
         if not name:
             continue
@@ -618,7 +618,7 @@ def _match_drink_category(normalized_question: str) -> Optional[Dict[str, Any]]:
             .replace("đ", "dj")
         )
         if name_ascii and name_ascii in q_ascii:
-            cat = DrinkCategory.objects.filter(id=category_id).first()
+            cat = Category.objects.filter(id=category_id).first()
             if not cat:
                 return {"label": name, "ids": [category_id]}
             target = None
@@ -649,7 +649,7 @@ def _match_drink_category(normalized_question: str) -> Optional[Dict[str, Any]]:
     ]
     for canonical, tokens in synonym_groups:
         if any(token in q_ascii for token in tokens):
-            qs = DrinkCategory.objects.filter(is_active=True, name__icontains=canonical)
+            qs = Category.objects.filter(is_active=True, name__icontains=canonical)
             matches = list(qs)
             if matches:
                 min_level = min(cat.level for cat in matches)
@@ -1515,7 +1515,7 @@ def handle_ai_query(question: str) -> Tuple[str, List[ToolResult]]:
     time_filter = _extract_time_filter(normalized_question, today)
     if not time_filter:
         time_filter = _extract_time_filter_ai(question, today)
-    drink_category_match = _match_drink_category(normalized_question) if time_filter else None
+    category_match = _match_category(normalized_question) if time_filter else None
     waiter_user = None
     waiter_name = None
     if "konobar" in normalized_question:
@@ -1547,11 +1547,11 @@ def handle_ai_query(question: str) -> Tuple[str, List[ToolResult]]:
     if "prikaz" in normalized_question_ascii or "pokaz" in normalized_question_ascii:
         query = _extract_list_query(question)
         if query:
-            category_match = _match_drink_category(query)
+            category_match = _match_category(query)
             if category_match:
                 matches = list(
                     Artikl.objects.filter(
-                        drink_category_id__in=category_match["ids"]
+                        category_id__in=category_match["ids"]
                     ).order_by("name")[:50]
                 )
             else:
@@ -1573,11 +1573,11 @@ def handle_ai_query(question: str) -> Tuple[str, List[ToolResult]]:
 
     artikl_list_query = _extract_artikl_list_query(question)
     if artikl_list_query:
-        category_match = _match_drink_category(artikl_list_query)
+        category_match = _match_category(artikl_list_query)
         if category_match:
             matches = list(
                 Artikl.objects.filter(
-                    drink_category_id__in=category_match["ids"]
+                    category_id__in=category_match["ids"]
                 ).order_by("name")[:50]
             )
         else:
@@ -1646,7 +1646,7 @@ def handle_ai_query(question: str) -> Tuple[str, List[ToolResult]]:
     # Must run before the generic "list artikli by category" fallback.
     if (
         time_filter
-        and drink_category_match
+        and category_match
         and any(
             token in normalized_question_ascii
             for token in (
@@ -1660,11 +1660,11 @@ def handle_ai_query(question: str) -> Tuple[str, List[ToolResult]]:
             )
         )
     ):
-        return _drink_category_outflow_response(
+        return _category_outflow_response(
             date_from=time_filter["start"],
             date_to=time_filter["end"],
-            category_label=drink_category_match["label"],
-            category_ids=drink_category_match["ids"],
+            category_label=category_match["label"],
+            category_ids=category_match["ids"],
             label=time_filter["label"],
             warehouse_rm_id=warehouse_rm_id,
         )
@@ -1714,11 +1714,11 @@ def handle_ai_query(question: str) -> Tuple[str, List[ToolResult]]:
             exact = Artikl.objects.filter(name__iexact=query).first()
             if exact:
                 return _build_artikl_info(exact, warehouse_rm_id=warehouse_rm_id), []
-            category_match = _match_drink_category(query)
+            category_match = _match_category(query)
             if category_match:
                 matches = list(
                     Artikl.objects.filter(
-                        drink_category_id__in=category_match["ids"]
+                        category_id__in=category_match["ids"]
                     ).order_by("name")[:50]
                 )
                 if matches:
@@ -1840,7 +1840,7 @@ def handle_ai_query(question: str) -> Tuple[str, List[ToolResult]]:
         qs = SalesInvoiceItem.objects.select_related("invoice", "artikl").filter(
             invoice__issued_on__gte=date_from,
             invoice__issued_on__lte=date_to,
-            artikl__drink_category__name__icontains="kava",
+            artikl__category__name__icontains="kava",
         )
         if warehouse_rm_id is not None:
             qs = qs.filter(invoice__warehouse_id=warehouse_rm_id)
@@ -1873,18 +1873,18 @@ def handle_ai_query(question: str) -> Tuple[str, List[ToolResult]]:
                 arguments={
                     "date_from": date_from.isoformat(),
                     "date_to": date_to.isoformat(),
-                    "query": "kava (drink_category)",
+                    "query": "kava (category)",
                     "warehouse_rm_id": warehouse_rm_id,
                 },
                 result={"items": items, "date_from": date_from.isoformat(), "date_to": date_to.isoformat()},
             )
         ]
 
-    def _drink_category_sales_response(category_label: str, category_ids: List[int], label: str, date_from: date, date_to: date):
+    def _category_sales_response(category_label: str, category_ids: List[int], label: str, date_from: date, date_to: date):
         qs = SalesInvoiceItem.objects.select_related("invoice", "artikl").filter(
             invoice__issued_on__gte=date_from,
             invoice__issued_on__lte=date_to,
-            artikl__drink_category_id__in=category_ids,
+            artikl__category_id__in=category_ids,
         )
         if warehouse_rm_id is not None:
             qs = qs.filter(invoice__warehouse_id=warehouse_rm_id)
@@ -1917,14 +1917,14 @@ def handle_ai_query(question: str) -> Tuple[str, List[ToolResult]]:
                 arguments={
                     "date_from": date_from.isoformat(),
                     "date_to": date_to.isoformat(),
-                    "query": f"{category_label} (drink_category)",
+                    "query": f"{category_label} (category)",
                     "warehouse_rm_id": warehouse_rm_id,
                 },
                 result={"items": items, "date_from": date_from.isoformat(), "date_to": date_to.isoformat()},
             )
         ]
 
-    if time_filter and drink_category_match and ("kupljeno" in normalized_question or "primka" in normalized_question):
+    if time_filter and category_match and ("kupljeno" in normalized_question or "primka" in normalized_question):
         supplier_match = re.search(r"kod\s+(.+)$", normalized_question, flags=re.IGNORECASE)
         supplier_query = None
         if supplier_match:
@@ -1948,7 +1948,7 @@ def handle_ai_query(question: str) -> Tuple[str, List[ToolResult]]:
             supplier_name = inputs.values_list("supplier__name", flat=True).first() or supplier_query
             items_qs = WarehouseInputItem.objects.select_related("warehouse_input", "artikl").filter(
                 warehouse_input__in=inputs,
-                artikl__drink_category_id__in=drink_category_match["ids"],
+                artikl__category_id__in=category_match["ids"],
             )
             rows = (
                 items_qs.values("artikl_id", "artikl__name")
@@ -1970,21 +1970,21 @@ def handle_ai_query(question: str) -> Tuple[str, List[ToolResult]]:
                     for idx, item in enumerate(items)
                 ]
                 answer = (
-                    f"Kupljeno {drink_category_match['label']} kod {supplier_name} "
+                    f"Kupljeno {category_match['label']} kod {supplier_name} "
                     f"({time_filter['start'].isoformat()} do {time_filter['end'].isoformat()}):\n"
                     + "\n".join(lines)
                 )
             else:
                 answer = (
-                    f"Nema kupljenog {drink_category_match['label']} kod {supplier_name} "
+                    f"Nema kupljenog {category_match['label']} kod {supplier_name} "
                     f"u razdoblju {time_filter['start'].isoformat()} do {time_filter['end'].isoformat()}."
                 )
             return answer, []
 
-    if drink_category_match and time_filter:
-        return _drink_category_sales_response(
-            drink_category_match["label"],
-            drink_category_match["ids"],
+    if category_match and time_filter:
+        return _category_sales_response(
+            category_match["label"],
+            category_match["ids"],
             time_filter["label"],
             time_filter["start"],
             time_filter["end"],

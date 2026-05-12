@@ -216,6 +216,14 @@ CELERY_BEAT_SCHEDULE = {
     },
 }
 
+# Barion catalog sync push trigger
+BARION_FCM_ENABLED = os.getenv("BARION_FCM_ENABLED", "False").lower() == "true"
+BARION_GCLOUD_API_URL = os.getenv("BARION_GCLOUD_API_URL", "http://gcloud-api:8080")
+BARION_GCLOUD_CALLER_TOKEN = os.getenv("BARION_GCLOUD_CALLER_TOKEN", "")
+BARION_GCLOUD_TIMEOUT = float(os.getenv("BARION_GCLOUD_TIMEOUT", "10"))
+BARION_FCM_PROJECT_ALIAS = os.getenv("BARION_FCM_PROJECT_ALIAS", "fcm_barion")
+BARION_FCM_TOPIC = os.getenv("BARION_FCM_TOPIC", "")
+
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/

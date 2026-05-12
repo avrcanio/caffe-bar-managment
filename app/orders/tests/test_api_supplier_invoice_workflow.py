@@ -317,3 +317,169 @@ class SupplierInvoiceWorkflowApiTests(TestCase):
         self.assertFalse(payload["automation"]["supplier_invoice_created"])
         self.assertFalse(payload["automation"]["supplier_invoice_posted"])
         self.assertIsNone(payload["automation"]["supplier_invoice_id"])
+
+    def test_purchase_order_warehouse_input_over_receipt_updates_order_quantity(self):
+        from orders.models import PurchaseOrderItem
+
+        order = self._create_order(self.payment_deferred)
+        item = PurchaseOrderItem.objects.create(
+            order=order,
+            artikl=self.artikl,
+            quantity=Decimal("2.0000"),
+            unit_of_measure=self.unit,
+            price=Decimal("5.00"),
+        )
+
+        response = self.client.post(
+            f"/api/purchase-orders/{order.id}/warehouse-inputs/",
+            {
+                "document_date": str(timezone.localdate()),
+                "warehouse_id": self.warehouse.rm_id,
+                "invoice_code": "INV-OVER-1",
+                "delivery_note": "OT-OVER-1",
+                "currency": "EUR",
+                "items": [
+                    {
+                        "purchase_order_item_id": item.id,
+                        "received_quantity": "3.5000",
+                        "confirmed": True,
+                        "expected_unit_price": "5.00",
+                    }
+                ],
+            },
+            format="json",
+            secure=True,
+        )
+
+        self.assertEqual(response.status_code, 201, response.json())
+        item.refresh_from_db()
+        order.refresh_from_db()
+        self.assertEqual(item.quantity, Decimal("3.5000"))
+        self.assertEqual(order.status, PurchaseOrder.STATUS_RECEIVED_ALL)
+
+        detail = self.client.get(
+            f"/api/purchase-orders/{order.id}/",
+            secure=True,
+        )
+        self.assertEqual(detail.status_code, 200, detail.json())
+        payload = detail.json()
+        self.assertEqual(payload["status"], PurchaseOrder.STATUS_RECEIVED_ALL)
+        self.assertEqual(payload["items"][0]["quantity"], "3.5000")
+        self.assertEqual(payload["items"][0]["received_quantity"], 3.5)
+        self.assertEqual(payload["items"][0]["remaining_quantity"], 0.0)
+
+    def test_purchase_order_warehouse_input_partial_receipt_keeps_remaining_quantity(self):
+        from orders.models import PurchaseOrderItem
+
+        order = self._create_order(self.payment_deferred)
+        item = PurchaseOrderItem.objects.create(
+            order=order,
+            artikl=self.artikl,
+            quantity=Decimal("5.0000"),
+            unit_of_measure=self.unit,
+            price=Decimal("5.00"),
+        )
+
+        response = self.client.post(
+            f"/api/purchase-orders/{order.id}/warehouse-inputs/",
+            {
+                "document_date": str(timezone.localdate()),
+                "warehouse_id": self.warehouse.rm_id,
+                "invoice_code": "INV-PARTIAL-1",
+                "delivery_note": "OT-PARTIAL-1",
+                "currency": "EUR",
+                "items": [
+                    {
+                        "purchase_order_item_id": item.id,
+                        "received_quantity": "3.0000",
+                        "confirmed": True,
+                        "expected_unit_price": "5.00",
+                    }
+                ],
+            },
+            format="json",
+            secure=True,
+        )
+
+        self.assertEqual(response.status_code, 201, response.json())
+        order.refresh_from_db()
+        self.assertEqual(order.status, PurchaseOrder.STATUS_RECEIVED)
+
+        detail = self.client.get(
+            f"/api/purchase-orders/{order.id}/",
+            secure=True,
+        )
+        self.assertEqual(detail.status_code, 200, detail.json())
+        payload = detail.json()
+        self.assertEqual(payload["status"], PurchaseOrder.STATUS_RECEIVED)
+        self.assertEqual(payload["items"][0]["quantity"], "5.0000")
+        self.assertEqual(payload["items"][0]["received_quantity"], 3.0)
+        self.assertEqual(payload["items"][0]["remaining_quantity"], 2.0)
+
+    def test_purchase_order_warehouse_input_mixed_over_and_partial_receipt_stays_partial(self):
+        from orders.models import PurchaseOrderItem
+
+        order = self._create_order(self.payment_deferred)
+        over_item = PurchaseOrderItem.objects.create(
+            order=order,
+            artikl=self.artikl,
+            quantity=Decimal("2.0000"),
+            unit_of_measure=self.unit,
+            price=Decimal("5.00"),
+        )
+        second_artikl = Artikl.objects.create(rm_id=11, name="Caj")
+        partial_item = PurchaseOrderItem.objects.create(
+            order=order,
+            artikl=second_artikl,
+            quantity=Decimal("5.0000"),
+            unit_of_measure=self.unit,
+            price=Decimal("4.00"),
+        )
+
+        response = self.client.post(
+            f"/api/purchase-orders/{order.id}/warehouse-inputs/",
+            {
+                "document_date": str(timezone.localdate()),
+                "warehouse_id": self.warehouse.rm_id,
+                "invoice_code": "INV-MIXED-1",
+                "delivery_note": "OT-MIXED-1",
+                "currency": "EUR",
+                "items": [
+                    {
+                        "purchase_order_item_id": over_item.id,
+                        "received_quantity": "3.5000",
+                        "confirmed": True,
+                        "expected_unit_price": "5.00",
+                    },
+                    {
+                        "purchase_order_item_id": partial_item.id,
+                        "received_quantity": "3.0000",
+                        "confirmed": True,
+                        "expected_unit_price": "4.00",
+                    },
+                ],
+            },
+            format="json",
+            secure=True,
+        )
+
+        self.assertEqual(response.status_code, 201, response.json())
+        over_item.refresh_from_db()
+        partial_item.refresh_from_db()
+        order.refresh_from_db()
+        self.assertEqual(over_item.quantity, Decimal("3.5000"))
+        self.assertEqual(partial_item.quantity, Decimal("5.0000"))
+        self.assertEqual(order.status, PurchaseOrder.STATUS_RECEIVED)
+
+        detail = self.client.get(
+            f"/api/purchase-orders/{order.id}/",
+            secure=True,
+        )
+        self.assertEqual(detail.status_code, 200, detail.json())
+        payload = detail.json()
+        item_map = {row["id"]: row for row in payload["items"]}
+        self.assertEqual(item_map[over_item.id]["quantity"], "3.5000")
+        self.assertEqual(item_map[over_item.id]["remaining_quantity"], 0.0)
+        self.assertEqual(item_map[partial_item.id]["quantity"], "5.0000")
+        self.assertEqual(item_map[partial_item.id]["received_quantity"], 3.0)
+        self.assertEqual(item_map[partial_item.id]["remaining_quantity"], 2.0)

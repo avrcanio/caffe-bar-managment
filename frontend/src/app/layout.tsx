@@ -5,6 +5,9 @@ import AuthGuard from "@/components/AuthGuard";
 
 const spaceGrotesk = Space_Grotesk({ subsets: ["latin"] });
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export const metadata: Metadata = {
   title: "Mozart caffe",
   description: "Mozart caffe",

@@ -657,7 +657,7 @@ export default function PurchaseOrderDetailPage() {
           <div className="max-h-[90vh] w-full max-w-3xl overflow-auto rounded-3xl border border-black/15 bg-white p-6 shadow-[0_30px_60px_rgba(10,10,10,0.3)]">
             <h3 className={`${dmSerif.className} text-2xl`}>Kreiraj primku</h3>
             <p className="mt-2 text-sm text-black/60">
-              Prikazuju se samo stavke s preostalom količinom. Confirmed je pomoćna kontrola po stavci.
+              Prikazuju se samo stavke s preostalom količinom. Manja količina ostavlja razliku za kasniju primku, a veća količina proširuje narudžbu na stvarno zaprimljeno.
             </p>
             {receiptError ? (
               <p className="mt-3 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
@@ -747,7 +747,7 @@ export default function PurchaseOrderDetailPage() {
                       Confirmed
                     </label>
                     <p className="text-xs text-black/60 md:text-right">
-                      PO: {formatEuro(item.price)} • Preostalo: {item.remainingQuantity}
+                      PO: {formatEuro(item.price)} • Naručeno: {item.quantity} • Preostalo: {item.remainingQuantity}
                     </p>
                   </div>
                 );
@@ -758,6 +758,9 @@ export default function PurchaseOrderDetailPage() {
             </p>
             <p className="text-xs text-black/60">
               Neto (narudžba): {formatEuro(order.totalNet)}
+            </p>
+            <p className="mt-1 text-xs text-black/60">
+              Potvrđene stavke s količinom većom od naručene bit će spremljene s novom količinom na narudžbi.
             </p>
             <div className="mt-6 flex flex-col gap-3 sm:flex-row">
               <button
@@ -870,7 +873,7 @@ export default function PurchaseOrderDetailPage() {
             <h4 className={`${dmSerif.className} text-xl`}>Upozorenje</h4>
             <p className="mt-2 text-sm text-black/70">
               Nisu potvrđene sve stavke. Kreirat će se primka samo za potvrđene
-              stavke.
+              stavke, a ostatak će ostati otvoren na narudžbi.
             </p>
             <div className="mt-5 flex flex-col gap-3 sm:flex-row">
               <button

@@ -51,6 +51,11 @@ SSH na server koristi ključ s lokalnog računala; u `~/.ssh/config` tipičan al
 
    Prije toga na serveru potvrdi da si na željenoj grani (`main` ili druga).
 
+## Authentication and credentials
+
+- For GitHub `gh` CLI API usage, read and use tokens from `/opt/stacks/hosts.yml`.
+- For Cloudflare access when editing DNS records, use credentials/config from `/opt/stacks/.cloudflare`.
+
 ## Operating Principles
 
 - Prefer small, safe, incremental changes over large rewrites.

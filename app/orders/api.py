@@ -38,6 +38,65 @@ from stock.models import WarehouseStock, WarehouseId
 from stock.services import get_stock_accounting_config, post_warehouse_input_to_stock
 
 
+def _serialize_packaging_numeric(value):
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    return value
+
+
+def _build_packaging_levels_payload(artikl):
+    total = Decimal("1")
+    payloads = []
+    for level in artikl.packaging_levels.order_by("sort_order", "id"):
+        if level.sort_order == 0:
+            current_total = Decimal("1")
+        else:
+            current_total = total * Decimal(str(level.contains_previous or 0))
+        payloads.append(
+            {
+                "id": level.id,
+                "sort_order": level.sort_order,
+                "unit_of_measure": level.unit_of_measure_id,
+                "unit_name": level.unit_of_measure.name,
+                "level_name": level.level_name,
+                "is_base": level.sort_order == 0,
+                "base_quantity_total": _serialize_packaging_numeric(current_total),
+                "contains_previous": level.contains_previous,
+            }
+        )
+        total = current_total
+    return payloads
+
+
+def _build_packaging_breakdown(artikl, quantity):
+    levels = _build_packaging_levels_payload(artikl)
+    if not levels:
+        return []
+
+    remaining = Decimal(str(quantity or 0))
+    breakdown = []
+    for level in reversed(levels):
+        level_total = Decimal(str(level["base_quantity_total"]))
+        if level["is_base"]:
+            level_quantity = remaining
+        else:
+            level_quantity = remaining // level_total
+            remaining -= level_quantity * level_total
+        breakdown.append(
+            {
+                "sort_order": level["sort_order"],
+                "unit_of_measure": level["unit_of_measure"],
+                "unit_name": level["unit_name"],
+                "level_name": level["level_name"],
+                "base_quantity_total": level["base_quantity_total"],
+                "quantity": _serialize_packaging_numeric(level_quantity),
+            }
+        )
+    return breakdown
+
+
 class PurchaseOrderItemSerializer(serializers.ModelSerializer):
     artikl_name = serializers.CharField(source="artikl.name", read_only=True)
     base_group = serializers.SerializerMethodField()
@@ -84,6 +143,7 @@ class PurchaseOrderItemSerializer(serializers.ModelSerializer):
 
 class PurchaseOrderSerializer(serializers.ModelSerializer):
     ordered_at = serializers.DateTimeField(required=False)
+    updated_at = serializers.DateTimeField(read_only=True)
     supplier_name = serializers.CharField(source="supplier.name", read_only=True)
     payment_type_name = serializers.CharField(
         source="payment_type.name", read_only=True
@@ -101,6 +161,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             "supplier",
             "supplier_name",
             "ordered_at",
+            "updated_at",
             "status",
             "status_display",
             "payment_type",
@@ -113,6 +174,18 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             "items",
         ]
 
+    def _resolve_default_payment_type(self, validated_data, instance=None):
+        payment_type = validated_data.get("payment_type")
+        if payment_type is not None:
+            return payment_type
+
+        supplier = validated_data.get("supplier")
+        if supplier is None and instance is not None:
+            supplier = instance.supplier
+        if supplier is None:
+            return None
+        return supplier.default_payment_type
+
     @transaction.atomic
     def create(self, validated_data):
         items_data = validated_data.pop("items", [])
@@ -121,6 +194,7 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
             validated_data["created_by"] = request.user
         if not validated_data.get("ordered_at"):
             validated_data["ordered_at"] = timezone.now()
+        validated_data["payment_type"] = self._resolve_default_payment_type(validated_data)
         order = PurchaseOrder.objects.create(**validated_data)
         for item_data in items_data:
             PurchaseOrderItem.objects.create(order=order, **item_data)
@@ -130,6 +204,10 @@ class PurchaseOrderSerializer(serializers.ModelSerializer):
     @transaction.atomic
     def update(self, instance, validated_data):
         items_data = validated_data.pop("items", None)
+        validated_data["payment_type"] = self._resolve_default_payment_type(
+            validated_data,
+            instance=instance,
+        )
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
@@ -153,7 +231,7 @@ class PurchaseOrderListCreateView(generics.ListCreateAPIView):
     queryset = (
         PurchaseOrder.objects.select_related("supplier", "payment_type", "created_by")
         .prefetch_related("items__artikl__detail__base_group")
-        .order_by("-ordered_at")
+        .order_by("-ordered_at", "-id")
     )
     serializer_class = PurchaseOrderSerializer
     permission_classes = [IsAuthenticated]
@@ -161,13 +239,13 @@ class PurchaseOrderListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         qs = super().get_queryset()
-        status = self.request.query_params.get("status")
+        statuses = self._get_status_filters()
         supplier = self.request.query_params.get("supplier")
         ordered_from = self.request.query_params.get("ordered_from")
         ordered_to = self.request.query_params.get("ordered_to")
 
-        if status:
-            qs = qs.filter(status=status)
+        if statuses:
+            qs = qs.filter(status__in=statuses)
         if supplier:
             qs = qs.filter(supplier_id=supplier)
 
@@ -191,6 +269,16 @@ class PurchaseOrderListCreateView(generics.ListCreateAPIView):
 
         return qs
 
+    def _get_status_filters(self):
+        raw_statuses = self.request.query_params.getlist("status")
+        statuses = []
+        for raw_status in raw_statuses:
+            for candidate in raw_status.split(","):
+                normalized = candidate.strip()
+                if normalized and normalized not in statuses:
+                    statuses.append(normalized)
+        return statuses
+
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
         summary = queryset.aggregate(
@@ -204,7 +292,19 @@ class PurchaseOrderListCreateView(generics.ListCreateAPIView):
             .order_by()
         )
         response = super().list(request, *args, **kwargs)
+        paginated_count = queryset.count()
+        paginated_next = None
+        paginated_previous = None
+        paginated_results = response.data
+        if isinstance(response.data, dict):
+            paginated_count = response.data.get("count", paginated_count)
+            paginated_next = response.data.get("next")
+            paginated_previous = response.data.get("previous")
+            paginated_results = response.data.get("results", response.data)
         response.data = {
+            "count": paginated_count,
+            "next": paginated_next,
+            "previous": paginated_previous,
             "summary": {
                 "count": queryset.count(),
                 "total_net": summary["total_net"] or 0,
@@ -218,11 +318,28 @@ class PurchaseOrderListCreateView(generics.ListCreateAPIView):
                     for item in status_counts
                 },
             },
-            "results": response.data["results"]
-            if isinstance(response.data, dict) and "results" in response.data
-            else response.data,
+            "results": paginated_results,
         }
         return response
+
+
+def _serialize_purchase_order_detail(view_or_none, instance, request=None):
+    po_items = list(instance.items.all().order_by("id"))
+    received_by_artikl = _po_received_by_artikl(instance)
+    remaining_by_item_id = _po_item_remaining_map(po_items, received_by_artikl)
+    serializer_context = {
+        "remaining_by_item_id": remaining_by_item_id,
+    }
+    if request is not None:
+        serializer_context["request"] = request
+    if view_or_none is not None:
+        serializer_context["format"] = getattr(view_or_none, "format_kwarg", None)
+        serializer_context["view"] = view_or_none
+    serializer = PurchaseOrderSerializer(
+        instance,
+        context=serializer_context,
+    )
+    return serializer.data
 
 
 class PurchaseOrderDetailView(generics.RetrieveUpdateAPIView):
@@ -235,17 +352,7 @@ class PurchaseOrderDetailView(generics.RetrieveUpdateAPIView):
 
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
-        po_items = list(instance.items.all().order_by("id"))
-        received_by_artikl = _po_received_by_artikl(instance)
-        remaining_by_item_id = _po_item_remaining_map(po_items, received_by_artikl)
-        serializer = self.get_serializer(
-            instance,
-            context={
-                **self.get_serializer_context(),
-                "remaining_by_item_id": remaining_by_item_id,
-            },
-        )
-        return Response(serializer.data)
+        return Response(_serialize_purchase_order_detail(self, instance, request=request))
 
 
 class PurchaseOrderItemListCreateView(generics.ListCreateAPIView):
@@ -314,6 +421,15 @@ class PurchaseOrderItemPriceUpdateResponseSerializer(serializers.Serializer):
     new_price = serializers.CharField()
     audit = serializers.DictField()
     po_totals = serializers.DictField()
+
+
+class PurchaseOrderStatusTransitionSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(
+        choices=(
+            PurchaseOrder.STATUS_CONFIRMED,
+            PurchaseOrder.STATUS_RECEIVED_ALL,
+        )
+    )
 
 
 class PurchaseOrderItemPriceUpdateView(APIView):
@@ -723,7 +839,6 @@ class PurchaseOrderWarehouseInputCreateView(APIView):
         remaining_map_before = _po_item_remaining_map(po_items, received_by_artikl_before)
 
         lines: list[WarehouseInputItem] = []
-        req_by_id = {int(row["purchase_order_item_id"]): row for row in request_items}
         computed_total_net = Decimal("0.00")
         ordinal = 0
         for req in request_items:
@@ -758,15 +873,9 @@ class PurchaseOrderWarehouseInputCreateView(APIView):
                     },
                     status=400,
                 )
-            if qty > remaining:
-                return Response(
-                    {
-                        "detail": (
-                            f"Kolicina za stavku {po_item.id} ({qty}) prelazi preostalo ({remaining})."
-                        )
-                    },
-                    status=400,
-                )
+            if qty > (po_item.quantity or Decimal("0")):
+                po_item.quantity = qty
+                po_item.save(update_fields=["quantity"])
             ordinal += 1
             line_total = (actual_price * qty).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             tax_rate = (
@@ -852,6 +961,7 @@ class PurchaseOrderWarehouseInputCreateView(APIView):
             detail = "; ".join(exc.messages) if hasattr(exc, "messages") else str(exc)
             return Response({"detail": detail}, status=400)
 
+        po_items = list(order.items.all().order_by("id"))
         received_by_artikl = _po_received_by_artikl(order)
         remaining_map = _po_item_remaining_map(po_items, received_by_artikl)
         if all(v["remaining"] == Decimal("0") for v in remaining_map.values()):
@@ -1060,6 +1170,66 @@ class PurchaseOrderSendView(APIView):
         return Response({"detail": "Narudzba poslana.", "order_id": order.id})
 
 
+class PurchaseOrderStatusTransitionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        request=PurchaseOrderStatusTransitionSerializer,
+        responses={200: PurchaseOrderSerializer},
+    )
+    @transaction.atomic
+    def post(self, request, pk):
+        serializer = PurchaseOrderStatusTransitionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        target_status = serializer.validated_data["status"]
+
+        order = (
+            PurchaseOrder.objects.select_for_update()
+            .filter(pk=pk)
+            .first()
+        )
+        if not order:
+            return Response({"detail": "Narudzba ne postoji."}, status=404)
+
+        current_status = order.status
+        allowed_transitions = {
+            PurchaseOrder.STATUS_CREATED: PurchaseOrder.STATUS_CONFIRMED,
+            PurchaseOrder.STATUS_SENT: PurchaseOrder.STATUS_CONFIRMED,
+            PurchaseOrder.STATUS_RECEIVED: PurchaseOrder.STATUS_RECEIVED_ALL,
+        }
+        expected_target = allowed_transitions.get(current_status)
+        if expected_target != target_status:
+            return Response(
+                {
+                    "detail": (
+                        f"Rucna promjena statusa iz '{current_status}' u "
+                        f"'{target_status}' nije dopustena."
+                    )
+                },
+                status=400,
+            )
+
+        update_fields = ["status"]
+        order.status = target_status
+        if target_status == PurchaseOrder.STATUS_CONFIRMED:
+            order.confirmed_at = timezone.now()
+            update_fields.append("confirmed_at")
+        order.save(update_fields=update_fields)
+        order = (
+            PurchaseOrder.objects.select_related("supplier", "payment_type", "created_by")
+            .prefetch_related("items__artikl__detail__base_group")
+            .get(pk=order.pk)
+        )
+
+        return Response(
+            _serialize_purchase_order_detail(
+                None,
+                order,
+                request=request,
+            )
+        )
+
+
 class SupplierArtiklListView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1073,10 +1243,14 @@ class SupplierArtiklListView(APIView):
         items = (
             SupplierPriceItem.objects.select_related(
                 "artikl",
+                "artikl__category",
+                "artikl__tax_group",
+                "artikl__deposit",
                 "unit_of_measure",
                 "price_list",
                 "artikl__detail__base_group",
             )
+            .prefetch_related("artikl__packaging_levels__unit_of_measure")
             .filter(
                 price_list__supplier_id=supplier_id,
                 price_list__is_active=True,
@@ -1125,20 +1299,38 @@ class SupplierArtiklListView(APIView):
                 )
 
         results = []
+        category_path_cache = {}
+        packaging_cache = {}
         for item, artikl in artikl_entries:
             detail = getattr(artikl, "detail", None)
             base_group = detail.base_group.name if detail and detail.base_group else None
+            category = getattr(artikl, "category", None)
+            if category and category.id not in category_path_cache:
+                category_path_cache[category.id] = list(
+                    category.get_ancestors(include_self=True).values_list("name", flat=True)
+                )
+            category_path = category_path_cache.get(category.id, []) if category else []
             unit = item.unit_of_measure or (detail.unit_of_measure if detail else None)
             unit_id = unit.id if unit else None
             unit_name = unit.name if unit else None
             image_url = artikl.image.url if artikl and artikl.image else None
-            image_46x75_url = None
+            image_50x75_url = None
+            vat_rate = artikl.tax_group.rate if artikl and getattr(artikl, "tax_group", None) else 0
+            deposit_amount = artikl.deposit.amount_eur if artikl and getattr(artikl, "deposit", None) else 0
+            packaging_levels = []
+            packaging_path = ""
+            if artikl:
+                packaging_levels = packaging_cache.setdefault(
+                    artikl.id,
+                    _build_packaging_levels_payload(artikl),
+                )
+                packaging_path = artikl.packaging_path_summary()
             if artikl and artikl.image:
-                image_46x75_url = f"/api/artikli/{artikl.rm_id}/image-46x75/"
+                image_50x75_url = f"/api/artikli/{artikl.rm_id}/image-50x75/"
             if image_url and request is not None:
                 image_url = request.build_absolute_uri(image_url)
-            if image_46x75_url and request is not None:
-                image_46x75_url = request.build_absolute_uri(image_46x75_url)
+            if image_50x75_url and request is not None:
+                image_50x75_url = request.build_absolute_uri(image_50x75_url)
             results.append(
                 {
                     "artikl_id": artikl.id if artikl else None,
@@ -1146,12 +1338,30 @@ class SupplierArtiklListView(APIView):
                     "name": artikl.name if artikl else None,
                     "code": artikl.code if artikl else None,
                     "image": image_url,
-                    "image_46x75": image_46x75_url,
+                    "image_50x75": image_50x75_url,
                     "base_group": base_group,
+                    "vat_rate": vat_rate,
+                    "deposit_amount": deposit_amount,
+                    "category_id": category.id if category else None,
+                    "category_name": category.name if category else None,
+                    "category_sort_order": category.sort_order if category else None,
+                    "category_path": category_path,
+                    "packaging_path": packaging_path,
+                    "packaging_levels": packaging_levels,
                     "unit_of_measure": unit_id,
                     "unit_name": unit_name,
                     "price": item.price,
-                    "stocks": stocks.get(artikl.rm_id, []) if artikl else [],
+                    "stocks": [
+                        {
+                            **stock_row,
+                            "packaging_breakdown": _build_packaging_breakdown(
+                                artikl, stock_row.get("quantity")
+                            ),
+                        }
+                        for stock_row in stocks.get(artikl.rm_id, [])
+                    ]
+                    if artikl
+                    else [],
                 }
             )
 

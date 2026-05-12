@@ -2,12 +2,14 @@ export type SupplierDTO = {
   id: number;
   name: string;
   rm_id: number;
+  default_payment_type?: number | null;
 };
 
 export type Supplier = {
   id: number;
   name: string;
   rmId: number;
+  defaultPaymentTypeId: number | null;
 };
 
 export type StockRowDTO = {
@@ -22,8 +24,11 @@ export type SupplierArtiklDTO = {
   name: string;
   code: string | null;
   image: string | null;
-  image_46x75?: string | null;
+  image_50x75?: string | null;
   base_group: string | null;
+  category_id?: number | null;
+  category_name?: string | null;
+  category_path?: string[] | null;
   unit_of_measure: number | null;
   unit_name: string | null;
   price: string | null;
@@ -42,8 +47,11 @@ export type SupplierArtikl = {
   name: string;
   code: string | null;
   image: string | null;
-  image46x75?: string | null;
+  image50x75?: string | null;
   baseGroup: string | null;
+  categoryId: number | null;
+  categoryName: string | null;
+  categoryPath: string[];
   unitId: number | null;
   unitName: string | null;
   price: number | null;
@@ -63,6 +71,7 @@ export const mapSuppliers = (items: SupplierDTO[]): Supplier[] =>
     id: supplier.id,
     name: supplier.name,
     rmId: supplier.rm_id,
+    defaultPaymentTypeId: supplier.default_payment_type ?? null,
   }));
 
 export const mapSupplierArtikli = (
@@ -74,8 +83,11 @@ export const mapSupplierArtikli = (
     name: item.name,
     code: item.code,
     image: item.image,
-    image46x75: item.image_46x75 ?? null,
+    image50x75: item.image_50x75 ?? null,
     baseGroup: item.base_group,
+    categoryId: item.category_id ?? null,
+    categoryName: item.category_name ?? null,
+    categoryPath: item.category_path || [],
     unitId: item.unit_of_measure,
     unitName: item.unit_name,
     price: toNumberOrNull(item.price),

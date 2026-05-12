@@ -19,7 +19,7 @@ from accounting.services import (
 from accounting.models import JournalEntry, JournalItem
 from configuration.models import DocumentType
 from artikli.remaris_connector import RemarisConnector
-from orders.models import WarehouseInput
+from orders.models import WarehouseInput, WarehouseInputItem
 from stock.models import (
     Inventory,
     InventoryItem,
@@ -114,6 +114,14 @@ def _q4(value: Decimal) -> Decimal:
     return value.quantize(FOURPLACES, rounding=ROUND_HALF_UP)
 
 
+def _refresh_internal_stock_rows(*, warehouse_ids: list[int], artikl_ids: list[int]) -> None:
+    wh_ids = sorted({int(wh_id) for wh_id in warehouse_ids if wh_id})
+    art_ids = sorted({int(artikl_id) for artikl_id in artikl_ids if artikl_id})
+    if not wh_ids or not art_ids:
+        return
+    refresh_internal_warehouse_stock(warehouse_ids=wh_ids, artikl_ids=art_ids)
+
+
 @transaction.atomic
 def post_warehouse_input_to_stock(*, warehouse_input: WarehouseInput, warehouse=None) -> StockMove:
     if warehouse_input.stock_move_id:
@@ -180,6 +188,10 @@ def post_warehouse_input_to_stock(*, warehouse_input: WarehouseInput, warehouse=
 
     warehouse_input.stock_move = move
     warehouse_input.save(update_fields=["stock_move"])
+    _refresh_internal_stock_rows(
+        warehouse_ids=[warehouse.rm_id],
+        artikl_ids=[it.artikl.rm_id for it in items if getattr(it, "artikl", None)],
+    )
     return move
 
 
@@ -308,6 +320,10 @@ def post_stock_out(
             posted_by=posted_by,
         )
 
+    _refresh_internal_stock_rows(
+        warehouse_ids=[warehouse.rm_id],
+        artikl_ids=[item.get("artikl").rm_id for item in items if item.get("artikl")],
+    )
     return move
 
 
@@ -401,6 +417,10 @@ def post_stock_out_multi_warehouse(
         move_line.unit_cost = avg_cost
         move_line.save(update_fields=["unit_cost"])
 
+    _refresh_internal_stock_rows(
+        warehouse_ids=[item.get("warehouse").rm_id for item in items if item.get("warehouse")],
+        artikl_ids=[item.get("artikl").rm_id for item in items if item.get("artikl")],
+    )
     return move
 
 
@@ -463,6 +483,10 @@ def post_stock_in(
             qty_remaining=qty,
         )
 
+    _refresh_internal_stock_rows(
+        warehouse_ids=[warehouse.rm_id],
+        artikl_ids=[item.get("artikl").rm_id for item in items if item.get("artikl")],
+    )
     return move
 
 
@@ -557,6 +581,10 @@ def post_stock_transfer(
         out_line.unit_cost = avg_cost
         out_line.save(update_fields=["unit_cost"])
 
+    _refresh_internal_stock_rows(
+        warehouse_ids=[from_warehouse.rm_id, to_warehouse.rm_id],
+        artikl_ids=[item.get("artikl").rm_id for item in items if item.get("artikl")],
+    )
     return move
 
 
@@ -620,6 +648,10 @@ def post_stock_in_from_allocations(
             move_line.unit_cost = _q4(total_cost / total_qty)
             move_line.save(update_fields=["unit_cost"])
 
+    _refresh_internal_stock_rows(
+        warehouse_ids=[warehouse.rm_id],
+        artikl_ids=[line.artikl_id for line in move.lines.all() if line.artikl_id],
+    )
     return reversal
 
 
@@ -1263,16 +1295,16 @@ def clone_inventory_without_counts(
 
     created = 0
     skipped = 0
-    seen_artikl_ids: set[int] = set()
+    seen_artikl_rm_ids: set[int] = set()
 
     for it in source.items.select_related("artikl", "unit").all():
         if not it.artikl_id:
             skipped += 1
             continue
-        if it.artikl_id in seen_artikl_ids:
+        if it.artikl_id in seen_artikl_rm_ids:
             skipped += 1
             continue
-        seen_artikl_ids.add(it.artikl_id)
+        seen_artikl_rm_ids.add(it.artikl_id)
 
         # Use .create() (not bulk_create) so InventoryItem.save() can auto-fill unit if needed.
         InventoryItem.objects.create(
@@ -1285,3 +1317,85 @@ def clone_inventory_without_counts(
         created += 1
 
     return new_inv, created, skipped
+
+
+@transaction.atomic
+def create_inventory_from_warehouse_inputs(
+    *,
+    inputs: list[WarehouseInput],
+    name: str,
+    created_by,
+    date: datetime | None = None,
+    note: str = "",
+) -> tuple[Inventory, int, int]:
+    """
+    Create an Inventory from selected primke (WarehouseInput), copying artikl list
+    (deduped by artikl) and leaving InventoryItem.quantity NULL for counting.
+
+    Returns: (inventory, items_created, items_skipped)
+    """
+    if not inputs:
+        raise ValidationError("Nema odabranih primki.")
+
+    # Ensure all inputs have the same warehouse.
+    warehouse_rm_ids: set[int] = set()
+    for wi in inputs:
+        if not getattr(wi, "warehouse_id", None) or not getattr(wi, "warehouse", None):
+            raise ValidationError(f"Primka {getattr(wi, 'id', '?')} nema skladište.")
+        if wi.warehouse.rm_id is None:
+            raise ValidationError(f"Primka {getattr(wi, 'id', '?')} nema rm_id skladišta.")
+        warehouse_rm_ids.add(int(wi.warehouse.rm_id))
+
+    if len(warehouse_rm_ids) != 1:
+        raise ValidationError("Odabrane primke moraju biti na istom skladištu.")
+
+    # Use the WarehouseId object (FK to_field=rm_id on Inventory).
+    warehouse = inputs[0].warehouse
+
+    inv = Inventory.objects.create(
+        warehouse=warehouse,
+        date=date or timezone.now(),
+        name=(name or "").strip(),
+        note=(note or "").strip(),
+        opens_at=None,
+        closes_at=None,
+        status=Inventory.Status.OPEN,
+        created_by=created_by,
+        counted_by=None,
+    )
+
+    created = 0
+    skipped = 0
+    seen_artikl_rm_ids: set[int] = set()
+
+    # Preload items for all selected inputs.
+    wi_ids = [wi.id for wi in inputs if getattr(wi, "id", None)]
+    item_qs = WarehouseInputItem.objects.filter(warehouse_input_id__in=wi_ids).select_related(
+        "artikl", "unit_of_measure"
+    )
+
+    for it in item_qs:
+        if not getattr(it, "artikl_id", None) or not getattr(it, "artikl", None):
+            skipped += 1
+            continue
+        if getattr(it.artikl, "rm_id", None) is None:
+            raise ValidationError(
+                f"Stavka primke {getattr(it, 'id', '?')} nema artikl.rm_id (ProductId)."
+            )
+        artikl_rm_id = int(it.artikl.rm_id)
+        if artikl_rm_id in seen_artikl_rm_ids:
+            skipped += 1
+            continue
+        seen_artikl_rm_ids.add(artikl_rm_id)
+
+        # Use .create() (not bulk_create) so InventoryItem.save() can auto-fill unit if needed.
+        InventoryItem.objects.create(
+            inventory=inv,
+            artikl_id=artikl_rm_id,
+            unit_id=getattr(it, "unit_of_measure_id", None),
+            quantity=None,
+            note="",
+        )
+        created += 1
+
+    return inv, created, skipped
