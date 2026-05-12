@@ -1,0 +1,54 @@
+services:
+  postgis:
+    profiles:
+      - disabled
+  web:
+    container_name: mozzart-dev
+    env_file:
+      - .env.dev
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+    ports:
+      - "8004:8000"
+    depends_on:
+      - redis
+  celery_worker:
+    container_name: mozzart-dev-celery-worker
+    env_file:
+      - .env.dev
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+    depends_on:
+      - redis
+  celery_beat:
+    container_name: mozzart-dev-celery-beat
+    env_file:
+      - .env.dev
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+    depends_on:
+      - redis
+  frontend:
+    container_name: mozzart-frontend-dev
+    env_file:
+      - .env.dev
+    command: sh -lc "npm install && npm run dev -- -p 3000"
+    ports:
+      - "3002:3000"
+  redis:
+    container_name: mozzart-redis-dev
+    ports:
+      - "6380:6379"
+  caddy:
+    image: caddy:2-alpine
+    container_name: mozzart-caddy-dev
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/certs:/certs:ro
+      - caddy_data:/data
+    depends_on:
+      - web
+      - frontend

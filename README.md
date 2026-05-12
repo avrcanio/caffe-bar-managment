@@ -1,5 +1,26 @@
 # Mozzart
 
+## Dev vs prod reverse proxy
+
+- Dev (WSL/local): Caddy is layered via `docker-compose.dev.yml` (see start commands below).
+- Prod (main server): Nginx outside Docker; Traefik in `docker-compose.yml` routes HTTPS to `web` and `frontend`.
+
+### Start commands
+
+Dev (WSL/local):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+```
+
+Prod (this server / typical deploy):
+
+```bash
+docker compose up -d
+```
+
+See [AGENTS.md](AGENTS.md) for production pull, migrate, and restart steps.
+
 ## Development notes
 
 - Always check running services with `docker compose ps` before doing anything else.
