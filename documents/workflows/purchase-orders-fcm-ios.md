@@ -44,6 +44,14 @@ Prema `purchase_order_id` otvori detalj narudžbe u aplikaciji.
 - U `gcloud` `.env` u `CALLER_TOKENS_JSON` mora postojati ključ **`mozzart`** s Bearer tokenom koji se podudara s `MOZZART_GCLOUD_CALLER_TOKEN` u Mozzart `.env`.
 - `MOZZART_FCM_ENABLED=true` u Mozzart okruženju; Celery worker mora raditi jer se slanje radi asinkrono.
 
+## Ako Android prima push, a iOS ne
+
+1. **Firebase → isti projekt** kao backend (`fcm_barion`): `GoogleService-Info.plist` na iOS mora biti iz tog projekta.
+2. **Cloud Messaging → Apple**: obavezno učitaj **APNs Authentication Key (.p8)** (ili certifikat). Bez toga FCM ne isporučuje na iOS.
+3. **Topic** točno `mozzart_purchase_orders` (ili vrijednost iz `MOZZART_FCM_TOPIC`).
+4. **Fizički uređaj**; u foregroundu implementiraj `UNUserNotificationCenterDelegate` (`userNotificationCenter(_:willPresent:...)`).
+5. Interni `gcloud-api` za poruke s `notification` postavlja APNs (`apns-priority`, `apns-push-type: alert`, `sound: default`) radi pouzdanijeg prikaza na iOS 13+.
+
 ## Test
 
 - Iz kontejnera `mozzart` (s ispravnim tokenom): `curl -X POST http://gcloud-api:8080/fcm/send` s `topic`, `project_alias`, `notification` i `data` (vidi `/opt/stacks/gcloud/README.md`).
