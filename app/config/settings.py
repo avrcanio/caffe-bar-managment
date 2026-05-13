@@ -149,6 +149,8 @@ EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER")
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")
 EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "True").lower() == "true"
 EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "False").lower() == "true"
+# Avoid indefinite hangs when SMTP is unreachable (purchase order send, etc.)
+EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "30"))
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER or "")
 DATA_UPLOAD_MAX_NUMBER_FIELDS = int(os.getenv("DATA_UPLOAD_MAX_NUMBER_FIELDS", "20000"))
 
@@ -223,6 +225,16 @@ BARION_GCLOUD_CALLER_TOKEN = os.getenv("BARION_GCLOUD_CALLER_TOKEN", "")
 BARION_GCLOUD_TIMEOUT = float(os.getenv("BARION_GCLOUD_TIMEOUT", "10"))
 BARION_FCM_PROJECT_ALIAS = os.getenv("BARION_FCM_PROJECT_ALIAS", "fcm_barion")
 BARION_FCM_TOPIC = os.getenv("BARION_FCM_TOPIC", "")
+
+# Mozzart purchase-order FCM (via internal gcloud-api; same Firebase project as Barion if desired)
+MOZZART_FCM_ENABLED = os.getenv("MOZZART_FCM_ENABLED", "False").lower() == "true"
+MOZZART_GCLOUD_API_URL = os.getenv(
+    "MOZZART_GCLOUD_API_URL", os.getenv("BARION_GCLOUD_API_URL", "http://gcloud-api:8080")
+)
+MOZZART_GCLOUD_CALLER_TOKEN = os.getenv("MOZZART_GCLOUD_CALLER_TOKEN", "")
+MOZZART_GCLOUD_TIMEOUT = float(os.getenv("MOZZART_GCLOUD_TIMEOUT", "10"))
+MOZZART_FCM_PROJECT_ALIAS = os.getenv("MOZZART_FCM_PROJECT_ALIAS", "fcm_barion")
+MOZZART_FCM_TOPIC = os.getenv("MOZZART_FCM_TOPIC", "mozzart_purchase_orders")
 
 
 # Static files (CSS, JavaScript, Images)

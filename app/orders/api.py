@@ -1,3 +1,4 @@
+import logging
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.db import transaction
@@ -34,8 +35,11 @@ from .models import (
     SupplierPriceList,
 )
 from .pdf import build_order_pdf
+from .push_tasks import notify_purchase_order_topic
 from stock.models import WarehouseStock, WarehouseId
 from stock.services import get_stock_accounting_config, post_warehouse_input_to_stock
+
+logger = logging.getLogger(__name__)
 
 
 def _serialize_packaging_numeric(value):
@@ -1162,10 +1166,32 @@ class PurchaseOrderSendView(APIView):
             from_email=from_email,
         )
         message.attach(f"narudzba_{order.id}.pdf", pdf_bytes, "application/pdf")
-        message.send()
+        try:
+            message.send()
+        except Exception:
+            logger.exception("purchase_order_email_send_failed order_id=%s", order.id)
+            return Response(
+                {
+                    "detail": (
+                        "Slanje emaila dobavljacu nije uspjelo (SMTP). "
+                        "Provjerite postanski posluzitelj i mrezu; pokusajte ponovno kasnije."
+                    )
+                },
+                status=502,
+            )
         if order.status != PurchaseOrder.STATUS_CONFIRMED:
             order.status = PurchaseOrder.STATUS_SENT
             order.save(update_fields=["status"])
+
+        supplier_name = order.supplier.name
+        order_id = order.id
+        transaction.on_commit(
+            lambda: notify_purchase_order_topic.delay(
+                event="sent",
+                order_id=order_id,
+                supplier_name=supplier_name,
+            )
+        )
 
         return Response({"detail": "Narudzba poslana.", "order_id": order.id})
 
@@ -1220,6 +1246,17 @@ class PurchaseOrderStatusTransitionView(APIView):
             .prefetch_related("items__artikl__detail__base_group")
             .get(pk=order.pk)
         )
+
+        if target_status == PurchaseOrder.STATUS_CONFIRMED:
+            supplier_name = order.supplier.name
+            order_id = order.pk
+            transaction.on_commit(
+                lambda: notify_purchase_order_topic.delay(
+                    event="confirmed",
+                    order_id=order_id,
+                    supplier_name=supplier_name,
+                )
+            )
 
         return Response(
             _serialize_purchase_order_detail(
