@@ -4,6 +4,7 @@ from celery import shared_task
 from django.utils import timezone
 from zoneinfo import ZoneInfo
 
+from sales.pricelist_schedule import process_scheduled_sales_price_lists as run_scheduled_sales_price_lists
 from sales.remaris_importer import import_sales_invoices, load_import_defaults
 
 
@@ -31,3 +32,8 @@ def import_sales_invoices_previous_day() -> dict:
         **defaults,
     )
     return {"created": created, "updated": updated, "skipped": skipped}
+
+
+@shared_task
+def process_scheduled_sales_price_lists() -> dict:
+    return run_scheduled_sales_price_lists()

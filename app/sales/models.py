@@ -523,6 +523,16 @@ class SalesPriceList(models.Model):
         verbose_name="POS",
     )
     note = models.TextField(blank=True, default="", verbose_name="Napomena")
+    remaris_applied_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Remaris primijenjen",
+    )
+    remaris_reverted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name="Remaris vracen",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

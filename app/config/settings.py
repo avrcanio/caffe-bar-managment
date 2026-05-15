@@ -216,6 +216,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "sales.tasks.import_sales_invoices_previous_day",
         "schedule": crontab(hour=6, minute=0),
     },
+    "process-scheduled-sales-pricelists": {
+        "task": "sales.tasks.process_scheduled_sales_price_lists",
+        "schedule": crontab(minute="*"),
+    },
 }
 
 # Barion catalog sync push trigger
