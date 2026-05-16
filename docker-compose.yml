@@ -1,9 +1,4 @@
 services:
-  redis:
-    image: redis:7-alpine
-    container_name: mozzart-redis
-    networks:
-      - hetzner_net
   print_bridge:
     build: ./printbridge
     container_name: mozzart-print-bridge
@@ -57,8 +52,9 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql://postgis:postgis@postgis:5432/mozzart_db
+      CELERY_BROKER_URL: redis://infra-redis:6379/0
+      CELERY_RESULT_BACKEND: redis://infra-redis:6379/0
     depends_on:
-      - redis
       - print_bridge
     labels:
       - "traefik.enable=true"
@@ -86,8 +82,8 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql://postgis:postgis@postgis:5432/mozzart_db
-    depends_on:
-      - redis
+      CELERY_BROKER_URL: redis://infra-redis:6379/0
+      CELERY_RESULT_BACKEND: redis://infra-redis:6379/0
     networks:
       - hetzner_net
   celery_beat:
@@ -104,8 +100,8 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql://postgis:postgis@postgis:5432/mozzart_db
-    depends_on:
-      - redis
+      CELERY_BROKER_URL: redis://infra-redis:6379/0
+      CELERY_RESULT_BACKEND: redis://infra-redis:6379/0
     networks:
       - hetzner_net
   frontend:
