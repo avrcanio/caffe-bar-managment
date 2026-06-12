@@ -6,6 +6,13 @@ from sales.models import SalesPriceItem
 DEFAULT_REMARIS_PRICE_LIST_ID = 10
 DEFAULT_TRANSFER_IDS = [11, 20]
 DEFAULT_ONLY_CHANGED_ITEMS = True
+
+
+def resolve_remaris_price_list_id(price_list) -> int:
+    remaris_id = getattr(price_list, "remaris_price_list_id", None)
+    if remaris_id:
+        return int(remaris_id)
+    return DEFAULT_REMARIS_PRICE_LIST_ID
 DEFAULT_TRANSFER_APP_CONTEXT = {
     "OrganizationId": 2,
     "LocationId": 5,
@@ -208,7 +215,7 @@ def sync_sales_pricelist_to_remaris(
     remaris_price_list_id = (
         remaris_price_list_id
         if remaris_price_list_id is not None
-        else DEFAULT_REMARIS_PRICE_LIST_ID
+        else resolve_remaris_price_list_id(price_list)
     )
 
     connector = RemarisConnector()

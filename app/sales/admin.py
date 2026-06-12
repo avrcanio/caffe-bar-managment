@@ -10,7 +10,7 @@ from django.db.models import CharField, Value
 from django.db.models.functions import Cast, Concat
 from django.urls import reverse
 from django.utils.dateparse import parse_datetime
-from django.utils.html import format_html
+from django.utils.html import format_html, format_html_join
 from stock.models import StockMove, StockMoveLine, WarehouseTransfer, WarehouseTransferItem, WarehouseId
 from django.utils import timezone
 from mptt.admin import TreeRelatedFieldListFilter
@@ -35,7 +35,11 @@ from sales.models import (
 )
 from sales.fiscal import fiscalize_sales_invoice
 from sales.remaris_importer import import_sales_invoices, load_import_defaults
-from sales.remaris_pricelist import sync_sales_pricelist_to_remaris, transfer_sales_prices_to_pos
+from sales.remaris_pricelist import (
+    resolve_remaris_price_list_id,
+    sync_sales_pricelist_to_remaris,
+    transfer_sales_prices_to_pos,
+)
 from sales.services import create_sales_z, get_sales_z_summary, post_sales_items_stock_out, post_sales_z_posting, resolve_waiter_user, build_stock_in_lines_for_items
 from stock.services import post_stock_in
 
@@ -1141,9 +1145,10 @@ def sync_sales_pricelist_to_remaris_action(modeladmin, request, queryset):
         modeladmin.message_user(request, msg, level=level)
 
     try:
+        remaris_price_list_id = resolve_remaris_price_list_id(price_list)
         sent, skipped, errors = sync_sales_pricelist_to_remaris(
             price_list=price_list,
-            remaris_price_list_id=None,
+            remaris_price_list_id=remaris_price_list_id,
             include_inactive=False,
             dry_run=False,
             write_line=_write_line,
@@ -1156,9 +1161,23 @@ def sync_sales_pricelist_to_remaris_action(modeladmin, request, queryset):
         )
         return
 
+    transfer_msg = ""
+    if errors == 0 and price_list.remaris_sync_transfer_pos:
+        try:
+            transfer_sales_prices_to_pos()
+            transfer_msg = " POS transfer OK."
+        except Exception as exc:
+            modeladmin.message_user(
+                request,
+                f"Remaris sync OK, ali POS transfer nije uspio: {exc}",
+                level=messages.WARNING,
+            )
+            return
+
     modeladmin.message_user(
         request,
-        f"Remaris sync: sent={sent} skipped={skipped} errors={errors}",
+        f"Remaris sync (priceListId={remaris_price_list_id}): "
+        f"sent={sent} skipped={skipped} errors={errors}.{transfer_msg}",
         level=messages.SUCCESS if errors == 0 else messages.WARNING,
     )
 
@@ -1187,6 +1206,36 @@ def transfer_sales_prices_to_pos_action(modeladmin, request, queryset):
         request,
         f"Remaris transfer OK: {response}",
         level=messages.SUCCESS,
+    )
+
+
+def _sales_price_items_table(obj: SalesPriceList) -> str:
+    items = (
+        obj.items.select_related("artikl")
+        .order_by("artikl__name")
+    )
+    if not items:
+        return format_html("<p class=\"help\">Nema stavki.</p>")
+
+    rows = format_html_join(
+        "",
+        "<tr><td>{}</td><td>{}</td><td style=\"text-align:right\">{}</td><td>{}</td></tr>",
+        (
+            (
+                item.artikl.code or "—",
+                item.artikl.name,
+                f"{item.unit_price_gross:.2f}".replace(".", ","),
+                "Da" if item.is_active else "Ne",
+            )
+            for item in items
+        ),
+    )
+    return format_html(
+        "<table class=\"adminlist\" style=\"width:100%;max-width:960px\">"
+        "<thead><tr>"
+        "<th>Šifra</th><th>Artikl</th><th style=\"text-align:right\">Cijena (bruto)</th><th>Aktivno</th>"
+        "</tr></thead><tbody>{}</tbody></table>",
+        rows,
     )
 
 
@@ -1226,6 +1275,67 @@ class SalesPriceListAdmin(admin.ModelAdmin):
     search_fields = ("name",)
     inlines = [SalesPriceItemInline]
     actions = [sync_sales_pricelist_to_remaris_action, transfer_sales_prices_to_pos_action]
+
+    def get_fieldsets(self, request, obj=None):
+        main = {
+            "fields": (
+                "name",
+                "is_active",
+                "is_default",
+                "valid_from",
+                "valid_to",
+                "warehouse",
+                "pos",
+                "note",
+            ),
+        }
+        if not obj:
+            return ((None, main),)
+        return (
+            (None, main),
+            (
+                "Cijene",
+                {
+                    "fields": ("prices_table",),
+                    "description": "Pregled stavki (uređivanje ispod u inline tablici).",
+                },
+            ),
+            (
+                "Remaris",
+                {
+                    "fields": (
+                        "remaris_price_list_id",
+                        "remaris_sync_transfer_pos",
+                        "remaris_applied_at",
+                        "remaris_reverted_at",
+                    ),
+                    "classes": ("collapse",),
+                },
+            ),
+            (
+                "Meta",
+                {
+                    "fields": ("created_at", "updated_at"),
+                    "classes": ("collapse",),
+                },
+            ),
+        )
+
+    def get_readonly_fields(self, request, obj=None):
+        readonly = ("created_at", "updated_at")
+        if obj:
+            readonly = (
+                "prices_table",
+                "remaris_applied_at",
+                "remaris_reverted_at",
+                "created_at",
+                "updated_at",
+            )
+        return readonly
+
+    @admin.display(description="Stavke cjenika")
+    def prices_table(self, obj):
+        return _sales_price_items_table(obj)
 
 
 class SalesPriceRuleItemInline(admin.TabularInline):

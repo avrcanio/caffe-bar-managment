@@ -533,6 +533,17 @@ class SalesPriceList(models.Model):
         blank=True,
         verbose_name="Remaris vracen",
     )
+    remaris_price_list_id = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name="Remaris cjenik ID",
+        help_text="Remaris priceListId (npr. 9=Koncert, 10=redovni). Prazno = 10.",
+    )
+    remaris_sync_transfer_pos = models.BooleanField(
+        default=True,
+        verbose_name="Remaris sync: transfer na POS",
+        help_text="Nakon synca cjenika pozovi Transfer na POS (isključiti za Koncert).",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -1,7 +1,10 @@
 from django.core.management.base import BaseCommand, CommandError
 
 from sales.models import SalesPriceList
-from sales.remaris_pricelist import sync_sales_pricelist_to_remaris
+from sales.remaris_pricelist import (
+    resolve_remaris_price_list_id,
+    sync_sales_pricelist_to_remaris,
+)
 
 
 class Command(BaseCommand):
@@ -9,7 +12,12 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--price-list-id", type=int, required=True)
-        parser.add_argument("--remaris-price-list-id", type=int, required=True)
+        parser.add_argument(
+            "--remaris-price-list-id",
+            type=int,
+            required=False,
+            help="Remaris priceListId; default from SalesPriceList.remaris_price_list_id.",
+        )
         parser.add_argument("--include-inactive", action="store_true")
         parser.add_argument("--dry-run", action="store_true")
 
@@ -23,12 +31,21 @@ class Command(BaseCommand):
         if not price_list:
             raise CommandError(f"SalesPriceList id={price_list_id} not found.")
 
+        target_remaris_id = (
+            remaris_price_list_id
+            if remaris_price_list_id is not None
+            else resolve_remaris_price_list_id(price_list)
+        )
+
         sent, skipped, errors = sync_sales_pricelist_to_remaris(
             price_list=price_list,
-            remaris_price_list_id=remaris_price_list_id,
+            remaris_price_list_id=target_remaris_id,
             include_inactive=include_inactive,
             dry_run=dry_run,
             write_line=self.stdout.write,
         )
 
-        self.stdout.write(f"Done. sent={sent} skipped={skipped} errors={errors}")
+        self.stdout.write(
+            f"Done. priceListId={target_remaris_id} sent={sent} "
+            f"skipped={skipped} errors={errors}"
+        )

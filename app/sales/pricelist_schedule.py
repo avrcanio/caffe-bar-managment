@@ -10,7 +10,7 @@ from artikli.remaris_connector import RemarisConnector
 from sales.models import SalesPriceItem, SalesPriceList
 from sales.price_resolution import resolve_active_sales_unit_price
 from sales.remaris_pricelist import (
-    DEFAULT_REMARIS_PRICE_LIST_ID,
+    resolve_remaris_price_list_id,
     resolve_remaris_product_id,
     save_remaris_product_price,
     sync_sales_pricelist_to_remaris,
@@ -24,6 +24,7 @@ def price_lists_due_for_apply(*, at=None):
     moment = at if at is not None else timezone.now()
     return SalesPriceList.objects.filter(
         is_active=True,
+        remaris_sync_transfer_pos=True,
         valid_from__lte=moment,
         remaris_applied_at__isnull=True,
     ).filter(Q(valid_to__isnull=True) | Q(valid_to__gt=moment))
@@ -45,9 +46,14 @@ def apply_price_list_to_remaris(
     remaris_price_list_id: int | None = None,
     write_line=None,
 ) -> dict:
+    target_remaris_id = (
+        remaris_price_list_id
+        if remaris_price_list_id is not None
+        else resolve_remaris_price_list_id(price_list)
+    )
     sent, skipped, errors = sync_sales_pricelist_to_remaris(
         price_list=price_list,
-        remaris_price_list_id=remaris_price_list_id,
+        remaris_price_list_id=target_remaris_id,
         include_inactive=False,
         dry_run=False,
         write_line=write_line,
@@ -62,7 +68,8 @@ def apply_price_list_to_remaris(
             "errors": errors,
         }
 
-    transfer_sales_prices_to_pos()
+    if price_list.remaris_sync_transfer_pos:
+        transfer_sales_prices_to_pos()
     now = timezone.now()
     SalesPriceList.objects.filter(pk=price_list.pk).update(remaris_applied_at=now)
     price_list.remaris_applied_at = now
@@ -88,7 +95,7 @@ def revert_price_list_from_remaris(
     remaris_price_list_id = (
         remaris_price_list_id
         if remaris_price_list_id is not None
-        else DEFAULT_REMARIS_PRICE_LIST_ID
+        else resolve_remaris_price_list_id(price_list)
     )
 
     items = (
