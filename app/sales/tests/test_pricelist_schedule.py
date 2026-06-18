@@ -133,6 +133,7 @@ class ApplyPriceListTests(TestCase):
         mock_transfer.assert_called_once()
         self.price_list.refresh_from_db()
         self.assertIsNotNone(self.price_list.remaris_applied_at)
+        self.assertIsNone(self.price_list.remaris_reverted_at)
 
     def test_apply_does_not_mark_on_errors(self, mock_sync, mock_transfer):
         mock_sync.return_value = (1, 0, 1)
@@ -193,6 +194,81 @@ class RevertPriceListTests(TestCase):
         self.assertEqual(payload["data"]["price"], 5.0)
         self.promo_list.refresh_from_db()
         self.assertIsNotNone(self.promo_list.remaris_reverted_at)
+        self.assertIsNone(self.promo_list.remaris_applied_at)
+
+
+class RecurringPromoScheduleTests(TestCase):
+    def setUp(self):
+        self.now = timezone.now()
+
+    def test_apply_due_when_applied_at_before_current_valid_from(self):
+        due = SalesPriceList.objects.create(
+            name="Recurring promo",
+            is_active=True,
+            valid_from=self.now - timedelta(minutes=5),
+            valid_to=self.now + timedelta(hours=2),
+            remaris_applied_at=self.now - timedelta(days=30),
+            remaris_reverted_at=self.now - timedelta(days=29),
+        )
+
+        ids = list(price_lists_due_for_apply(at=self.now).values_list("id", flat=True))
+        self.assertEqual(ids, [due.id])
+
+    @patch("sales.pricelist_schedule.transfer_sales_prices_to_pos")
+    @patch("sales.pricelist_schedule.sync_sales_pricelist_to_remaris", return_value=(1, 0, 0))
+    def test_revert_clears_applied_at_for_next_cycle(self, mock_sync, mock_transfer):
+        promo = SalesPriceList.objects.create(
+            name="Promo cycle",
+            is_active=True,
+            valid_from=self.now - timedelta(hours=3),
+            valid_to=self.now - timedelta(minutes=1),
+            remaris_applied_at=self.now - timedelta(hours=2),
+        )
+        base = SalesPriceList.objects.create(
+            name="Bazni",
+            is_active=True,
+            valid_from=self.now - timedelta(days=30),
+            remaris_applied_at=self.now - timedelta(days=1),
+        )
+        artikl = Artikl.objects.create(name="Pivo", code="PIV03", rm_id=9003)
+        SalesPriceItem.objects.create(
+            price_list=base,
+            artikl=artikl,
+            unit_price_gross="5.00",
+            is_active=True,
+        )
+        SalesPriceItem.objects.create(
+            price_list=promo,
+            artikl=artikl,
+            unit_price_gross="3.00",
+            is_active=True,
+        )
+
+        with patch("sales.pricelist_schedule.RemarisConnector") as mock_connector_cls:
+            connector = MagicMock()
+            mock_connector_cls.return_value = connector
+            connector.post_json.return_value = {"response": {"status": 0}}
+            result = revert_price_list_from_remaris(promo, at=self.now)
+
+        self.assertTrue(result["ok"])
+        promo.refresh_from_db()
+        self.assertIsNotNone(promo.remaris_reverted_at)
+        self.assertIsNone(promo.remaris_applied_at)
+
+        promo.valid_from = self.now + timedelta(hours=1)
+        promo.valid_to = self.now + timedelta(hours=5)
+        promo.remaris_reverted_at = None
+        promo.save(update_fields=["valid_from", "valid_to", "remaris_reverted_at"])
+
+        future = self.now + timedelta(minutes=30)
+        self.assertNotIn(
+            promo.id,
+            price_lists_due_for_apply(at=future).values_list("id", flat=True),
+        )
+
+        during_next = promo.valid_from + timedelta(minutes=1)
+        ids = list(price_lists_due_for_apply(at=during_next).values_list("id", flat=True))
+        self.assertEqual(ids, [promo.id])
 
 
 @patch("sales.pricelist_schedule.revert_price_list_from_remaris")

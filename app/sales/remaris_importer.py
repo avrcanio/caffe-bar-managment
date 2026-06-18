@@ -14,10 +14,10 @@ from django.utils import timezone
 
 from artikli.remaris_connector import RemarisConnector
 from sales.models import SalesInvoice, SalesInvoiceItem
+from sales.product_artikl_resolution import build_artikl_lookup, resolve_artikl_id
 from accounting.models import Ledger
 from stock.models import WarehouseId
 from pos.models import Pos
-from artikli.models import Artikl
 
 
 @dataclass
@@ -329,6 +329,7 @@ def import_sales_invoices(
     skipped = 0
 
     tz = timezone.get_current_timezone()
+    artikl_lookup = build_artikl_lookup()
 
     with transaction.atomic():
         for invoice in invoices:
@@ -375,16 +376,14 @@ def import_sales_invoices(
             )
 
             obj.items.all().delete()
-            product_names = {it.product_name for it in invoice.items if it.product_name}
-            artikl_map = {
-                a.name: a.id
-                for a in Artikl.objects.filter(name__in=product_names)
-            }
             SalesInvoiceItem.objects.bulk_create(
                 [
                     SalesInvoiceItem(
                         invoice=obj,
-                        artikl_id=artikl_map.get(item.product_name),
+                        artikl_id=resolve_artikl_id(
+                            item.product_name,
+                            lookup=artikl_lookup,
+                        ),
                         product_name=item.product_name,
                         quantity=item.quantity,
                         amount=item.amount,

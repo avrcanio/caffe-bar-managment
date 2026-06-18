@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 
 from artikli.remaris_connector import RemarisConnector
@@ -26,7 +26,8 @@ def price_lists_due_for_apply(*, at=None):
         is_active=True,
         remaris_sync_transfer_pos=True,
         valid_from__lte=moment,
-        remaris_applied_at__isnull=True,
+    ).filter(
+        Q(remaris_applied_at__isnull=True) | Q(remaris_applied_at__lt=F("valid_from"))
     ).filter(Q(valid_to__isnull=True) | Q(valid_to__gt=moment))
 
 
@@ -71,8 +72,12 @@ def apply_price_list_to_remaris(
     if price_list.remaris_sync_transfer_pos:
         transfer_sales_prices_to_pos()
     now = timezone.now()
-    SalesPriceList.objects.filter(pk=price_list.pk).update(remaris_applied_at=now)
+    SalesPriceList.objects.filter(pk=price_list.pk).update(
+        remaris_applied_at=now,
+        remaris_reverted_at=None,
+    )
     price_list.remaris_applied_at = now
+    price_list.remaris_reverted_at = None
 
     return {
         "price_list_id": price_list.id,
@@ -170,8 +175,12 @@ def revert_price_list_from_remaris(
 
     transfer_sales_prices_to_pos()
     now = timezone.now()
-    SalesPriceList.objects.filter(pk=price_list.pk).update(remaris_reverted_at=now)
+    SalesPriceList.objects.filter(pk=price_list.pk).update(
+        remaris_reverted_at=now,
+        remaris_applied_at=None,
+    )
     price_list.remaris_reverted_at = now
+    price_list.remaris_applied_at = None
 
     return {
         "price_list_id": price_list.id,
