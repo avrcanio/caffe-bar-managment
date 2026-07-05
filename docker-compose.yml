@@ -17,27 +17,6 @@ services:
     restart: unless-stopped
     networks:
       - hetzner_net
-  tailscale-print-bridge:
-    image: tailscale/tailscale:latest
-    container_name: tailscale-print-bridge
-    environment:
-      TS_AUTHKEY: ${TS_AUTHKEY_PRINT_BRIDGE}
-      TS_STATE_DIR: /var/lib/tailscale
-      TS_USERSPACE: "false"
-      TS_EXTRA_ARGS: >-
-        --login-server=https://hs-control.qubitsecured.online
-        --hostname=tailscale-print-bridge
-    volumes:
-      - tailscale_print_bridge_state:/var/lib/tailscale
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    depends_on:
-      - print_bridge
-    restart: unless-stopped
-    network_mode: service:print_bridge
   web:
     build: .
     container_name: mozzart
@@ -56,6 +35,7 @@ services:
       CELERY_RESULT_BACKEND: redis://infra-redis:6379/0
     depends_on:
       - print_bridge
+    restart: unless-stopped
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
@@ -84,6 +64,7 @@ services:
       DATABASE_URL: postgresql://postgis:postgis@postgis:5432/mozzart_db
       CELERY_BROKER_URL: redis://infra-redis:6379/0
       CELERY_RESULT_BACKEND: redis://infra-redis:6379/0
+    restart: unless-stopped
     networks:
       - hetzner_net
   celery_beat:
@@ -102,6 +83,7 @@ services:
       DATABASE_URL: postgresql://postgis:postgis@postgis:5432/mozzart_db
       CELERY_BROKER_URL: redis://infra-redis:6379/0
       CELERY_RESULT_BACKEND: redis://infra-redis:6379/0
+    restart: unless-stopped
     networks:
       - hetzner_net
   frontend:
@@ -113,6 +95,7 @@ services:
       - ./frontend:/app
     depends_on:
       - web
+    restart: unless-stopped
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
@@ -157,5 +140,4 @@ networks:
     external: true
 
 volumes:
-  tailscale_print_bridge_state:
   webterm_home:
