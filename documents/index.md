@@ -38,6 +38,7 @@ Glavni ulaz u dokumentaciju.
 ## Tijekovi rada
 - [Narudžbe dobavljaču](workflows/purchase-orders.md)
 - [Nabavni tijek rada](workflows/purchase-workflow.md)
+- [Checklist: otpremnica → artikli → nabavni cjenik](workflows/supplier-otpremnica-checklist.md)
 - [Prodajni tijek rada](workflows/sales-workflow.md)
 - [Plaćanja dobavljača](workflows/supplier-payments.md)
 - [Operativni koraci](workflows/operations-step-by-step.md)
